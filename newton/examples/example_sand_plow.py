@@ -140,7 +140,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         # --- sand bed: much longer pile in X direction (plow travel direction) ---
-        soil_w = 2.0  
+        soil_w = 4.0  
         # FIXED: start sand bed slightly above ground plane to prevent glitching
         ground_clearance = voxel_size * 0.1  # half voxel size clearance
         lo = np.array([-soil_w/2, ground_clearance, -0.30], dtype=np.float32)
