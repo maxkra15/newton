@@ -1,22 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-# Dynamic Sand Plow — Mesh-to-Particle Conversion with MPM
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
-Enhanced sand plow simulation with dynamic mesh-to-particle conversion.
+Dynamic Sand Plow Simulation with Mesh-to-Particle Conversion
 
-This example demonstrates:
-1. Sand starting as static mesh geometry
-2. Dynamic conversion to MPM particles when plow approaches (1m diameter sphere)
-3. Realistic sand simulation using Material Point Method
-4. Conversion back to mesh when plow moves away
-5. Mesh reconstruction reflecting deformed sand state
+This example demonstrates dynamic conversion between mesh and particle representations
+for sand excavation simulation. Sand starts as mesh geometry and converts to MPM
+particles when disturbed by the plow, then converts back to mesh when settled.
 
-The conversion sphere follows the plow and triggers mesh-particle transitions
-for realistic excavation simulation while maintaining performance.
+Features:
+- Dynamic mesh-to-particle conversion based on proximity to plow
+- Material Point Method (MPM) physics for realistic sand behavior
+- Particle-to-mesh reconstruction for performance optimization
+- Real-time visualization of conversion process
+- Smooth particle generation with jitter for realistic appearance
 """
 
 import sys
 import math
-import argparse
 import numpy as np
 import warp as wp
 from typing import Tuple
@@ -24,6 +37,7 @@ from typing import Tuple
 wp.config.enable_backward = False
 
 import newton
+import newton.examples
 from newton.solvers import SolverImplicitMPM
 
 # Import our custom modules
@@ -116,136 +130,205 @@ def merge_meshes(parts):
     T = np.vstack(tris).astype(np.int32)
     return V, T
 
-class DynamicSandPlowExample:
-    def __init__(
-        self,
-        stage_path="example_dynamic_sand_plow.usd",
-        voxel_size=0.05,
-        particles_per_cell=2.0,
-        tolerance=1e-5,
-        headless=False,
-        sand_friction=0.55,
-        dynamic_grid=True,
-        plow_pitch_deg=-18.0,
-        plow_speed=0.5,
-        conversion_radius=0.5,  # 1m diameter sphere
-        max_particles=50000,
-    ):
+class Example:
+    def __init__(self, viewer, options):
+        # Setup simulation parameters first (following granular example pattern)
+        self.fps = options.fps
+        self.frame_dt = 1.0 / self.fps
+
+        # Group related attributes by prefix
+        self.sim_time = 0.0
+        self.sim_substeps = options.substeps
+        self.sim_dt = self.frame_dt / self.sim_substeps
+
+        # Save a reference to the viewer
+        self.viewer = viewer
         self.device = wp.get_device()
-        
+
         # Initialize dynamic sand management system
         sand_bounds = (
             np.array([-2.0, 0.0, -0.3], dtype=np.float32),  # min bounds
             np.array([2.0, 0.2, 2.0], dtype=np.float32)     # max bounds
         )
-        
+
         self.sand_manager = DynamicSandManager(
             sand_bounds=sand_bounds,
             region_size=0.5,
-            max_particles=max_particles,
-            conversion_radius=conversion_radius
+            max_particles=options.max_particles,
+            conversion_radius=options.conversion_radius
         )
-        
+
         # Initialize conversion components
         self.intersector = MeshSphereIntersector(device=self.device)
         self.converter = MeshParticleConverter(
-            particle_properties=ParticleProperties(density=2000.0, friction=sand_friction),
+            particle_properties=ParticleProperties(density=2000.0, friction=options.friction_coeff),
             device=self.device
         )
         self.reconstructor = ParticleMeshReconstructor(device=self.device)
-        
+
         # Build Newton model
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         builder.add_ground_plane()
-        builder.gravity = wp.vec3(0.0, -9.81, 0.0)
+        builder.gravity = wp.vec3(0.0, options.gravity, 0.0)
         
-        # Timing
-        self.sim_time = 0.0
-        self.frame_dt = 1.0/60.0
-        self.sim_substeps = 5
-        self.sim_dt = self.frame_dt / self.sim_substeps
-        
-        # Pre-allocate maximum particles (all initially dormant)
-        self._spawn_particle_pool(builder, max_particles, voxel_size)
-        
+        # Pre-allocate maximum particles (all initially dormant) using improved method
+        Example.emit_particles(builder, options)
+
         # Plow setup (similar to original example)
-        self.conversion_radius = conversion_radius
-        self.plow_speed = float(plow_speed)
+        self.conversion_radius = options.conversion_radius
+        self.plow_speed = options.plow_speed
         self.plow_finished = False
-        
+
         # Motion bounds
         self.x0 = sand_bounds[0][0]  # start position
         self.x1 = sand_bounds[1][0]  # end position
         self.plow_y = 0.0
         self.plow_z = 1.0
-        
+
         # Create plow geometry
-        self._create_plow_geometry(builder, plow_pitch_deg)
+        self._create_plow_geometry(builder, options.plow_pitch_deg)
+
+        # Create simple sand box geometry (instead of complex terrain)
+        self._create_sand_box_geometry(builder, sand_bounds)
         
-        # MPM solver setup
-        opt = SolverImplicitMPM.Options()
-        opt.voxel_size = float(voxel_size)
-        opt.max_fraction = 1.0
-        opt.tolerance = float(tolerance)
-        opt.unilateral = True
-        opt.max_iterations = 250
-        opt.gauss_seidel = True
-        opt.dynamic_grid = bool(dynamic_grid)
-        opt.yield_stresses = (0.0, -1.0e8, 1.0e8)
-        
-        if not dynamic_grid:
-            opt.grid_padding = 5
-        
+        # MPM solver setup using options pattern
+        options.grid_padding = 0 if options.dynamic_grid else 5
+        options.yield_stresses = wp.vec3(
+            options.yield_stress,
+            -options.stretching_yield_stress,
+            options.compression_yield_stress,
+        )
+
         # Finalize model
         self.model = builder.finalize()
-        self.model.particle_mu = float(sand_friction)
-        
-        self.mpm = SolverImplicitMPM(self.model, opt)
-        self.mpm.setup_collider(self.model, [self.plow_mesh])
-        
-        # States
+        self.model.particle_mu = options.friction_coeff
+
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
-        self.mpm.enrich_state(self.state_0)
-        self.mpm.enrich_state(self.state_1)
-        
-        # Renderer setup following Newton examples pattern
-        self.renderer = None
-        if not headless:
-            if stage_path and stage_path.endswith('.usd'):
-                # Use ViewerUSD for USD export
-                self.renderer = newton.viewer.ViewerUSD(stage_path, fps=60)
-                self.renderer.set_model(self.model)
-                print(f"Using ViewerUSD renderer, will save to: {stage_path}")
-            else:
-                # Use RendererOpenGL for interactive viewing
-                self.renderer = newton.viewer.RendererOpenGL(self.model, stage_path or "Dynamic Sand Plow")
-                print("Using RendererOpenGL for interactive viewing")
 
-            # Enable particle visualization
-            if hasattr(self.renderer, 'show_particles'):
-                self.renderer.show_particles = True
+        self.solver = SolverImplicitMPM(self.model, options)
+        self.solver.setup_collider(self.model, colliders=[self.plow_mesh])
+
+        self.solver.enrich_state(self.state_0)
+        self.solver.enrich_state(self.state_1)
         
+        self.viewer.set_model(self.model)
+        self.viewer.show_particles = True
+
         # Initialize plow position
         self._update_plow_position(self.x0, self.plow_z, self.frame_dt)
 
-        # Initialize sand regions with proper mesh geometry
+        # Initialize sand terrain as simple box mesh
         self._initialize_sand_terrain()
-        
+
         # Track conversion state
         self.last_conversion_check = 0.0
         self.conversion_check_interval = 0.1  # Check every 0.1 seconds
 
-    def _initialize_sand_terrain(self):
-        """Initialize sand regions with proper terrain mesh"""
-        print("Initializing sand terrain...")
+    @staticmethod
+    def emit_particles(builder, options):
+        """
+        Emit particles using improved generation method from granular example.
+        Creates a pre-allocated pool of dormant particles with smooth distribution.
+        """
+        # Create particle pool far away from simulation (dormant state)
+        dormant_position = wp.vec3(10000.0, 10000.0, 10000.0)
 
-        # Create a heightfield terrain for each region
+        # Use options values for particle generation
+        voxel_size = options.voxel_size
+        max_particles = options.max_particles
+        particles_per_cell = options.particles_per_cell
+
+        # Calculate particle spacing based on voxel size and particles per cell
+        radius = voxel_size / (2.0 * particles_per_cell**(1.0/3.0))
+        spacing = 2.0 * radius
+
+        # Create regular grid of particles
+        particles_per_dim = int(max_particles**(1.0/3.0)) + 1
+
+        points = []
+        for i in range(particles_per_dim):
+            for j in range(particles_per_dim):
+                for k in range(particles_per_dim):
+                    if len(points) >= max_particles:
+                        break
+
+                    x = dormant_position[0] + i * spacing
+                    y = dormant_position[1] + j * spacing
+                    z = dormant_position[2] + k * spacing
+
+                    points.append([x, y, z])
+
+                if len(points) >= max_particles:
+                    break
+            if len(points) >= max_particles:
+                break
+
+        # Convert to numpy array and add jitter for smoother appearance
+        # This is the key improvement from the granular example
+        points = np.array(points[:max_particles], dtype=np.float32)
+
+        # Add random jitter to particle positions (from granular example)
+        rng = np.random.default_rng(42)  # Fixed seed for reproducibility
+        points += 2.0 * radius * (rng.random(points.shape) - 0.5)
+
+        # Add particles to builder
+        for point in points:
+            builder.add_particle(
+                pos=wp.vec3(point[0], point[1], point[2]),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                mass=1.0
+            )
+
+    def _create_sand_box_geometry(self, builder, sand_bounds):
+        """Create simple rectangular sand box geometry instead of complex terrain"""
+        min_bounds, max_bounds = sand_bounds
+
+        # Create a simple box mesh for the sand region
+        # This will be converted to particles when the plow approaches
+        vertices = np.array([
+            # Bottom face
+            [min_bounds[0], min_bounds[1], min_bounds[2]],
+            [max_bounds[0], min_bounds[1], min_bounds[2]],
+            [max_bounds[0], min_bounds[1], max_bounds[2]],
+            [min_bounds[0], min_bounds[1], max_bounds[2]],
+            # Top face
+            [min_bounds[0], max_bounds[1], min_bounds[2]],
+            [max_bounds[0], max_bounds[1], min_bounds[2]],
+            [max_bounds[0], max_bounds[1], max_bounds[2]],
+            [min_bounds[0], max_bounds[1], max_bounds[2]],
+        ], dtype=np.float32)
+
+        # Box indices (12 triangles)
+        indices = np.array([
+            # Bottom face
+            0, 1, 2, 0, 2, 3,
+            # Top face
+            4, 6, 5, 4, 7, 6,
+            # Front face
+            0, 4, 5, 0, 5, 1,
+            # Back face
+            2, 6, 7, 2, 7, 3,
+            # Left face
+            0, 3, 7, 0, 7, 4,
+            # Right face
+            1, 5, 6, 1, 6, 2,
+        ], dtype=np.int32)
+
+        # Store the sand box mesh for visualization
+        self.sand_box_vertices = vertices
+        self.sand_box_indices = indices
+
+    def _initialize_sand_terrain(self):
+        """Initialize sand regions as simple box meshes"""
+        print("Initializing sand terrain as simple boxes...")
+
+        # Create simple box mesh for each region instead of complex terrain
         for x_regions in self.sand_manager.regions:
             for y_regions in x_regions:
                 for region in y_regions:
-                    # Generate terrain mesh for this region
-                    vertices, indices = self._create_region_terrain(
+                    # Generate simple box mesh for this region
+                    vertices, indices = self._create_simple_box_mesh(
                         region.bounds_min, region.bounds_max
                     )
 
@@ -253,7 +336,41 @@ class DynamicSandPlowExample:
                     region.mesh_indices = indices
                     region.state = SandState.MESH
 
-        print(f"Initialized {len(self.sand_manager.regions) * len(self.sand_manager.regions[0]) * len(self.sand_manager.regions[0][0])} sand regions")
+        print(f"Initialized {len(self.sand_manager.regions) * len(self.sand_manager.regions[0]) * len(self.sand_manager.regions[0][0])} sand regions as simple boxes")
+
+    def _create_simple_box_mesh(self, min_bounds: np.ndarray, max_bounds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create simple box mesh for a sand region"""
+        # Create a simple box mesh for the sand region
+        vertices = np.array([
+            # Bottom face
+            [min_bounds[0], min_bounds[1], min_bounds[2]],
+            [max_bounds[0], min_bounds[1], min_bounds[2]],
+            [max_bounds[0], min_bounds[1], max_bounds[2]],
+            [min_bounds[0], min_bounds[1], max_bounds[2]],
+            # Top face
+            [min_bounds[0], max_bounds[1], min_bounds[2]],
+            [max_bounds[0], max_bounds[1], min_bounds[2]],
+            [max_bounds[0], max_bounds[1], max_bounds[2]],
+            [min_bounds[0], max_bounds[1], max_bounds[2]],
+        ], dtype=np.float32)
+
+        # Box indices (12 triangles)
+        indices = np.array([
+            # Bottom face
+            0, 1, 2, 0, 2, 3,
+            # Top face
+            4, 6, 5, 4, 7, 6,
+            # Front face
+            0, 4, 5, 0, 5, 1,
+            # Back face
+            2, 6, 7, 2, 7, 3,
+            # Left face
+            0, 3, 7, 0, 7, 4,
+            # Right face
+            1, 5, 6, 1, 6, 2,
+        ], dtype=np.int32)
+
+        return vertices, indices
 
     def _create_region_terrain(self, min_bounds: np.ndarray, max_bounds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Create terrain mesh for a sand region"""
@@ -523,36 +640,23 @@ class DynamicSandPlowExample:
         # Run MPM simulation
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self.mpm.step(self.state_0, self.state_1, contacts=None, control=None, dt=self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, contacts=None, control=None, dt=self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
         
         self.sim_time += self.frame_dt
     
     def render(self):
         """Render the simulation"""
-        if self.renderer is None:
-            return
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
 
-        self.renderer.begin_frame(self.sim_time)
+        # Visualize sand regions
+        self._render_sand_regions()
 
-        # Handle different renderer types
-        if hasattr(self.renderer, 'log_state'):
-            # ViewerUSD interface
-            self.renderer.log_state(self.state_0)
-        else:
-            # RendererOpenGL interface
-            self.renderer.render(self.state_0)
-
-        # Visualize sand regions (only for RendererOpenGL)
-        if hasattr(self.renderer, 'log_mesh'):
-            self._render_sand_regions()
-
-        self.renderer.end_frame()
+        self.viewer.end_frame()
 
     def _render_sand_regions(self):
         """Render sand regions as meshes for visualization"""
-        if self.renderer is None:
-            return
 
         # Create a combined sand terrain mesh for better visualization
         all_vertices = []
@@ -562,23 +666,44 @@ class DynamicSandPlowExample:
         for x_regions in self.sand_manager.regions:
             for y_regions in x_regions:
                 for region in y_regions:
-                    if region.mesh_vertices is not None and len(region.mesh_vertices) > 0:
-                        # Only show mesh regions, hide particle regions
-                        if region.state == SandState.MESH:
+                    # Only include regions that are in MESH state and have valid mesh data
+                    if (region.state == SandState.MESH and
+                        region.mesh_vertices is not None and
+                        region.mesh_indices is not None and
+                        len(region.mesh_vertices) > 0 and
+                        len(region.mesh_indices) > 0):
+
+                        # Validate mesh data before adding
+                        vertices = region.mesh_vertices
+                        indices = region.mesh_indices
+
+                        # Check if indices are valid for this mesh
+                        if np.max(indices) < len(vertices):
                             # Add vertices
-                            all_vertices.extend(region.mesh_vertices.tolist())
+                            all_vertices.extend(vertices.tolist())
 
                             # Add indices with offset
-                            region_indices = region.mesh_indices + vertex_offset
+                            region_indices = indices + vertex_offset
                             all_indices.extend(region_indices.tolist())
 
-                            vertex_offset += len(region.mesh_vertices)
+                            vertex_offset += len(vertices)
 
         # Render combined sand terrain
         if len(all_vertices) > 0 and len(all_indices) > 0:
             try:
                 vertices_np = np.array(all_vertices, dtype=np.float32)
                 indices_np = np.array(all_indices, dtype=np.int32)
+
+                # Validate mesh consistency
+                max_vertex_index = len(vertices_np) - 1
+                if len(indices_np) > 0 and np.max(indices_np) > max_vertex_index:
+                    print(f"Warning: Mesh indices out of range. Max index: {np.max(indices_np)}, Max vertex: {max_vertex_index}")
+                    return
+
+                # Ensure indices are valid triangles
+                if len(indices_np) % 3 != 0:
+                    print(f"Warning: Invalid triangle count. Indices: {len(indices_np)}")
+                    return
 
                 # Generate normals for better lighting
                 normals_np = self._compute_vertex_normals(vertices_np, indices_np)
@@ -587,7 +712,7 @@ class DynamicSandPlowExample:
                 indices_wp = wp.array(indices_np.flatten(), dtype=wp.int32, device=self.device)
                 normals_wp = wp.array(normals_np, dtype=wp.vec3, device=self.device)
 
-                self.renderer.log_mesh(
+                self.viewer.log_mesh(
                     "/sand/terrain",
                     vertices_wp,
                     indices_wp,
@@ -606,8 +731,6 @@ class DynamicSandPlowExample:
 
     def _render_conversion_zone(self):
         """Render the conversion zone as a wireframe sphere"""
-        if self.renderer is None:
-            return
 
         try:
             # Create a simple sphere mesh for the conversion zone
@@ -621,7 +744,7 @@ class DynamicSandPlowExample:
                 vertices_wp = wp.array(vertices, dtype=wp.vec3, device=self.device)
                 indices_wp = wp.array(indices.flatten(), dtype=wp.int32, device=self.device)
 
-                self.renderer.log_mesh(
+                self.viewer.log_mesh(
                     "/conversion_zone/sphere",
                     vertices_wp,
                     indices_wp,
@@ -670,8 +793,6 @@ class DynamicSandPlowExample:
 
     def _render_ground_plane(self):
         """Render a ground plane for visual reference"""
-        if self.renderer is None:
-            return
 
         try:
             # Create a simple ground plane
@@ -688,7 +809,7 @@ class DynamicSandPlowExample:
             vertices_wp = wp.array(vertices, dtype=wp.vec3, device=self.device)
             indices_wp = wp.array(indices, dtype=wp.int32, device=self.device)
 
-            self.renderer.log_mesh(
+            self.viewer.log_mesh(
                 "/ground/plane",
                 vertices_wp,
                 indices_wp,
@@ -701,97 +822,82 @@ class DynamicSandPlowExample:
 
     def _compute_vertex_normals(self, vertices: np.ndarray, indices: np.ndarray) -> np.ndarray:
         """Compute vertex normals for mesh lighting"""
+        if len(vertices) == 0:
+            return np.array([], dtype=np.float32).reshape(0, 3)
+
         normals = np.zeros_like(vertices)
 
         # Compute face normals and accumulate to vertices
-        triangles = indices.reshape(-1, 3)
-        for tri in triangles:
-            v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
+        if len(indices) >= 3:
+            triangles = indices.reshape(-1, 3)
+            for tri in triangles:
+                # Validate triangle indices
+                if (tri[0] < len(vertices) and tri[1] < len(vertices) and tri[2] < len(vertices) and
+                    tri[0] >= 0 and tri[1] >= 0 and tri[2] >= 0):
 
-            # Compute face normal
-            edge1 = v1 - v0
-            edge2 = v2 - v0
-            face_normal = np.cross(edge1, edge2)
+                    v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
 
-            # Normalize
-            norm = np.linalg.norm(face_normal)
-            if norm > 0:
-                face_normal /= norm
+                    # Compute face normal
+                    edge1 = v1 - v0
+                    edge2 = v2 - v0
+                    face_normal = np.cross(edge1, edge2)
 
-            # Accumulate to vertices
-            normals[tri[0]] += face_normal
-            normals[tri[1]] += face_normal
-            normals[tri[2]] += face_normal
+                    # Normalize
+                    norm = np.linalg.norm(face_normal)
+                    if norm > 1e-8:  # Avoid division by very small numbers
+                        face_normal /= norm
+
+                        # Accumulate to vertices
+                        normals[tri[0]] += face_normal
+                        normals[tri[1]] += face_normal
+                        normals[tri[2]] += face_normal
 
         # Normalize vertex normals
         for i in range(len(normals)):
             norm = np.linalg.norm(normals[i])
-            if norm > 0:
+            if norm > 1e-8:
                 normals[i] /= norm
             else:
                 normals[i] = np.array([0, 1, 0])  # Default up normal
 
         return normals.astype(np.float32)
 
-    def save(self):
-        """Save the USD file if using USD renderer"""
-        if self.renderer is not None:
-            from newton.viewer import ViewerUSD
-            if isinstance(self.renderer, ViewerUSD):
-                # ViewerUSD uses close() to save the file
-                self.renderer.close()
-                print("USD file saved successfully!")
-            elif hasattr(self.renderer, 'save'):
-                # RendererOpenGL or other renderers with save() method
-                self.renderer.save()
-                print("File saved successfully!")
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--stage-path", type=lambda x: None if x == "None" else str(x),
-                        default="example_dynamic_sand_plow.usd")
-    parser.add_argument("--num-frames", type=int, default=1200)
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
-    parser.add_argument("--particles-per-cell", "-ppc", type=float, default=3.0)
-    parser.add_argument("--sand-friction", "-mu", type=float, default=0.55)
-    parser.add_argument("--tolerance", "-tol", type=float, default=1e-5)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--dynamic-grid", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--plow-pitch-deg", type=float, default=-18.0)
-    parser.add_argument("--plow-speed", type=float, default=0.5)
-    parser.add_argument("--conversion-radius", type=float, default=0.5)
-    parser.add_argument("--max-particles", type=int, default=50000)
-    args = parser.parse_known_args()[0]
-    
-    if wp.get_device(args.device).is_cpu:
-        print("Error: This example requires a GPU.")
-        sys.exit(1)
-    
-    with wp.ScopedDevice(args.device):
-        ex = DynamicSandPlowExample(
-            stage_path=args.stage_path,
-            voxel_size=args.voxel_size,
-            tolerance=args.tolerance,
-            headless=args.headless,
-            sand_friction=args.sand_friction,
-            dynamic_grid=args.dynamic_grid,
-            plow_pitch_deg=args.plow_pitch_deg,
-            plow_speed=args.plow_speed,
-            conversion_radius=args.conversion_radius,
-            max_particles=args.max_particles,
-        )
-        
-        for frame in range(args.num_frames):
-            ex.step()
-            ex.render()
-            
-            if frame % 60 == 0:  # Print status every second
-                active_particles = len(ex.sand_manager.active_particles)
-                print(f"Frame {frame}: {active_particles} active particles")
-        
-        # Save USD file if using USD renderer
-        ex.save()
+    import argparse
 
-        print("Dynamic sand plow simulation completed!")
+    # Create argument parser following Newton examples pattern
+    parser = newton.examples.create_parser()
+
+    # Add MPM solver arguments (from granular example)
+    parser.add_argument("--fps", type=float, default=60.0)
+    parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--max-fraction", type=float, default=1.0)
+    parser.add_argument("--compliance", type=float, default=0.0)
+    parser.add_argument("--poisson-ratio", "-nu", type=float, default=0.3)
+    parser.add_argument("--friction-coeff", "-mu", type=float, default=0.55)
+    parser.add_argument("--yield-stress", "-ys", type=float, default=0.0)
+    parser.add_argument("--compression-yield-stress", "-cys", type=float, default=1.0e8)
+    parser.add_argument("--stretching-yield-stress", "-sys", type=float, default=1.0e8)
+    parser.add_argument("--unilateral", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dynamic-grid", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gauss-seidel", "-gs", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-iterations", "-it", type=int, default=250)
+    parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-5)
+    parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
+    parser.add_argument("--gravity", type=float, default=-9.81)
+    parser.add_argument("--particles-per-cell", type=float, default=3.0)
+
+    # Add dynamic sand plow specific arguments
+    parser.add_argument("--plow-speed", type=float, default=0.5, help="Speed of the plow movement")
+    parser.add_argument("--conversion-radius", type=float, default=0.5, help="Radius of conversion zone")
+    parser.add_argument("--max-particles", type=int, default=50000, help="Maximum number of particles")
+    parser.add_argument("--plow-pitch-deg", type=float, default=-18.0, help="Plow pitch angle in degrees")
+
+    # Parse arguments and initialize viewer
+    viewer, args = newton.examples.init(parser)
+
+    # Create example and run
+    example = Example(viewer, args)
+
+    newton.examples.run(example)
