@@ -14,19 +14,17 @@ Features:
 - Realistic sand density and physics parameters
 - Simple, clean simulation setup focused on MPM particle interaction
 - Ground plane for particle support
+- Modern ViewerGL implementation for better performance
 
 Example usage:
-uv run --extra cu12 newton/examples/example_shovel_pushing_sand.py
+uv run --extra cu12 newton/examples/example_mpm_pushing_soil.py
 """
 
-import sys
-import argparse
 import numpy as np
 import warp as wp
 
-wp.config.enable_backward = False
-
 import newton
+import newton.examples
 from newton.solvers import SolverImplicitMPM
 
 
@@ -63,35 +61,7 @@ def _update_body_transform(body_q: wp.array(dtype=wp.transform), body_id: int, n
         body_q[body_id] = new_transform
 
 
-def _spawn_particles(builder: newton.ModelBuilder, res, bounds_lo, bounds_hi, packing_fraction):
-    """Spawn particles in a grid pattern with jitter, similar to AnyMal example."""
-    Nx = res[0]
-    Ny = res[1] 
-    Nz = res[2]
 
-    px = np.linspace(bounds_lo[0], bounds_hi[0], Nx + 1)
-    py = np.linspace(bounds_lo[1], bounds_hi[1], Ny + 1)
-    pz = np.linspace(bounds_lo[2], bounds_hi[2], Nz + 1)
-
-    points = np.stack(np.meshgrid(px, py, pz)).reshape(3, -1).T
-
-    cell_size = (bounds_hi - bounds_lo) / res
-    cell_volume = np.prod(cell_size)
-
-    radius = np.max(cell_size) * 0.5
-    volume = np.prod(cell_volume) * packing_fraction
-
-    rng = np.random.default_rng()
-    points += 2.0 * radius * (rng.random(points.shape) - 0.5)
-    vel = np.zeros_like(points)
-
-    builder.particle_q = points
-    builder.particle_qd = vel
-    builder.particle_mass = np.full(points.shape[0], volume)
-    builder.particle_radius = np.full(points.shape[0], radius)
-    builder.particle_flags = np.zeros(points.shape[0], dtype=int)
-
-    print("Particle count: ", points.shape[0])
 
 
 def _make_shovel_mesh(width: float, height: float, thickness: float, center_xyz: np.ndarray) -> wp.Mesh:
@@ -148,36 +118,30 @@ def _make_shovel_mesh(width: float, height: float, thickness: float, center_xyz:
 
 
 class Example:
-    def __init__(
-        self,
-        stage_path="example_shovel_pushing_sand.usd",
-        voxel_size=0.05,
-        particles_per_cell=3,
-        tolerance=1.0e-5,
-        headless=False,
-        sand_friction=0.48,
-    ):
-        self.device = wp.get_device()
-        
-        # Build the model
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
-        builder.add_ground_plane()
-        builder.gravity = wp.vec3(0.0, -9.81, 0.0)
+    def __init__(self, viewer, options):
+        # setup simulation parameters first
+        self.fps = options.fps
+        self.frame_dt = 1.0 / self.fps
 
-        # Timing parameters
+        # group related attributes by prefix
         self.sim_time = 0.0
-        self.sim_step = 0
-        fps = 60
-        self.frame_dt = 1.0 / fps
-        self.sim_substeps = 1
+        self.sim_substeps = options.substeps
         self.sim_dt = self.frame_dt / self.sim_substeps
-        
+
+        # save a reference to the viewer
+        self.viewer = viewer
+
+        # Build the model
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        builder.gravity = wp.vec3(options.gravity)
+
         # Shovel parameters - larger and more visible
         self.shovel_width = 1.2   # Wider blade for better sand interaction
         self.shovel_height = 0.8  # Taller blade
         self.shovel_thickness = 0.08  # Slightly thicker for visibility
         self.shovel_center = np.array([-1.5, 0.4, 0.0])  # Start position (further back, higher up)
-        
+
         # Create shovel collision mesh FIRST
         self.shovel_mesh = _make_shovel_mesh(
             self.shovel_width,
@@ -199,54 +163,54 @@ class Example:
             cfg=newton.ModelBuilder.ShapeConfig(density=0.0),  # kinematic
         )
 
-        # Add sand particles - create a larger, more interesting sand pile
-        max_fraction = 1.0
-        particle_lo = np.array([-0.8, 0.0, -0.8])  # Larger area
-        particle_hi = np.array([3.0, 0.25, 0.8])   # Higher pile, wider spread
-        particle_res = np.array(
-            np.ceil(particles_per_cell * (particle_hi - particle_lo) / voxel_size),
-            dtype=int,
-        )
-
-        _spawn_particles(builder, particle_res, particle_lo, particle_hi, max_fraction)
+        # Add sand particles using the same pattern as granular example
+        Example.emit_particles(builder, options)
 
         # Finalize model
         self.model = builder.finalize()
-        self.model.particle_mu = sand_friction
+        self.model.particle_mu = options.friction_coeff
 
-        # Setup MPM solver first
-        options = SolverImplicitMPM.Options()
-        options.voxel_size = voxel_size
-        options.max_fraction = max_fraction
-        options.tolerance = tolerance
-        options.unilateral = False
-        options.max_iterations = 50
-        options.dynamic_grid = True
-
-        self.mpm_solver = SolverImplicitMPM(self.model, options)
-        self.mpm_solver.setup_collider(self.model, [self.shovel_mesh])
-
-        # Create states and enrich them with MPM fields
+        # Create states
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
 
+        # Setup MPM solver with optimized options
+        options.grid_padding = 0 if options.dynamic_grid else 5
+        options.yield_stresses = wp.vec3(
+            options.yield_stress,
+            -options.stretching_yield_stress,
+            options.compression_yield_stress,
+        )
+
+        self.solver = SolverImplicitMPM(self.model, options)
+        self.solver.setup_collider(self.model, colliders=[self.shovel_mesh])
+
         # Enrich states with MPM-specific fields
-        self.mpm_solver.enrich_state(self.state_0)
-        self.mpm_solver.enrich_state(self.state_1)
+        self.solver.enrich_state(self.state_0)
+        self.solver.enrich_state(self.state_1)
 
-        # Setup renderer
-        self.renderer = None if headless else newton.viewer.RendererOpenGL(self.model, stage_path)
+        # Setup viewer
+        self.viewer.set_model(self.model)
+        self.viewer.show_particles = True
 
-        print(f"Created {self.model.particle_count} sand particles")
+    def simulate(self):
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            self._update_shovel(self.sim_time, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        """Advance simulation by one time step."""
-        self.state_0.clear_forces()
-        self._update_shovel(self.sim_time, self.sim_dt)
-        
-        self.mpm_solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
-        self.state_0, self.state_1 = self.state_1, self.state_0
-        self.sim_time += self.sim_dt
+        self.simulate()
+        self.sim_time += self.frame_dt
+
+    def test(self):
+        pass
+
+    def render(self):
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
+        self.viewer.end_frame()
 
     def _update_shovel(self, t, dt):
         """Update shovel position with smooth motion - perfectly synchronized collision and visual."""
@@ -296,49 +260,101 @@ class Example:
                 inputs=[self.state_0.body_q, self.shovel_body_id, new_transform],
             )
 
-    def render(self):
-        """Render current frame."""
-        if self.renderer is not None:
-            self.renderer.begin_frame(self.sim_time)
-            self.renderer.render(self.state_0)
-            self.renderer.end_frame()
+    @staticmethod
+    def emit_particles(builder: newton.ModelBuilder, args):
+        max_fraction = args.max_fraction
+        voxel_size = args.voxel_size
+
+        particles_per_cell = 3
+        particle_lo = np.array(args.emit_lo)
+        particle_hi = np.array(args.emit_hi)
+        particle_res = np.array(
+            np.ceil(particles_per_cell * (particle_hi - particle_lo) / voxel_size),
+            dtype=int,
+        )
+
+        Example._spawn_particles(builder, particle_res, particle_lo, particle_hi, max_fraction)
+
+    @staticmethod
+    def _spawn_particles(
+        builder: newton.ModelBuilder,
+        res,
+        bounds_lo,
+        bounds_hi,
+        packing_fraction,
+    ):
+        Nx = res[0]
+        Ny = res[1]
+        Nz = res[2]
+
+        px = np.linspace(bounds_lo[0], bounds_hi[0], Nx + 1)
+        py = np.linspace(bounds_lo[1], bounds_hi[1], Ny + 1)
+        pz = np.linspace(bounds_lo[2], bounds_hi[2], Nz + 1)
+
+        points = np.stack(np.meshgrid(px, py, pz)).reshape(3, -1).T
+
+        cell_size = (bounds_hi - bounds_lo) / res
+        cell_volume = np.prod(cell_size)
+
+        radius = np.max(cell_size) * 0.5
+        volume = np.prod(cell_volume) * packing_fraction
+
+        rng = np.random.default_rng()
+        points += 2.0 * radius * (rng.random(points.shape) - 0.5)
+        vel = np.zeros_like(points)
+
+        builder.particle_q = points
+        builder.particle_qd = vel
+        builder.particle_mass = np.full(points.shape[0], volume)
+        builder.particle_radius = np.full(points.shape[0], radius)
+        builder.particle_flags = np.zeros(points.shape[0], dtype=int)
+
+
+def _create_collider_mesh(collider: str):
+    """Create a collider mesh."""
+    if collider == "cube":
+        cube_points, cube_indices = newton.utils.create_box_mesh(extents=(0.5, 2.0, 1.0))
+        return wp.Mesh(
+            wp.array(cube_points[:, 0:3] + [0, 0, 0.5], dtype=wp.vec3),
+            wp.array(cube_indices, dtype=int),
+        )
+    else:
+        return None
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument(
-        "--stage-path",
-        type=lambda x: None if x == "None" else str(x),
-        default="example_shovel_pushing_sand.usd",
-        help="Path to the output USD file.",
-    )
-    parser.add_argument("--num-frames", type=int, default=10000, help="Total number of frames.")
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.04)  # Slightly larger for better performance
-    parser.add_argument("--particles-per-cell", "-ppc", type=float, default=4.0)  # More particles for better visualization
-    parser.add_argument("--sand-friction", "-mu", type=float, default=0.6)  # Higher friction for more realistic sand behavior
+    import argparse
+
+    # Create parser that inherits common arguments and adds example-specific ones
+    parser = newton.examples.create_parser()
+
+    # Add MPM-specific arguments
+    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-0.8, 0.0, -0.8])
+    parser.add_argument("--emit-hi", type=float, nargs=3, default=[3.0, 0.25, 0.8])
+    parser.add_argument("--gravity", type=float, nargs=3, default=[0, -9.81, 0])
+    parser.add_argument("--fps", type=float, default=60.0)
+    parser.add_argument("--substeps", type=int, default=1)
+
+    parser.add_argument("--max-fraction", type=float, default=1.0)
+
+    parser.add_argument("--compliance", type=float, default=0.0)
+    parser.add_argument("--poisson-ratio", "-nu", type=float, default=0.3)
+    parser.add_argument("--friction-coeff", "-mu", type=float, default=0.6)
+    parser.add_argument("--yield-stress", "-ys", type=float, default=0.0)
+    parser.add_argument("--compression-yield-stress", "-cys", type=float, default=1.0e8)
+    parser.add_argument("--stretching-yield-stress", "-sys", type=float, default=1.0e8)
+    parser.add_argument("--unilateral", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dynamic-grid", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gauss-seidel", "-gs", action=argparse.BooleanOptionalAction, default=True)
+
+    parser.add_argument("--max-iterations", "-it", type=int, default=250)
     parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-5)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
 
-    args = parser.parse_known_args()[0]
+    # Parse arguments and initialize viewer
+    viewer, args = newton.examples.init(parser)
 
-    if wp.get_device(args.device).is_cpu:
-        print("Error: This example requires a GPU device.")
-        sys.exit(1)
+    # Create example and run
+    example = Example(viewer, args)
 
-    with wp.ScopedDevice(args.device):
-        example = Example(
-            stage_path=args.stage_path,
-            voxel_size=args.voxel_size,
-            particles_per_cell=args.particles_per_cell,
-            tolerance=args.tolerance,
-            headless=args.headless,
-            sand_friction=args.sand_friction,
-        )
-
-        for _ in range(args.num_frames):
-            example.step()
-            example.render()
-
-        if example.renderer:
-            example.renderer.save()
+    newton.examples.run(example)
