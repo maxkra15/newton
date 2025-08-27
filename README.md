@@ -231,6 +231,7 @@ uv sync --extra examples
     <td align="center">
       <code>uv run -m newton.examples ik_benchmark</code>
     </td>
+<<<<<<< HEAD
 
   </tr>
   <tr>
@@ -242,15 +243,35 @@ uv sync --extra examples
     <td align="center" width="33%">
       <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_twist.py">
         <img src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_twist.jpg" alt="Cloth Twist">
+=======
+    
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/cloth/example_cloth_franka.py">
+        <img src="docs/images/examples/example_cloth_franka.jpg" alt="Cloth Franka">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/cloth/example_cloth_twist.py">
+        <img src="docs/images/examples/example_cloth_twist.jpg" alt="Cloth Twist">
+>>>>>>> af40e1d (Newton Cloth Demo Refactorization (#627))
       </a>
     </td>
   </tr>
   <tr>
     <td align="center">
+<<<<<<< HEAD
       <code>uv run -m newton.examples cloth_franka</code>
     </td>
     <td align="center">
       <code>uv run -m newton.examples cloth_twist</code>
+=======
+      <code>python -m newton.examples cloth_franka</code>
+    </td>
+    <td align="center">
+      <code>python -m newton.examples cloth_twist</code>
+>>>>>>> af40e1d (Newton Cloth Demo Refactorization (#627))
     </td>
   </tr>
 
