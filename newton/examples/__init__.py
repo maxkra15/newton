@@ -204,6 +204,10 @@ def main():
         "diffsim_drone": "newton.examples.diffsim.example_diffsim_drone",
         "diffsim_spring_cage": "newton.examples.diffsim.example_diffsim_spring_cage",
         "diffsim_soft_body": "newton.examples.diffsim.example_diffsim_soft_body",
+        "sand_plow": "newton.examples.mpm.example_sand_plow",
+        "dynamic_sand_plow": "newton.examples.dynamic_mpm.example_dynamic_sand_plow",
+        "mpm_pushing_soil": "newton.examples.mpm.example_mpm_pushing_soil",
+        "mpm_box_plate": "newton.examples.mpm.example_mpm_box_plate",
     }
 
     if len(sys.argv) < 2:
