@@ -255,6 +255,22 @@ add_example_test(
     test_options_cpu={"num_frames": 2},
     use_viewer=True,
 )
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_franka",
+    devices=test_devices,
+    test_options={"num_frames": 50},
+    test_options_cpu={"num_frames": 2},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_twist",
+    devices=test_devices,
+    test_options={"num_frames": 100},
+    test_options_cpu={"num_frames": 20},
+    use_viewer=True,
+)
 
 
 class TestRobotExamples(unittest.TestCase):
@@ -376,18 +392,10 @@ add_example_test(
 )
 
 
-class TestRobotPolicyExamples(unittest.TestCase):
+class TestAdvancedRobotExamples(unittest.TestCase):
     pass
 
 
-add_example_test(
-    TestAdvancedRobotExamples,
-    name="example_robot_manipulating_cloth",
-    devices=cuda_test_devices,
-    test_options={"stage_path": "None", "num_frames": 300},
-    test_options_cpu={"num_frames": 2},
-    use_viewer=True,
-)
 add_example_test(
     TestAdvancedRobotExamples,
     name="mpm.example_mpm_anymal",
