@@ -1,0 +1,27 @@
+{
+  "description": "Multi-environment scaling analysis configuration",
+  "base_config": {
+    "voxel_size": 0.05,
+    "particles_per_cell": 3,
+    "max_fraction": 1.0,
+    "particle_radius_scale": 1.0,
+    "friction_coeff": 0.6,
+    "fps": 60.0,
+    "substeps": 1,
+    "num_frames": 100,
+    "tolerance": 1e-5,
+    "max_iterations": 250,
+    "num_envs": 1,
+    "emit_lo": [-1.0, -0.8, 0.0],
+    "emit_hi": [1.0, 0.8, 0.4],
+    "yield_stress": 0.0,
+    "compression_yield_stress": 1e8,
+    "stretching_yield_stress": 1e8,
+    "poisson_ratio": 0.3,
+    "dynamic_grid": true,
+    "gauss_seidel": true,
+    "unilateral": true
+  },
+  "param_ranges": {},
+  "env_counts": [1, 2, 4, 8, 16, 32, 64, 128]
+}

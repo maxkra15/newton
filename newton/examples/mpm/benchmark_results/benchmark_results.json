@@ -1,0 +1,76 @@
+{
+  "system_info": {
+    "cpu": {
+      "model": "AMD Ryzen 9 5900X 12-Core Processor",
+      "cores": 12,
+      "logical_cores": 24,
+      "frequency_mhz": 4954.0
+    },
+    "memory": {
+      "total_gb": 31.265682220458984,
+      "available_gb": 22.893123626708984
+    },
+    "gpu": {
+      "available": false,
+      "device_count": 1,
+      "device_name": "cuda:0"
+    },
+    "warp_version": "Unknown",
+    "newton_version": "0.1.1.a2"
+  },
+  "timestamp": 1756290640.8649943,
+  "results": [
+    {
+      "config": {
+        "voxel_size": 0.1,
+        "particles_per_cell": 3,
+        "max_fraction": 1.0,
+        "particle_radius_scale": 1.0,
+        "friction_coeff": 0.6,
+        "fps": 60.0,
+        "substeps": 1,
+        "num_frames": 50,
+        "tolerance": 1e-05,
+        "max_iterations": 100,
+        "num_envs": 1,
+        "emit_lo": [
+          -1.0,
+          -0.8,
+          0.0
+        ],
+        "emit_hi": [
+          1.0,
+          0.8,
+          0.4
+        ],
+        "yield_stress": 0.0,
+        "compression_yield_stress": 100000000.0,
+        "stretching_yield_stress": 100000000.0,
+        "poisson_ratio": 0.3,
+        "dynamic_grid": true,
+        "gauss_seidel": true,
+        "unilateral": true
+      },
+      "metrics": {
+        "total_time": 0.9690117880236357,
+        "avg_step_time": 0.019378811572678387,
+        "avg_solver_time": 0.019253130953293295,
+        "min_step_time": 0.01764640596229583,
+        "max_step_time": 0.03244254901073873,
+        "steps_per_second": 51.59895949457781,
+        "particles_per_second": 2203275.5704184724,
+        "environments_per_second": 51.59895949457781,
+        "avg_gpu_utilization": 0.0,
+        "max_gpu_memory_gb": 0.0,
+        "avg_gpu_memory_gb": 0.0,
+        "particle_count": 42700,
+        "particle_conservation_error": 0.0,
+        "energy_drift": 0.0,
+        "solver_convergence_rate": 1.0,
+        "avg_cpu_usage": 7.43,
+        "max_ram_usage_gb": 7.755683898925781
+      },
+      "scaling_efficiency": 1.0
+    }
+  ]
+}

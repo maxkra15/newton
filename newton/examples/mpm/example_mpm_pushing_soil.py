@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 """
-Newton MPM Shovel Pushing Sand Example
+Newton MPM Plate Pushing Particles Example
 
-This example demonstrates Material Point Method (MPM) simulation with a shovel-like plate
-pushing sand particles. The simulation uses a simplified setup similar to the AnyMal
-walking on sand example, with sand particles spawned on the ground and a shovel blade
-that pushes through them.
+This example demonstrates Material Point Method (MPM) simulation with a simple rectangular
+plate pushing particles downward. The simulation showcases realistic particle physics
+behavior when a flat plate moves through a particle bed.
 
 Features:
-- Realistic shovel geometry with flat pushing surface
-- Sand particles spawned on the ground using the same method as AnyMal example
-- Realistic sand density and physics parameters
-- Simple, clean simulation setup focused on MPM particle interaction
+- Simple rectangular plate geometry with correct orientation (flat bottom facing down)
+- Plate starts 0.1m above ground and moves downward into particles
+- Particles spawned on the ground using proven Newton MPM patterns
+- Realistic particle density and physics parameters
+- Clean simulation setup focused on demonstrating particle-object interaction
 - Ground plane for particle support
-- Modern ViewerGL implementation for better performance
+- Synchronized collision and visual geometry for accurate physics
 
 Example usage:
 uv run --extra cu12 newton/examples/example_mpm_pushing_soil.py
@@ -64,54 +64,34 @@ def _update_body_transform(body_q: wp.array(dtype=wp.transform), body_id: int, n
 
 
 
-def _make_shovel_mesh(width: float, height: float, thickness: float, center_xyz: np.ndarray) -> wp.Mesh:
-    """Create a simple shovel-like plate mesh."""
+def _make_plate_mesh(width: float, length: float, height: float, center_xyz: np.ndarray) -> wp.Mesh:
+    """Create a simple rectangular plate mesh using Newton's proven box mesh generator.
+
+    The plate is oriented with:
+    - Width along X-axis (wide dimension for pushing front)
+    - Length along Y-axis (thin dimension for pushing through particles)
+    - Height along Z-axis (vertical dimension)
+    - Designed to push horizontally through particles in Y-direction
+    """
     cx, cy, cz = center_xyz
 
-    # Create vertices for a simple rectangular shovel blade
-    half_width = width / 2
-    half_height = height / 2
-    half_thickness = thickness / 2
+    # Use Newton's create_box_mesh which takes half-extents and creates proper geometry
+    from newton.utils import create_box_mesh
+    half_extents = (width / 2, length / 2, height / 2)
+    vertices_full, indices = create_box_mesh(half_extents)
 
-    # Simple box vertices
-    vertices = np.array([
-        # Front face (pushing surface)
-        [-half_width, -half_height, -half_thickness],  # 0: bottom-left-front
-        [half_width, -half_height, -half_thickness],   # 1: bottom-right-front
-        [half_width, half_height, -half_thickness],    # 2: top-right-front
-        [-half_width, half_height, -half_thickness],   # 3: top-left-front
-        # Back face
-        [-half_width, -half_height, half_thickness],   # 4: bottom-left-back
-        [half_width, -half_height, half_thickness],    # 5: bottom-right-back
-        [half_width, half_height, half_thickness],     # 6: top-right-back
-        [-half_width, half_height, half_thickness],    # 7: top-left-back
-    ], dtype=np.float32)
+    # Extract only position components (first 3 columns) from the full vertex data
+    vertices_pos = vertices_full[:, :3].astype(np.float32)
 
-    # Translate to center position
-    vertices = vertices + np.array([cx, cy, cz], dtype=np.float32)
-
-    # Define faces for a simple box
-    indices = np.array([
-        # Front face
-        0, 1, 2, 0, 2, 3,
-        # Back face
-        4, 7, 6, 4, 6, 5,
-        # Left face
-        0, 3, 7, 0, 7, 4,
-        # Right face
-        1, 5, 6, 1, 6, 2,
-        # Top face
-        3, 2, 6, 3, 6, 7,
-        # Bottom face
-        0, 4, 5, 0, 5, 1
-    ], dtype=np.int32)
+    # Translate vertices to the desired center position
+    vertices_pos = vertices_pos + np.array([cx, cy, cz], dtype=np.float32)
 
     # Create warp mesh with proper velocities array
-    n_vertices = len(vertices)
+    n_vertices = len(vertices_pos)
     velocities = np.zeros((n_vertices, 3), dtype=np.float32)
 
     return wp.Mesh(
-        points=wp.array(vertices, dtype=wp.vec3),
+        points=wp.array(vertices_pos, dtype=wp.vec3),
         velocities=wp.array(velocities, dtype=wp.vec3),
         indices=wp.array(indices.flatten(), dtype=int),
     )
@@ -136,30 +116,35 @@ class Example:
         builder.add_ground_plane()
         builder.gravity = wp.vec3(options.gravity)
 
-        # Shovel parameters - larger and more visible
-        self.shovel_width = 1.2   # Wider blade for better sand interaction
-        self.shovel_height = 0.8  # Taller blade
-        self.shovel_thickness = 0.08  # Slightly thicker for visibility
-        self.shovel_center = np.array([-1.5, 0.4, 0.0])  # Start position (further back, higher up)
+        # Plate parameters - simple rectangular pushing plate (rotated 90 degrees)
+        self.plate_width = 0.6    # Width along X-axis (wide front for pushing)
+        self.plate_length = 0.2   # Thickness along Y-axis (thin for pushing through)
+        self.plate_height = 0.4   # Height along Z-axis (tall enough to push particles)
 
-        # Create shovel collision mesh FIRST
-        self.shovel_mesh = _make_shovel_mesh(
-            self.shovel_width,
-            self.shovel_height,
-            self.shovel_thickness,
-            self.shovel_center
+        # Start position: positioned to push horizontally through particles (Y-axis direction)
+        ground_level = 0.0
+        plate_bottom = ground_level + 0.05  # Just above ground
+        plate_center_z = plate_bottom + self.plate_height / 2  # Center the plate vertically
+        self.plate_center = np.array([0.0, -2.0, plate_center_z])  # Start on back side, will push forward
+
+        # Create plate collision mesh using Newton's proven box mesh generator
+        self.plate_mesh = _make_plate_mesh(
+            self.plate_width,
+            self.plate_length,
+            self.plate_height,
+            self.plate_center
         )
-        self.shovel_rest_points = wp.array(
-            self.shovel_mesh.points.numpy() - self.shovel_center, dtype=wp.vec3
+        self.plate_rest_points = wp.array(
+            self.plate_mesh.points.numpy() - self.plate_center, dtype=wp.vec3
         )
 
-        # Add shovel as kinematic body with EXACT same dimensions as collision mesh
-        self.shovel_body_id = builder.add_body(xform=wp.transform(self.shovel_center, wp.quat_identity()))
+        # Add plate as kinematic body with EXACT same dimensions as collision mesh
+        self.plate_body_id = builder.add_body(xform=wp.transform(self.plate_center, wp.quat_identity()))
         builder.add_shape_box(
-            self.shovel_body_id,
-            hx=self.shovel_thickness * 0.5,  # Exact same dimensions
-            hy=self.shovel_height * 0.5,     # Exact same dimensions
-            hz=self.shovel_width * 0.5,      # Exact same dimensions
+            self.plate_body_id,
+            hx=self.plate_width * 0.5,    # Half-width along X (wide)
+            hy=self.plate_length * 0.5,   # Half-length along Y (thin)
+            hz=self.plate_height * 0.5,   # Half-height along Z (tall)
             cfg=newton.ModelBuilder.ShapeConfig(density=0.0),  # kinematic
         )
 
@@ -183,7 +168,7 @@ class Example:
         )
 
         self.solver = SolverImplicitMPM(self.model, options)
-        self.solver.setup_collider(self.model, colliders=[self.shovel_mesh])
+        self.solver.setup_collider(self.model, colliders=[self.plate_mesh])
 
         # Enrich states with MPM-specific fields
         self.solver.enrich_state(self.state_0)
@@ -196,7 +181,7 @@ class Example:
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self._update_shovel(self.sim_time, self.sim_dt)
+            self._update_plate(self.sim_time, self.sim_dt)
             self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -212,33 +197,34 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
 
-    def _update_shovel(self, t, dt):
-        """Update shovel position with smooth motion - perfectly synchronized collision and visual."""
-        # Motion parameters for dramatic shovel operation
-        amplitude = 2.5  # push distance (meters) - longer stroke
-        period = 8.0     # period in seconds (slower for better visualization)
+    def _update_plate(self, t, dt):
+        """Update plate position with horizontal pushing motion - perfectly synchronized collision and visual."""
+        # Motion parameters for horizontal plate pushing through particles
+        amplitude = 5.0   # horizontal push distance (meters) - push across particle bed
+        period = 16.0      # period in seconds (slower for better visualization)
 
-        # Calculate current position ONCE using the same formula as the kernel
+        # Calculate current position using smooth sinusoidal motion
+        # Start on back, move forward, then back to back
         s = np.sin(2.0 * np.pi * t / period)
-        current_offset = amplitude * s
+        current_offset = amplitude * s  # Positive for forward motion
 
-        # Calculate the exact new position
+        # Calculate the exact new position (move along Y-axis horizontally)
         new_pos = np.array([
-            self.shovel_center[0] + current_offset,
-            self.shovel_center[1],
-            self.shovel_center[2]
+            self.plate_center[0],                   # No X movement
+            self.plate_center[1] + current_offset,  # Y movement (back-forward)
+            self.plate_center[2]                    # No Z movement
         ])
 
-        # Update collision mesh using the kernel (this will calculate the same position)
-        center0 = wp.vec3(self.shovel_center[0], self.shovel_center[1], self.shovel_center[2])
-        dir_axis = wp.vec3(1.0, 0.0, 0.0)  # move along X (forward pushing motion)
+        # Update collision mesh using the kernel
+        center0 = wp.vec3(self.plate_center[0], self.plate_center[1], self.plate_center[2])
+        dir_axis = wp.vec3(0.0, 1.0, 0.0)  # Move along positive Y (forward)
 
         wp.launch(
-            _move_shovel_mesh,
-            dim=self.shovel_rest_points.shape[0],
+            _move_shovel_mesh,  # Reuse the mesh movement kernel
+            dim=self.plate_rest_points.shape[0],
             inputs=[
-                self.shovel_rest_points,
-                self.shovel_mesh.id,
+                self.plate_rest_points,
+                self.plate_mesh.id,
                 center0,
                 dir_axis,
                 float(amplitude),
@@ -247,17 +233,17 @@ class Example:
                 float(dt),
             ],
         )
-        self.shovel_mesh.refit()
+        self.plate_mesh.refit()
 
         # Update visual body to EXACTLY match collision mesh position
         new_transform = wp.transform(new_pos, wp.quat_identity())
 
         # Update the body transform in the state using kernel
-        if self.shovel_body_id < self.model.body_count:
+        if self.plate_body_id < self.model.body_count:
             wp.launch(
                 _update_body_transform,
                 dim=self.model.body_count,
-                inputs=[self.state_0.body_q, self.shovel_body_id, new_transform],
+                inputs=[self.state_0.body_q, self.plate_body_id, new_transform],
             )
 
     @staticmethod
@@ -328,11 +314,11 @@ if __name__ == "__main__":
     # Create parser that inherits common arguments and adds example-specific ones
     parser = newton.examples.create_parser()
 
-    # Add MPM-specific arguments
-    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-0.8, 0.0, -0.8])
-    parser.add_argument("--emit-hi", type=float, nargs=3, default=[3.0, 0.25, 0.8])
-    parser.add_argument("--gravity", type=float, nargs=3, default=[0, -9.81, 0])
-    parser.add_argument("--fps", type=float, default=60.0)
+    # Add MPM-specific arguments - position particles for horizontal pushing
+    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-4.0, -1.8, 0])
+    parser.add_argument("--emit-hi", type=float, nargs=3, default=[5.0, 1.8, 0.4])
+    parser.add_argument("--gravity", type=float, nargs=3, default=[0, 0, -10])
+    parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--substeps", type=int, default=1)
 
     parser.add_argument("--max-fraction", type=float, default=1.0)
@@ -349,7 +335,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--max-iterations", "-it", type=int, default=250)
     parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-5)
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
+    parser.add_argument("--voxel-size", "-dx", type=float, default=0.1)
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
