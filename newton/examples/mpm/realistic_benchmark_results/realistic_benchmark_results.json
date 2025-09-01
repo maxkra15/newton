@@ -1,0 +1,130 @@
+{
+  "system_info": {
+    "cpu": {
+      "model": "AMD Ryzen 9 5900X 12-Core Processor",
+      "cores": 12,
+      "logical_cores": 24,
+      "frequency_mhz": 4954.0
+    },
+    "memory": {
+      "total_gb": 31.265682220458984,
+      "available_gb": 22.73094940185547
+    },
+    "gpu": {
+      "available": false,
+      "device_count": 1,
+      "device_name": "cuda:0"
+    },
+    "warp_version": "Unknown",
+    "newton_version": "0.1.1.a2"
+  },
+  "timestamp": 1756291274.3521025,
+  "results": [
+    {
+      "config": {
+        "voxel_size": 0.05,
+        "particles_per_cell": 3,
+        "max_fraction": 0.8,
+        "particle_radius_scale": 1.0,
+        "friction_coeff": 0.7,
+        "fps": 60.0,
+        "substeps": 1,
+        "num_frames": 300,
+        "tolerance": 0.0001,
+        "max_iterations": 100,
+        "num_envs": 1,
+        "emit_lo": [
+          -2.0,
+          -1.5,
+          0.0
+        ],
+        "emit_hi": [
+          2.0,
+          1.5,
+          0.8
+        ],
+        "yield_stress": 5000.0,
+        "compression_yield_stress": 50000.0,
+        "stretching_yield_stress": 2000.0,
+        "poisson_ratio": 0.35,
+        "dynamic_grid": true,
+        "gauss_seidel": true,
+        "unilateral": true
+      },
+      "metrics": {
+        "total_time": 65.00254212890286,
+        "avg_step_time": 0.21667156903461243,
+        "avg_solver_time": 0.21646056777448394,
+        "min_step_time": 0.19874796806834638,
+        "max_step_time": 0.2297150290105492,
+        "steps_per_second": 4.6152041162495925,
+        "particles_per_second": 10065990.937746173,
+        "environments_per_second": 4.6152041162495925,
+        "avg_gpu_utilization": 0.0,
+        "max_gpu_memory_gb": 0.0,
+        "avg_gpu_memory_gb": 0.0,
+        "particle_count": 2181050,
+        "particle_conservation_error": 0.0,
+        "energy_drift": 0.0,
+        "solver_convergence_rate": 1.0,
+        "avg_cpu_usage": 7.022333333333333,
+        "max_ram_usage_gb": 4.407329559326172
+      },
+      "scenario_type": "accuracy_level",
+      "scenario_name": "real_time_preview"
+    },
+    {
+      "config": {
+        "voxel_size": 0.1,
+        "particles_per_cell": 2,
+        "max_fraction": 0.8,
+        "particle_radius_scale": 1.0,
+        "friction_coeff": 0.7,
+        "fps": 120.0,
+        "substeps": 1,
+        "num_frames": 300,
+        "tolerance": 0.0005,
+        "max_iterations": 50,
+        "num_envs": 1,
+        "emit_lo": [
+          -2.0,
+          -1.5,
+          0.0
+        ],
+        "emit_hi": [
+          2.0,
+          1.5,
+          0.8
+        ],
+        "yield_stress": 5000.0,
+        "compression_yield_stress": 50000.0,
+        "stretching_yield_stress": 2000.0,
+        "poisson_ratio": 0.35,
+        "dynamic_grid": true,
+        "gauss_seidel": true,
+        "unilateral": true
+      },
+      "metrics": {
+        "total_time": 10.124129550997168,
+        "avg_step_time": 0.03374550374069562,
+        "avg_solver_time": 0.033606504338094964,
+        "min_step_time": 0.030641192919574678,
+        "max_step_time": 0.03688425908330828,
+        "steps_per_second": 29.63217711595282,
+        "particles_per_second": 8483277.45781767,
+        "environments_per_second": 29.63217711595282,
+        "avg_gpu_utilization": 0.0,
+        "max_gpu_memory_gb": 0.0,
+        "avg_gpu_memory_gb": 0.0,
+        "particle_count": 286286,
+        "particle_conservation_error": 0.0,
+        "energy_drift": 0.0,
+        "solver_convergence_rate": 1.0,
+        "avg_cpu_usage": 6.793,
+        "max_ram_usage_gb": 4.387279510498047
+      },
+      "scenario_type": "accuracy_level",
+      "scenario_name": "interactive_demo"
+    }
+  ]
+}
