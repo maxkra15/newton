@@ -1199,11 +1199,7 @@ wheels = [
 name = "newton"
 source = { editable = "." }
 dependencies = [
-    { name = "matplotlib" },
-    { name = "pandas" },
     { name = "psutil" },
-    { name = "reportlab" },
-    { name = "seaborn" },
     { name = "warp-lang", version = "1.8.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "warp-lang", version = "1.9.0.dev20250825", source = { registry = "https://pypi.nvidia.com/" }, marker = "sys_platform != 'darwin'" },
 ]
@@ -1323,7 +1319,6 @@ requires-dist = [
     { name = "mujoco-warp", marker = "extra == 'sim'", git = "https://github.com/google-deepmind/mujoco_warp" },
     { name = "mujoco-warp", marker = "extra == 'torch-cu12'", git = "https://github.com/google-deepmind/mujoco_warp" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=3.0.1" },
-    { name = "pandas", specifier = ">=2.3.2" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pycollada", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "pycollada", marker = "extra == 'examples'", specifier = ">=0.9" },
