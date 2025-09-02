@@ -312,8 +312,8 @@ if __name__ == "__main__":
     parser = newton.examples.create_parser()
 
     # Add MPM-specific arguments - position particles for horizontal pushing
-    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-4.0, -1.8, 0])
-    parser.add_argument("--emit-hi", type=float, nargs=3, default=[5.0, 1.8, 0.4])
+    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-1.5, -2.0, 0])
+    parser.add_argument("--emit-hi", type=float, nargs=3, default=[1.5, 2, 0.4])
     parser.add_argument("--gravity", type=float, nargs=3, default=[0, 0, -10])
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--substeps", type=int, default=1)
