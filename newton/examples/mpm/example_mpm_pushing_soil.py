@@ -61,9 +61,6 @@ def _update_body_transform(body_q: wp.array(dtype=wp.transform), body_id: int, n
         body_q[body_id] = new_transform
 
 
-
-
-
 def _make_plate_mesh(width: float, length: float, height: float, center_xyz: np.ndarray) -> wp.Mesh:
     """Create a simple rectangular plate mesh using Newton's proven box mesh generator.
 
