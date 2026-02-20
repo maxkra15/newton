@@ -214,6 +214,120 @@ def test_finite_difference_collider_velocity(test, device):
     )
 
 
+def test_clear_warmstart_for_bounds(test, device):
+    """Clearing warmstart bounds should clear cached fields without crashing."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+    builder.world_count = 2
+    SolverImplicitMPM.register_custom_attributes(builder)
+
+    voxel_size = 0.1
+    ppc = 2
+    spacing = voxel_size / ppc
+
+    for world_id, center_x in enumerate((-0.5, 0.5)):
+        builder.current_world = world_id
+        builder.add_particle_grid(
+            pos=wp.vec3(center_x - 0.1, 0.05, -0.1),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=4,
+            dim_y=4,
+            dim_z=4,
+            cell_x=spacing,
+            cell_y=spacing,
+            cell_z=spacing,
+            mass=1.0,
+            jitter=0.0,
+            custom_attributes={"mpm:friction": 0.7},
+        )
+        builder.add_ground_plane()
+
+    model = builder.finalize(device=device)
+    state_0 = model.state()
+    state_1 = model.state()
+
+    options = SolverImplicitMPM.Options()
+    options.voxel_size = voxel_size
+    options.grid_type = "dense"
+    solver = SolverImplicitMPM(model, options)
+
+    for _ in range(5):
+        solver.step(state_0, state_1, control=None, contacts=None, dt=0.02)
+        state_0, state_1 = state_1, state_0
+
+    ws_impulse = solver._last_step_data.ws_impulse_field.dof_values.numpy()
+    ws_stress = solver._last_step_data.ws_stress_field.dof_values.numpy()
+    before_impulse = float(np.linalg.norm(ws_impulse))
+    before_stress = float(np.linalg.norm(ws_stress))
+
+    test.assertGreater(before_impulse + before_stress, 0.0)
+
+    cleared_cells = solver.clear_warmstart_for_bounds(
+        bounds_lo=[(-0.9, -0.1, -0.4)],
+        bounds_hi=[(0.0, 0.8, 0.4)],
+        padding_cells=1,
+    )
+
+    ws_impulse_after = solver._last_step_data.ws_impulse_field.dof_values.numpy()
+    ws_stress_after = solver._last_step_data.ws_stress_field.dof_values.numpy()
+    after_impulse = float(np.linalg.norm(ws_impulse_after))
+    after_stress = float(np.linalg.norm(ws_stress_after))
+
+    test.assertGreater(cleared_cells, 0)
+    test.assertLess(after_impulse + after_stress, before_impulse + before_stress)
+    test.assertGreaterEqual(after_impulse + after_stress, 0.0)
+
+
+def test_separate_worlds_multi_step(test, device):
+    """Separate-world mode should step repeatedly and expose per-world warmstart clearing."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+    builder.world_count = 2
+    SolverImplicitMPM.register_custom_attributes(builder)
+
+    voxel_size = 0.1
+    ppc = 2
+    spacing = voxel_size / ppc
+
+    for world_id, center_x in enumerate((-0.5, 0.5)):
+        builder.current_world = world_id
+        builder.add_particle_grid(
+            pos=wp.vec3(center_x - 0.1, 0.05, -0.1),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=4,
+            dim_y=4,
+            dim_z=4,
+            cell_x=spacing,
+            cell_y=spacing,
+            cell_z=spacing,
+            mass=1.0,
+            jitter=0.0,
+            custom_attributes={"mpm:friction": 0.7},
+        )
+        builder.add_ground_plane()
+
+    model = builder.finalize(device=device)
+    state_0 = model.state()
+    state_1 = model.state()
+
+    options = SolverImplicitMPM.Options()
+    options.voxel_size = voxel_size
+    options.grid_type = "dense"
+    options.separate_worlds = True
+    solver = SolverImplicitMPM(model, options)
+
+    for _ in range(3):
+        solver.step(state_0, state_1, control=None, contacts=None, dt=0.02)
+        state_0, state_1 = state_1, state_0
+
+    impulses, impulse_positions, collider_ids = solver.collect_collider_impulses(state_0)
+    test.assertEqual(int(impulses.shape[0]), int(impulse_positions.shape[0]))
+    test.assertEqual(int(impulses.shape[0]), int(collider_ids.shape[0]))
+
+    cleared_cells = solver.clear_warmstart_for_worlds([0])
+    test.assertGreater(cleared_cells, 0)
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -229,6 +343,22 @@ add_function_test(
     TestImplicitMPM,
     "test_finite_difference_collider_velocity",
     test_finite_difference_collider_velocity,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_clear_warmstart_for_bounds",
+    test_clear_warmstart_for_bounds,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_separate_worlds_multi_step",
+    test_separate_worlds_multi_step,
     devices=devices,
     check_output=False,
 )

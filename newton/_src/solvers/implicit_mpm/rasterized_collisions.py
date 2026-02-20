@@ -62,6 +62,9 @@ class Collider:
     collider_body_index: wp.array(dtype=int)
     """Body index of each collider. Shape (collider_count,)"""
 
+    collider_world_index: wp.array(dtype=int)
+    """World index of each collider. -1 marks global colliders. Shape (collider_count,)"""
+
     face_material_index: wp.array(dtype=int)
     """Material index for each collider mesh face. Shape (sum(mesh.face_count for mesh in meshes),)"""
 
@@ -132,6 +135,7 @@ def collision_sdf(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_q_prev: wp.array(dtype=wp.transform),
     dt: float,
+    active_world: int = -1,
 ):
     min_sdf = float(_INFINITY)
     sdf_grad = wp.vec3(0.0)
@@ -143,6 +147,10 @@ def collision_sdf(
     # Find closest collider
     global_face_id = int(0)
     for m in range(collider.collider_mesh.shape[0]):
+        collider_world = collider.collider_world_index[m]
+        if active_world >= 0 and collider_world >= 0 and collider_world != active_world:
+            continue
+
         mesh = collider.collider_mesh[m]
         thickness = collider.collider_max_thickness[m]
         body_id = collider.collider_body_index[m]
@@ -265,6 +273,7 @@ def project_outside_collider(
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_q_prev: wp.array(dtype=wp.transform),
+    active_world: int,
     dt: float,
     positions_out: wp.array(dtype=wp.vec3),
     velocities_out: wp.array(dtype=wp.vec3),
@@ -306,7 +315,7 @@ def project_outside_collider(
 
     # project outside of collider
     sdf, sdf_gradient, sdf_vel, _collider_id, material_id = collision_sdf(
-        pos_adv, collider, body_q, body_qd, body_q_prev, dt
+        pos_adv, collider, body_q, body_qd, body_q_prev, dt, active_world
     )
 
     sdf_end = sdf - wp.dot(sdf_vel, sdf_gradient) * dt + collider.material_projection_threshold[material_id]
@@ -335,6 +344,7 @@ def rasterize_collider_kernel(
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_q_prev: wp.array(dtype=wp.transform),
+    active_world: int,
     voxel_size: float,
     activation_distance: float,
     dt: float,
@@ -378,7 +388,7 @@ def rasterize_collider_kernel(
         sdf = _INFINITY
     else:
         sdf, sdf_gradient, sdf_vel, collider_id, material_id = collision_sdf(
-            x, collider, body_q, body_qd, body_q_prev, dt
+            x, collider, body_q, body_qd, body_q_prev, dt, active_world
         )
         bc_active = sdf < activation_distance * voxel_size
 
@@ -537,6 +547,7 @@ def rasterize_collider(
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_q_prev: wp.array(dtype=wp.transform),
+    active_world: int,
     voxel_size: float,
     dt: float,
     collider_space_restriction: fem.SpaceRestriction,
@@ -573,6 +584,7 @@ def rasterize_collider(
             body_q,
             body_qd,
             body_q_prev,
+            active_world,
             voxel_size,
             activation_distance,
             dt,

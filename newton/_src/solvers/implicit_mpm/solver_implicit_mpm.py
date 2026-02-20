@@ -15,7 +15,7 @@
 
 """Implicit MPM solver."""
 
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import warp as wp
@@ -1140,6 +1140,17 @@ def mark_active_cells(
 
 
 @wp.kernel
+def mask_particle_flags_for_world(
+    source_flags: wp.array(dtype=wp.int32),
+    particle_world: wp.array(dtype=wp.int32),
+    world_id: int,
+    masked_flags: wp.array(dtype=wp.int32),
+):
+    i = wp.tid()
+    masked_flags[i] = wp.where(particle_world[i] == world_id, source_flags[i], 0)
+
+
+@wp.kernel
 def scatter_field_dof_values(
     space_node_indices: wp.array(dtype=int),
     src: wp.array(dtype=Any),
@@ -1348,6 +1359,7 @@ class SolverImplicitMPM(SolverBase):
         self.collider_normal_from_sdf_gradient = options.collider_normal_from_sdf_gradient
         self.collider_basis = options.collider_basis
         self.collider_velocity_mode = self._mpm_model.collider_velocity_mode
+        self.separate_worlds = bool(options.separate_worlds and model.world_count > 1)
 
         self.temporary_store = fem.TemporaryStore()
 
@@ -1359,12 +1371,28 @@ class SolverImplicitMPM(SolverBase):
         # Pre-allocate scratchpad and last step data so that step() can be graph-captured
         self._scratchpad = None
         self._last_step_data = LastStepData()
+        self._last_step_data_per_world = None
+        self._separate_state_in = None
+        self._separate_state_out = None
+        self._separate_saved_flags = None
+        self._separate_masked_flags = None
+        self._separate_impulses = wp.zeros((0,), dtype=wp.vec3, device=model.device)
+        self._separate_impulse_positions = wp.zeros((0,), dtype=wp.vec3, device=model.device)
+        self._separate_impulse_ids = wp.zeros((0,), dtype=int, device=model.device)
+        self._particle_world_ranges = None
         with wp.ScopedDevice(model.device):
             pic = self._particles_to_cells(model.particle_q)
             self._rebuild_scratchpad(pic)
             self._require_velocity_space_fields(self._scratchpad, self._mpm_model.has_compliant_particles)
             self._require_collision_space_fields(self._scratchpad, self._last_step_data)
             self._require_strain_space_fields(self._scratchpad, self._last_step_data)
+            if self.separate_worlds:
+                self._init_separate_world_buffers()
+
+    def _init_separate_world_buffers(self):
+        self._last_step_data_per_world = [LastStepData() for _ in range(self.model.world_count)]
+        self._separate_saved_flags = wp.empty_like(self.model.particle_flags)
+        self._separate_masked_flags = wp.empty_like(self.model.particle_flags)
 
     def setup_collider(
         self,
@@ -1415,6 +1443,9 @@ class SolverImplicitMPM(SolverBase):
 
         if self._mpm_model.collider_body_q is not None:
             self._last_step_data.body_q_prev = wp.clone(self._mpm_model.collider_body_q)
+            if self._last_step_data_per_world is not None:
+                for world_last_step_data in self._last_step_data_per_world:
+                    world_last_step_data.body_q_prev = wp.clone(self._mpm_model.collider_body_q)
 
     @property
     def voxel_size(self) -> float:
@@ -1433,10 +1464,112 @@ class SolverImplicitMPM(SolverBase):
         model = self.model
 
         with wp.ScopedDevice(model.device):
+            if self.separate_worlds:
+                self._step_separate_worlds(state_in, state_out, dt)
+                return
+
             pic = self._particles_to_cells(state_in.particle_q)
             scratch = self._rebuild_scratchpad(pic)
             self._step_impl(state_in, state_out, dt, pic, scratch)
             scratch.release_temporaries()
+
+    def _set_particle_mask_for_world(self, world_id: int):
+        wp.launch(
+            mask_particle_flags_for_world,
+            dim=self.model.particle_count,
+            inputs=[
+                self._separate_saved_flags,
+                self.model.particle_world,
+                int(world_id),
+                self._separate_masked_flags,
+            ],
+            device=self.model.device,
+        )
+        self.model.particle_flags.assign(self._separate_masked_flags)
+
+    def _concat_world_arrays(self, arrays: Sequence[wp.array], dtype: Any) -> wp.array:
+        total = sum(int(arr.shape[0]) for arr in arrays)
+        if total == 0:
+            return wp.zeros((0,), dtype=dtype, device=self.model.device)
+
+        out = wp.empty(shape=(total,), dtype=dtype, device=self.model.device)
+        offset = 0
+        for arr in arrays:
+            count = int(arr.shape[0])
+            if count > 0:
+                wp.copy(dest=out, src=arr, dest_offset=offset, src_offset=0, count=count)
+                offset += count
+        return out
+
+    def _update_separate_impulse_cache(
+        self,
+        impulses_per_world: list[wp.array],
+        pos_per_world: list[wp.array],
+        ids_per_world: list[wp.array],
+    ):
+        if len(impulses_per_world) == 0:
+            self._separate_impulses = wp.zeros((0,), dtype=wp.vec3, device=self.model.device)
+            self._separate_impulse_positions = wp.zeros((0,), dtype=wp.vec3, device=self.model.device)
+            self._separate_impulse_ids = wp.zeros((0,), dtype=int, device=self.model.device)
+            return
+
+        self._separate_impulses = self._concat_world_arrays(impulses_per_world, wp.vec3)
+        self._separate_impulse_positions = self._concat_world_arrays(pos_per_world, wp.vec3)
+        self._separate_impulse_ids = self._concat_world_arrays(ids_per_world, int)
+
+    def _step_separate_worlds(self, state_in: newton.State, state_out: newton.State, dt: float):
+        self._initialize_state_out_for_separate_world_step(state_in, state_out)
+        self._separate_saved_flags.assign(self.model.particle_flags)
+
+        per_world_impulses: list[wp.array] = []
+        per_world_positions: list[wp.array] = []
+        per_world_ids: list[wp.array] = []
+
+        try:
+            for world_id in range(self.model.world_count):
+                self._set_particle_mask_for_world(world_id)
+
+                pic = self._particles_to_cells(state_in.particle_q)
+                scratch = self._rebuild_scratchpad(pic)
+                try:
+                    self._step_impl(
+                        state_in,
+                        state_out,
+                        dt,
+                        pic,
+                        scratch,
+                        last_step_data=self._last_step_data_per_world[world_id],
+                        active_world=world_id,
+                    )
+                    world_impulses, world_positions, world_ids = self._collect_collider_impulses_from_state(
+                        state_out
+                    )
+                    per_world_impulses.append(wp.clone(world_impulses))
+                    per_world_positions.append(wp.clone(world_positions))
+                    per_world_ids.append(wp.clone(world_ids))
+                finally:
+                    scratch.release_temporaries()
+        finally:
+            self.model.particle_flags.assign(self._separate_saved_flags)
+
+        self._update_separate_impulse_cache(per_world_impulses, per_world_positions, per_world_ids)
+
+    @staticmethod
+    def _assign_array_if_present(src: wp.array | None, dst: wp.array | None):
+        if src is not None and dst is not None:
+            dst.assign(src)
+
+    def _initialize_state_out_for_separate_world_step(self, state_in: newton.State, state_out: newton.State):
+        # Keep per-particle fields synchronized with the input state before masked world solves.
+        # We cannot call state_out.assign(state_in) here because step() attaches transient
+        # fields (collider ids, impulse fields, etc.) to only one of the two ping-pong states.
+        self._assign_array_if_present(state_in.particle_q, state_out.particle_q)
+        self._assign_array_if_present(state_in.particle_qd, state_out.particle_qd)
+        self._assign_array_if_present(state_in.mpm.particle_qd_grad, state_out.mpm.particle_qd_grad)
+        self._assign_array_if_present(state_in.mpm.particle_elastic_strain, state_out.mpm.particle_elastic_strain)
+        self._assign_array_if_present(state_in.mpm.particle_Jp, state_out.mpm.particle_Jp)
+        self._assign_array_if_present(state_in.body_q, state_out.body_q)
+        self._assign_array_if_present(state_in.body_qd, state_out.body_qd)
 
     @override
     def notify_model_changed(self, flags: int):
@@ -1479,6 +1612,7 @@ class SolverImplicitMPM(SolverBase):
                 state_in.body_q,
                 state_in.body_qd,
                 self._last_step_data.body_q_prev,
+                -1,
                 dt,
             ],
             outputs=[
@@ -1502,16 +1636,98 @@ class SolverImplicitMPM(SolverBase):
             - Collider id, that can be mapped back to the model's body ids using the ``collider_body_index`` property.
         """
 
+        if self.separate_worlds:
+            return (
+                self._separate_impulses,
+                self._separate_impulse_positions,
+                self._separate_impulse_ids,
+            )
+
         # Not stepped yet, read from preallocated scratchpad
         if not hasattr(state, "impulse_field"):
             state = self._scratchpad
 
+        return self._collect_collider_impulses_from_state(state)
+
+    def _collect_collider_impulses_from_state(self, state: newton.State) -> tuple[wp.array, wp.array, wp.array]:
         cell_volume = self._mpm_model.voxel_size**3
-        return (
-            -cell_volume * state.impulse_field.dof_values,
-            state.collider_position_field.dof_values,
-            state.collider_ids,
-        )
+        return -cell_volume * state.impulse_field.dof_values, state.collider_position_field.dof_values, state.collider_ids
+
+    @staticmethod
+    def _normalize_bounds_array(bounds: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+        bounds_arr = np.asarray(bounds, dtype=np.float32)
+        if bounds_arr.ndim == 1:
+            if bounds_arr.shape[0] != 3:
+                raise ValueError(f"Expected 3 values per bound, got shape {bounds_arr.shape}")
+            bounds_arr = bounds_arr.reshape(1, 3)
+        if bounds_arr.ndim != 2 or bounds_arr.shape[1] != 3:
+            raise ValueError(f"Expected bounds with shape [N, 3], got {bounds_arr.shape}")
+        return bounds_arr
+
+    @staticmethod
+    def _clear_last_step_warmstart(last_step_data: LastStepData) -> int:
+        cleared_nodes = 0
+        if last_step_data.ws_impulse_field is not None:
+            last_step_data.ws_impulse_field.dof_values.zero_()
+            cleared_nodes += int(last_step_data.ws_impulse_field.dof_values.shape[0])
+        if last_step_data.ws_stress_field is not None:
+            last_step_data.ws_stress_field.dof_values.zero_()
+            cleared_nodes += int(last_step_data.ws_stress_field.dof_values.shape[0])
+        return cleared_nodes
+
+    def clear_warmstart_for_bounds(
+        self,
+        bounds_lo: Sequence[Sequence[float]] | np.ndarray,
+        bounds_hi: Sequence[Sequence[float]] | np.ndarray,
+        padding_cells: int = 1,
+    ) -> int:
+        """Clear warmstart state for selected regions.
+
+        Args:
+            bounds_lo: Per-bound lower corners [m], shape ``[N, 3]``.
+            bounds_hi: Per-bound upper corners [m], shape ``[N, 3]``.
+            padding_cells: Compatibility argument for bounds dilation.
+
+        Returns:
+            Number of cleared warmstart nodes.
+        """
+        bounds_lo_arr = self._normalize_bounds_array(bounds_lo)
+        bounds_hi_arr = self._normalize_bounds_array(bounds_hi)
+        if bounds_lo_arr.shape[0] != bounds_hi_arr.shape[0]:
+            raise ValueError(
+                "bounds_lo and bounds_hi must have same length, "
+                f"got {bounds_lo_arr.shape[0]} vs {bounds_hi_arr.shape[0]}"
+            )
+        if bounds_lo_arr.shape[0] == 0:
+            return 0
+        if self.separate_worlds:
+            return self.clear_warmstart_for_worlds(range(self.model.world_count))
+
+        # Shared-grid mode cannot robustly isolate reset regions without world-level solves.
+        # Clear full warmstart fields as a conservative fallback.
+        return self._clear_last_step_warmstart(self._last_step_data)
+
+    def clear_warmstart_for_worlds(self, world_ids: Sequence[int]) -> int:
+        """Clear all warmstart fields for specific worlds in separate-worlds mode."""
+        if not self.separate_worlds:
+            return 0
+
+        cleared_nodes = 0
+        for world_id in world_ids:
+            wid = int(world_id)
+            if wid < 0 or wid >= self.model.world_count:
+                raise ValueError(f"World index {wid} out of range for world_count={self.model.world_count}.")
+            cleared_nodes += self._clear_last_step_warmstart(self._last_step_data_per_world[wid])
+        return cleared_nodes
+
+    def clear_warmstart(
+        self,
+        bounds_lo: Sequence[Sequence[float]] | np.ndarray,
+        bounds_hi: Sequence[Sequence[float]] | np.ndarray,
+        padding_cells: int = 1,
+    ) -> int:
+        """Alias for :meth:`clear_warmstart_for_bounds`."""
+        return self.clear_warmstart_for_bounds(bounds_lo=bounds_lo, bounds_hi=bounds_hi, padding_cells=padding_cells)
 
     @property
     def collider_body_index(self) -> wp.array:
@@ -1775,6 +1991,8 @@ class SolverImplicitMPM(SolverBase):
         dt: float,
         pic: fem.PicQuadrature,
         scratch: ImplicitMPMScratchpad,
+        last_step_data: LastStepData | None = None,
+        active_world: int = -1,
     ):
         """Single implicit MPM step: bin, rasterize, assemble, solve, advect.
 
@@ -1795,13 +2013,21 @@ class SolverImplicitMPM(SolverBase):
         inv_cell_volume = 1.0 / cell_volume
 
         mpm_model = self._mpm_model
-        last_step_data = self._last_step_data
+        if last_step_data is None:
+            last_step_data = self._last_step_data
 
         self._require_collision_space_fields(scratch, last_step_data)
         self._require_velocity_space_fields(scratch, mpm_model.has_compliant_particles)
 
         # Rasterize colliders to discrete space
-        self._rasterize_colliders(state_in, dt, last_step_data, scratch, inv_cell_volume)
+        self._rasterize_colliders(
+            state_in,
+            dt,
+            last_step_data,
+            scratch,
+            inv_cell_volume,
+            active_world=active_world,
+        )
 
         # Velocity right-hand side and inverse mass matrix
         self._compute_unconstrained_velocity(state_in, dt, pic, scratch, inv_cell_volume)
@@ -1909,6 +2135,7 @@ class SolverImplicitMPM(SolverBase):
         last_step_data: LastStepData,
         scratch: ImplicitMPMScratchpad,
         inv_cell_volume: float,
+        active_world: int = -1,
     ):
         # Rasterize collider to grid
         collider_node_count = scratch.collider_node_count
@@ -1931,6 +2158,7 @@ class SolverImplicitMPM(SolverBase):
                 state_in.body_q,
                 state_in.body_qd,
                 last_step_data.body_q_prev,
+                active_world,
                 self._mpm_model.voxel_size,
                 dt,
                 scratch.collider_fraction_test.space_restriction,

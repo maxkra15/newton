@@ -87,6 +87,9 @@ class ImplicitMPMOptions:
     collider_basis: str = "Q1"
     """Collider basis function string. Examples: P0 (piecewise constant), Q1 (trilinear), S2 (quadratic serendipity), pic8 (particle-based with max 8 points per cell)"""
 
+    separate_worlds: bool = False
+    """If True, solve each Newton world in isolation within ``SolverImplicitMPM.step``."""
+
 
 def _particle_parameter(
     num_particles, model_value: float | wp.array | None = None, default_value=None, model_scale: wp.array | None = None
@@ -257,6 +260,9 @@ class ImplicitMPMModel:
 
         self.collider = Collider()
         """Collider struct"""
+
+        self.separate_worlds = bool(options.separate_worlds)
+        """If True, solve each Newton world in isolation within SolverImplicitMPM.step"""
 
         self.collider_velocity_mode = options.collider_velocity_mode
         """Collider velocity computation mode (instantaneous or finite_difference)"""
@@ -491,6 +497,7 @@ class ImplicitMPMModel:
         with wp.ScopedDevice(self.model.device):
             # Create collider meshes from bodies if necessary
             face_material_ids = [[]]
+            collider_world_ids: list[int] = []
             for collider_id in range(collider_count):
                 body_index = collider_body_ids[collider_id]
 
@@ -503,14 +510,20 @@ class ImplicitMPMModel:
                     material_id = collider_material_ids[collider_id][0]
                     face_count = collider_meshes[collider_id].indices.shape[0] // 3
                     mesh_face_material_ids = np.full(face_count, material_id, dtype=int)
+                    collider_world_ids.append(-1)
                 else:
                     collider_meshes[collider_id], mesh_face_material_ids = _create_body_collider_mesh(
                         model, body_shapes[body_index], collider_material_ids[collider_id]
                     )
+                    if body_index >= 0 and model.body_world is not None:
+                        collider_world_ids.append(int(model.body_world.numpy()[body_index]))
+                    else:
+                        collider_world_ids.append(-1)
 
                 face_material_ids.append(mesh_face_material_ids)
 
             self.collider.collider_body_index = wp.array(collider_body_ids, dtype=int)
+            self.collider.collider_world_index = wp.array(collider_world_ids, dtype=int)
             self.collider.collider_mesh = wp.array([collider.id for collider in collider_meshes], dtype=wp.uint64)
             self.collider.collider_max_thickness = wp.array(collider_max_thickness, dtype=float)
 
