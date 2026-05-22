@@ -6,7 +6,7 @@
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add an experimental coupled solver framework:
-  - Introduce `newton.solvers.coupled_experimental` with `SolverCoupled`, `SolverProxyCoupled`, `SolverAdmmCoupled`, and `ModelView` for multi-solver ownership, state mapping, and view-local model overrides.
+  - Introduce `newton.solvers.experimental.coupled` with `SolverCoupled`, `SolverCoupledProxy`, `SolverCoupledAdmm`, and `ModelView` for multi-solver ownership, state mapping, and view-local model overrides.
   - Support body and particle proxy coupling with virtual inertia, solver hooks, MPM collider/transfer proxies, and convergence diagnostics.
   - Support ADMM coupling from model-derived joints, body-particle attachments, and collision-detected rigid/particle contacts with Coulomb friction.
   - Add standalone multiphysics examples and regression coverage for MuJoCo/Kamino, VBD, XPBD, MPM, and ADMM contacts.
