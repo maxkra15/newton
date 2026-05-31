@@ -3783,7 +3783,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             nworld = mj_data.nworld
         else:
             # we have an MjData object from Mujoco
-            effective_coord_count = model.joint_coord_count - self._total_loop_joint_coords
+            template_qpos_count = getattr(self, "_mujoco_template_qpos_count", None)
+            if template_qpos_count is not None:
+                effective_coord_count = int(template_qpos_count) * model.world_count
+            else:
+                effective_coord_count = model.joint_coord_count - self._total_loop_joint_coords
             single_world_template = len(mj_data.qpos) < effective_coord_count
             expected_qpos = (
                 effective_coord_count // model.world_count if single_world_template else effective_coord_count
@@ -4534,7 +4538,83 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         body_name_counts = {}
         joint_names = {}
 
-        if separate_worlds:
+        custom_selected_bodies = getattr(model, "_mujoco_selected_bodies", None)
+
+        if separate_worlds and custom_selected_bodies is not None:
+            # Coupled ModelViews keep parent-model indexing so their world-0 body set may contain objects owned by
+            # another sub-solver. When the coupled manager provides explicit MuJoCo entry selections, build the MJCF
+            # template from those ids only. Runtime state mapping still uses parent-model ids.
+            first_world = int(getattr(model, "_mujoco_template_world", 0))
+
+            def _selected_indices(name: str, fallback: np.ndarray) -> np.ndarray:
+                values = getattr(model, name, None)
+                if values is None:
+                    return fallback.astype(np.int32, copy=False)
+                return np.asarray(values, dtype=np.int32)
+
+            selected_bodies = _selected_indices("_mujoco_selected_bodies", np.array([], dtype=np.int32))
+            selected_joints = _selected_indices("_mujoco_selected_joints", np.array([], dtype=np.int32))
+            selected_shapes = _selected_indices("_mujoco_selected_shapes", np.array([], dtype=np.int32))
+
+            selected_body_set = set(int(body_id) for body_id in selected_bodies)
+            selected_joint_set = set(int(joint_id) for joint_id in selected_joints)
+
+            if selected_joints.size == 0 and selected_body_set:
+                selected_joints = np.array(
+                    [
+                        joint_id
+                        for joint_id, child in enumerate(joint_child)
+                        if int(joint_world[joint_id]) == first_world and int(child) in selected_body_set
+                    ],
+                    dtype=np.int32,
+                )
+                selected_joint_set = set(int(joint_id) for joint_id in selected_joints)
+
+            if selected_shapes.size == 0 and selected_body_set:
+                selected_shapes = np.array(
+                    [
+                        shape_id
+                        for shape_id, body_id in enumerate(model.shape_body.numpy())
+                        if int(shape_world[shape_id]) == first_world and int(body_id) in selected_body_set
+                    ],
+                    dtype=np.int32,
+                )
+
+            selected_constraints = np.array(
+                [
+                    constraint_id
+                    for constraint_id in np.where((eq_constraint_world == first_world) | (eq_constraint_world < 0))[0]
+                    if (
+                        (
+                            int(eq_constraint_body1[constraint_id]) < 0
+                            or int(eq_constraint_body1[constraint_id]) in selected_body_set
+                        )
+                        and (
+                            int(eq_constraint_body2[constraint_id]) < 0
+                            or int(eq_constraint_body2[constraint_id]) in selected_body_set
+                        )
+                        and (
+                            int(eq_constraint_joint1[constraint_id]) < 0
+                            or int(eq_constraint_joint1[constraint_id]) in selected_joint_set
+                        )
+                        and (
+                            int(eq_constraint_joint2[constraint_id]) < 0
+                            or int(eq_constraint_joint2[constraint_id]) in selected_joint_set
+                        )
+                    )
+                ],
+                dtype=np.int32,
+            )
+            selected_mimic_constraints = np.array(
+                [
+                    mimic_id
+                    for mimic_id in np.where((mimic_world == first_world) | (mimic_world < 0))[0]
+                    if int(mimic_joint0[mimic_id]) in selected_joint_set
+                    and int(mimic_joint1[mimic_id]) in selected_joint_set
+                ],
+                dtype=np.int32,
+            )
+        elif separate_worlds:
             # determine which shapes, bodies and joints belong to the first world
             # based on the body world indices: we pick objects from the first world and global shapes
             non_negatives = body_world[body_world >= 0]
@@ -4922,8 +5002,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
         # Maps from Newton joint index (per-world/template) to MuJoCo DOF start index (per-world/template)
         # Only populated for template joints; in kernels, use joint_in_world to index
-        joint_mjc_dof_start = np.full(len(selected_joints), -1, dtype=np.int32)
-        joint_mjc_qpos_start = np.full(len(selected_joints), -1, dtype=np.int32)
+        template_joint_count = model.joint_count // model.world_count if custom_selected_bodies is not None else len(
+            selected_joints
+        )
+        joint_mjc_dof_start = np.full(template_joint_count, -1, dtype=np.int32)
+        joint_mjc_qpos_start = np.full(template_joint_count, -1, dtype=np.int32)
 
         # Maps from Newton DOF index to MuJoCo joint index (first world only)
         # Needed because jnt_solimp/jnt_solref are per-joint (not per-DOF) in MuJoCo
@@ -5580,16 +5663,16 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         # These map Newton template joint index → MuJoCo qpos/qvel start.
         # Loop joints get -1 (they have no MuJoCo qpos/qvel slots).
         # Must be created before _update_mjc_data which uses them.
-        n_template_joints = len(selected_joints)
+        n_template_joints = template_joint_count
         mj_q_start_np = np.full(n_template_joints, -1, dtype=np.int32)
         mj_qd_start_np = np.full(n_template_joints, -1, dtype=np.int32)
-        for j_template in range(n_template_joints):
-            j_idx = selected_joints[j_template]
-            mj_q_start_np[j_template] = joint_mjc_qpos_start[j_idx]
-            mj_qd_start_np[j_template] = joint_mjc_dof_start[j_idx]
+        for j_idx in selected_joints:
+            j_template = int(j_idx) % n_template_joints
+            mj_q_start_np[j_template] = joint_mjc_qpos_start[j_template]
+            mj_qd_start_np[j_template] = joint_mjc_dof_start[j_template]
         # Validate that all non-loop joints got valid MuJoCo start indices
-        for j_template in range(n_template_joints):
-            j_idx = selected_joints[j_template]
+        for j_idx in selected_joints:
+            j_template = int(j_idx) % n_template_joints
             if joint_articulation[j_idx] >= 0:
                 assert mj_q_start_np[j_template] >= 0, (
                     f"Non-loop joint {j_idx} (template {j_template}) has no MuJoCo qpos mapping"
@@ -5599,6 +5682,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 )
         self.mj_q_start = wp.array(mj_q_start_np, dtype=wp.int32, device=model.device)
         self.mj_qd_start = wp.array(mj_qd_start_np, dtype=wp.int32, device=model.device)
+        self._mujoco_template_qpos_count = int(num_qpos) if custom_selected_bodies is not None else None
 
         self._update_mjc_data(self.mj_data, model, state)
 
