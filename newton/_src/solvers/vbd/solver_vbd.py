@@ -868,6 +868,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         body_local_to_proxy_global: wp.array[int],
         state: State,
         coupling_forces: wp.array[wp.spatial_vector],
+        body_gravity_acceleration: wp.array[wp.vec3],
         dt: float,
     ) -> None:
         """Remove explicit loads while preserving VBD's position-level feedback.
@@ -885,8 +886,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             dim=body_local_to_proxy_global.shape[0],
             inputs=[
                 float(dt),
-                self.model.gravity,
-                self.model.body_world,
+                body_gravity_acceleration,
                 state.body_q,
                 state.body_f,
                 body_local_to_proxy_global,
@@ -902,6 +902,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         particle_local_to_proxy_global: wp.array[int],
         state: State,
         coupling_forces: wp.array[wp.vec3],
+        particle_gravity_acceleration: wp.array[wp.vec3],
         dt: float,
     ) -> None:
         """Remove explicit loads while preserving VBD's position-level feedback.
@@ -919,8 +920,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             dim=particle_local_to_proxy_global.shape[0],
             inputs=[
                 float(dt),
-                self.model.gravity,
-                self.model.particle_world,
+                particle_gravity_acceleration,
                 state.particle_f,
                 particle_local_to_proxy_global,
                 self.model.particle_inv_mass,
@@ -933,6 +933,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         self,
         body_local_to_proxy_global: wp.array[int],
         out_body_f: wp.array[wp.spatial_vector],
+        body_gravity_acceleration: wp.array[wp.vec3],
         *,
         body_qd_before: wp.array[wp.spatial_vector] | None = None,
         state: State | None = None,
@@ -946,6 +947,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             super().coupling_harvest_proxy_wrenches(
                 body_local_to_proxy_global,
                 out_body_f,
+                body_gravity_acceleration,
                 body_qd_before=body_qd_before,
                 state_out=state_out,
                 contacts=contacts,
@@ -1019,6 +1021,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         self,
         particle_local_to_proxy_global: wp.array[int],
         out_particle_f: wp.array[wp.vec3],
+        particle_gravity_acceleration: wp.array[wp.vec3],
         *,
         particle_qd_before: wp.array[wp.vec3] | None = None,
         state: State | None = None,
@@ -1036,7 +1039,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         ``integrate_with_external_rigid_solver=True``, rigid poses are supplied
         by the external solver in ``state_out`` instead.
         """
-        del particle_qd_before
+        del particle_gravity_acceleration, particle_qd_before
         if self.model.particle_count == 0 or particle_local_to_proxy_global.shape[0] == 0 or state is None:
             return
 
@@ -3236,8 +3239,7 @@ def _update_vbd_body_input_state_kernel(
 @wp.kernel(enable_backward=False)
 def _rewind_vbd_proxy_body_external_forces_kernel(
     dt: float,
-    gravity: wp.array[wp.vec3],
-    body_world: wp.array[wp.int32],
+    body_gravity_acceleration: wp.array[wp.vec3],
     body_q: wp.array[wp.transform],
     body_f: wp.array[wp.spatial_vector],
     body_local_to_proxy_global: wp.array[int],
@@ -3258,10 +3260,9 @@ def _rewind_vbd_proxy_body_external_forces_kernel(
     delta_v = dt * inv_m * wp.spatial_top(f)
     delta_w = dt * wp.quat_rotate(r, inv_I * wp.quat_rotate_inv(r, wp.spatial_bottom(f)))
 
-    world_idx = body_world[local_id]
     delta_v_grav = wp.vec3(0.0, 0.0, 0.0)
     if inv_m > 0.0:
-        delta_v_grav = dt * gravity[wp.max(world_idx, 0)]
+        delta_v_grav = dt * body_gravity_acceleration[local_id]
 
     body_qd[local_id] = body_qd[local_id] - wp.spatial_vector(delta_v + delta_v_grav, delta_w)
 
@@ -3269,8 +3270,7 @@ def _rewind_vbd_proxy_body_external_forces_kernel(
 @wp.kernel(enable_backward=False)
 def _rewind_vbd_proxy_particle_external_forces_kernel(
     dt: float,
-    gravity: wp.array[wp.vec3],
-    particle_world: wp.array[wp.int32],
+    particle_gravity_acceleration: wp.array[wp.vec3],
     particle_f: wp.array[wp.vec3],
     particle_local_to_proxy_global: wp.array[int],
     particle_inv_mass: wp.array[float],
@@ -3285,8 +3285,7 @@ def _rewind_vbd_proxy_particle_external_forces_kernel(
     if inv_m <= 0.0:
         return
 
-    world_idx = particle_world[local_id]
-    delta_v = dt * gravity[wp.max(world_idx, 0)]
+    delta_v = dt * particle_gravity_acceleration[local_id]
     if particle_f:
         delta_v = delta_v + dt * inv_m * particle_f[local_id]
 
