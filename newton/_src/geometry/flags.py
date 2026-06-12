@@ -13,6 +13,15 @@ class ParticleFlags(IntEnum):
     ACTIVE = 1 << 0
     """Indicates that the particle is active."""
 
+    FLUID = 1 << 1
+    """Indicates that the particle is part of a fluid.
+
+    Fluid particles generate position-based fluid density constraints against
+    other fluid particles instead of pairwise contact constraints in solvers
+    that support fluids (see :class:`newton.solvers.SolverXPBD`). Interactions
+    with non-fluid particles and shapes are still handled as regular contacts.
+    """
+
 
 # Shape flags
 class ShapeFlags(IntEnum):
