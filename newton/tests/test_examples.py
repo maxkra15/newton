@@ -763,6 +763,14 @@ add_example_test(
 
 add_example_test(
     TestFluidExamples,
+    name="fluid.example_fluid_sph_cup_transfer",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "substeps": 4, "fill-layers": 5},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
     name="fluid.example_fluid_sph_wave_pool",
     devices=cuda_test_devices,
     test_options={
