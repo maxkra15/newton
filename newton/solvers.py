@@ -88,6 +88,14 @@ Supported Features
      - 🟨 no self-collision
      - ✅
      - 🟨 basic :sup:`2`
+   * - :class:`~newton.solvers.SolverSPH`
+     - Semi-implicit
+     - ❌
+     - ❌
+     - ✅ fluids
+     - ❌
+     - ❌
+     - ❌
    * - :class:`~newton.solvers.SolverStyle3D`
      - Implicit
      - ❌
@@ -410,13 +418,12 @@ from ._src.solvers import (
     SolverKamino,
     SolverMuJoCo,
     SolverSemiImplicit,
+    SolverSPH,
     SolverStyle3D,
     SolverVBD,
     SolverXPBD,
     style3d,
 )
-
-# solver flags
 from ._src.solvers.flags import SolverNotifyFlags
 
 __all__ = [
@@ -426,6 +433,7 @@ __all__ = [
     "SolverKamino",
     "SolverMuJoCo",
     "SolverNotifyFlags",
+    "SolverSPH",
     "SolverSemiImplicit",
     "SolverStyle3D",
     "SolverVBD",

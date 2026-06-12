@@ -200,6 +200,7 @@ class ViewerGL(ViewerBase):
         headless: bool = False,
         paused: bool = False,
         plot_history_size: int = 250,
+        num_frames: int | None = None,
     ):
         """
         Initialize the OpenGL viewer and UI.
@@ -212,7 +213,10 @@ class ViewerGL(ViewerBase):
             paused: Start the viewer in paused mode.
             plot_history_size: Maximum number of samples kept per
                 :meth:`log_scalar` signal for the live time-series plots.
+            num_frames: Optional frame limit for automated/headless runs.
         """
+        self.num_frames = num_frames
+        self.frame_count = 0
         if not isinstance(plot_history_size, int) or isinstance(plot_history_size, bool):
             raise TypeError("plot_history_size must be an integer")
         if plot_history_size <= 0:
@@ -483,6 +487,12 @@ class ViewerGL(ViewerBase):
         self._destroy_all_wireframes()
         self.wireframe_shapes = {}
         self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
+        for obj in getattr(self, "fluids", {}).values():
+            obj.destroy()
+        self.fluids = {}
+        for obj in getattr(self, "fluid_diffuse", {}).values():
+            obj.destroy()
+        self.fluid_diffuse = {}
 
         # Interactive picking and wind force helpers
         self.picking = None
@@ -1132,6 +1142,72 @@ class ViewerGL(ViewerBase):
         self._wireframe_vbo_owners.clear()
 
     @override
+    def log_fluid(
+        self,
+        name: str,
+        points: wp.array[wp.vec3] | None,
+        radii: wp.array[wp.float32] | float | None = None,
+        radius_scale: float = 1.0,
+        color: tuple[float, float, float, float] = (0.113, 0.425, 0.55, 0.8),
+        ior: float = 1.0,
+        blur_radius_world: float | None = None,
+        anisotropy: wp.array[wp.vec4] | None = None,
+        anisotropy_secondary: wp.array[wp.vec4] | None = None,
+        anisotropy_tertiary: wp.array[wp.vec4] | None = None,
+        hidden: bool = False,
+    ):
+        """Log particles for Flex-style screen-space fluid rendering."""
+        from .gl.fluid import FluidBatch  # noqa: PLC0415
+
+        if points is None:
+            if name in self.fluids:
+                self.fluids[name].count = 0
+                self.fluids[name].hidden = True
+            return
+
+        count = len(points)
+        if name not in self.fluids:
+            self.fluids[name] = FluidBatch(self.renderer.gl, max(count, 256))
+        batch = self.fluids[name]
+        batch.hidden = hidden
+        batch.color = tuple(float(c) for c in color)
+        batch.ior = float(ior)
+        if blur_radius_world is not None:
+            batch.blur_radius_world = float(blur_radius_world)
+        elif isinstance(radii, (int, float)):
+            batch.blur_radius_world = float(radii) * 2.0
+        batch.update(points, radii, radius_scale, anisotropy, anisotropy_secondary, anisotropy_tertiary)
+
+    def log_fluid_diffuse(
+        self,
+        name: str,
+        positions: wp.array[wp.vec4] | None,
+        velocities: wp.array[wp.vec4] | None = None,
+        radius: float = 0.02,
+        color: tuple[float, float, float, float] = (0.9, 0.95, 1.0, 0.8),
+        motion_blur_scale: float = 1.0,
+        diffusion: float = 1.0,
+        hidden: bool = False,
+    ):
+        """Log Flex-style diffuse spray/foam particles."""
+        from .gl.fluid import DiffuseBatch  # noqa: PLC0415
+
+        if positions is None:
+            if name in self.fluid_diffuse:
+                self.fluid_diffuse[name].count = 0
+                self.fluid_diffuse[name].hidden = True
+            return
+
+        if name not in self.fluid_diffuse:
+            self.fluid_diffuse[name] = DiffuseBatch(self.renderer.gl, max(len(positions), 256))
+        batch = self.fluid_diffuse[name]
+        batch.hidden = hidden
+        batch.radius = float(radius)
+        batch.color = tuple(float(c) for c in color)
+        batch.motion_blur_scale = float(motion_blur_scale)
+        batch.diffusion = float(diffusion)
+        batch.update(positions, velocities)
+
     def log_points(
         self,
         name: str,
@@ -1565,6 +1641,7 @@ class ViewerGL(ViewerBase):
         whether an exit was requested and early-out before touching GL if so.
         """
         self._update()
+        self.frame_count += 1
 
     @override
     def apply_forces(self, state: nt.State):
@@ -1600,7 +1677,15 @@ class ViewerGL(ViewerBase):
             return
 
         # Render the scene and present it
-        self.renderer.render(self.camera, self.objects, self.lines, self.wireframe_shapes, self.arrows)
+        self.renderer.render(
+            self.camera,
+            self.objects,
+            self.lines,
+            self.wireframe_shapes,
+            self.arrows,
+            fluids=self.fluids,
+            fluid_diffuse=self.fluid_diffuse,
+        )
 
         if self.gui:
             self.gui.render_frame(update_fps=True)
@@ -1697,6 +1782,8 @@ class ViewerGL(ViewerBase):
         Returns:
             bool: True if the window is open, False if closed.
         """
+        if self.num_frames is not None and self.frame_count >= self.num_frames:
+            return False
         return not self.renderer.has_exit()
 
     @override

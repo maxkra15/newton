@@ -1214,9 +1214,10 @@ class RendererGL:
                 # This is a non-fatal error that can be safely ignored
                 pass
 
-    def render(self, camera, objects, lines=None, wireframe_shapes=None, arrows=None):
+    def render(self, camera, objects, lines=None, wireframe_shapes=None, arrows=None, fluids=None, fluid_diffuse=None):
         gl = RendererGL.gl
         self._make_current()
+        self._current_fluids = fluids
 
         gl.glClearColor(*self.sky_upper, 1)
         gl.glEnable(gl.GL_DEPTH_TEST)
@@ -1308,6 +1309,12 @@ class RendererGL:
             )
 
         # ------------------------------------------------------------------
+        # Screen-space fluid rendering over the resolved scene
+        # ------------------------------------------------------------------
+        if fluids or fluid_diffuse:
+            self._get_fluid_renderer().render(self, fluids or {}, fluid_diffuse or {})
+
+        # ------------------------------------------------------------------
         # Draw resolved texture to the screen
         # ------------------------------------------------------------------
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
@@ -1333,6 +1340,13 @@ class RendererGL:
 
         err = gl.glGetError()
         assert err == gl.GL_NO_ERROR, hex(err)
+
+    def _get_fluid_renderer(self):
+        if getattr(self, "_fluid_renderer", None) is None:
+            from .fluid import FluidRenderer  # noqa: PLC0415
+
+            self._fluid_renderer = FluidRenderer(RendererGL.gl)
+        return self._fluid_renderer
 
     def present(self):
         if not self.headless:
@@ -1802,6 +1816,8 @@ class RendererGL:
 
         light_view = Mat4.look_at(Vec3(*light_pos), Vec3(*camera_pos), Vec3(*self.camera.get_up()))
         self._light_space_matrix = np.array(light_proj @ light_view, dtype=np.float32)
+        self._light_view_matrix = np.array(light_view, dtype=np.float32)
+        self._light_projection_matrix = np.array(light_proj, dtype=np.float32)
 
         self._shadow_shader.update(self._light_space_matrix)
 
@@ -1809,6 +1825,10 @@ class RendererGL:
         shadow_objects = {k: v for k, v in objects.items() if getattr(v, "cast_shadow", True)}
         with self._shadow_shader:
             self._draw_objects(shadow_objects)
+
+        # fluid particles cast shadows through the same map
+        if getattr(self, "_current_fluids", None):
+            self._get_fluid_renderer().render_shadow(self, self._current_fluids)
 
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
 
