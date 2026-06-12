@@ -1190,6 +1190,7 @@ class ViewerGL(ViewerBase):
         motion_blur_scale: float = 1.0,
         diffusion: float = 1.0,
         lifetime: float = 2.0,
+        surface_bias: float = 0.05,
         hidden: bool = False,
     ):
         """Log Flex-style diffuse spray/foam particles."""
@@ -1210,6 +1211,7 @@ class ViewerGL(ViewerBase):
         batch.motion_blur_scale = float(motion_blur_scale)
         batch.diffusion = float(diffusion)
         batch.lifetime = float(max(lifetime, 1.0e-3))
+        batch.surface_bias = float(surface_bias)
         batch.update(positions, velocities)
 
     def log_points(
