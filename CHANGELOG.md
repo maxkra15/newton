@@ -28,6 +28,10 @@
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
 - Fix mesh inertia computation to produce deterministic results across repeated CUDA runs. (#3136)
 - Fix VBD collision damping to use relative normal gap rate so uniform contact-stencil motion and tangential sliding do not create artificial normal damping.
+- Fix mesh inertia computation to produce deterministic results across repeated CUDA runs.
+- Fix `SolverCoupledADMM` proximal penalization so it applies a lumped `gamma * rho * W^2 * J^T J`
+  metric only to constrained endpoints, using detected contact pairs for graph-safe solvers and setup-time contact
+  candidates for solvers that need cached inertial refresh.
 - Fix MJCF `euler` producing wrong orientations for multi-component angles by treating angles as intrinsic rotations. (#3030)
 - Fix MJCF parsing so attributes from multiple `<compiler>` elements, including `<include>`-expanded children, are merged in document order. (#3030)
 - Fix MJCF worldbody static geoms bypassing the visual/collider class filter, so `parse_visuals=False` drops visual-class geoms attached directly to `<worldbody>` too. (#3030)
