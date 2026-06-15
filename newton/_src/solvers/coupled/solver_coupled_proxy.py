@@ -56,6 +56,7 @@ class _ProxyBodyMapping:
     mass_scale: float = 1.0
     mode: int = 0
     proxy_relaxation: float = 1.0
+    immovable: bool = False
 
 
 @dataclass
@@ -144,6 +145,9 @@ class SolverCoupledProxy(SolverCoupled):
             collide_interval: Collision-detection refresh interval for
                 ``collision_pipeline``. ``None`` means every proxy pass when a
                 custom pipeline is supplied.
+            immovable: One-way kinematic proxy mode. Destination proxy bodies
+                are made immovable in the destination view and no reaction
+                feedback is harvested back to the source.
         """
 
         source: str
@@ -157,6 +161,7 @@ class SolverCoupledProxy(SolverCoupled):
         proxy_particles: Sequence[int] | None = None
         collision_pipeline: Callable[[ModelView], object | None] | None = None
         collide_interval: int | None = None
+        immovable: bool = False
 
     @dataclass(frozen=True)
     class Config:
@@ -301,6 +306,7 @@ class SolverCoupledProxy(SolverCoupled):
                     mass_scale=float(proxy.mass_scale),
                     mode=self._proxy_mode_value(proxy.mode),
                     proxy_relaxation=proxy_relaxation,
+                    immovable=bool(proxy.immovable),
                 )
             )
         return mappings
@@ -723,6 +729,10 @@ class SolverCoupledProxy(SolverCoupled):
                 continue
             src = self._entries[proxy.src_name]
             dst = self._entries[proxy.dst_name]
+            if proxy.immovable:
+                if proxy.proxy_body_ids_local is not None and proxy.proxy_body_ids_local.shape[0] > 0:
+                    dst.view.disable_body_dynamics(proxy.proxy_body_ids_local)
+                continue
             inertial_properties = self._eval_effective_body_inertial_properties(src, proxy.src_body_ids)
             if inertial_properties is None:
                 continue
@@ -966,6 +976,9 @@ class SolverCoupledProxy(SolverCoupled):
                     )
 
             for proxy in body_proxies:
+                if proxy.immovable:
+                    proxy.coupling_forces.zero_()
+                    continue
                 dst.solver.coupling_harvest_proxy_wrenches(
                     proxy.destination_local_to_proxy_global,
                     proxy.coupling_forces,
