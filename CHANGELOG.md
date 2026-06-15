@@ -52,6 +52,10 @@
 - Fix `SolverMuJoCo` reporting incorrect `State.body_qd` angular velocity for `JointType.D6` joints with two or three angular DOFs at non-identity configurations.
 - Fix VBD collision damping to use relative normal gap rate so uniform contact-stencil motion and tangential sliding do not create artificial normal damping.
 - Fix `RenderContext` triangle mesh construction by removing the unsupported `device=` keyword from `wp.Mesh(...)`.
+- Fix mesh inertia computation to produce deterministic results across repeated CUDA runs.
+- Fix `SolverCoupledADMM` proximal penalization so it applies a lumped `gamma * rho * W^2 * J^T J`
+  metric only to constrained endpoints, using detected contact pairs for graph-safe solvers and setup-time contact
+  candidates for solvers that need cached inertial refresh.
 - Fix MJCF `euler` producing wrong orientations for multi-component angles by treating angles as intrinsic rotations. (#3030)
 - Fix `newton.eval_fk` / `newton.eval_ik` producing wrong rotations and joint velocities for `JointType.D6` with three angular DOFs whose axes form a left-handed orthonormal basis.
 - Fix MJCF parsing so attributes from multiple `<compiler>` elements, including `<include>`-expanded children, are merged in document order. (#3030)
