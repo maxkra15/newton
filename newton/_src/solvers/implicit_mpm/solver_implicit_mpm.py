@@ -1169,7 +1169,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     device=self.model.device,
                 )
 
-    def coupling_rewind_proxy_body_velocity(
+    def coupling_rewind_proxy_body(
         self,
         body_local_to_proxy_global: wp.array[int],
         state: newton.State,
@@ -1238,7 +1238,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             device=self.model.device,
         )
 
-    def coupling_rewind_proxy_particle_velocity(
+    def coupling_rewind_proxy_particle(
         self,
         particle_local_to_proxy_global: wp.array[int],
         state: newton.State,
