@@ -1006,6 +1006,7 @@ def create_soft_contacts(
     soft_contact_max: int,
     shape_count: int,
     shape_flags: wp.array[wp.int32],
+    shape_sdf_index: wp.array[wp.int32],
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     heightfield_elevations: wp.array[wp.float32],
@@ -1023,6 +1024,11 @@ def create_soft_contacts(
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
         return
     if (shape_flags[shape_index] & ShapeFlags.COLLIDE_PARTICLES) == 0:
+        return
+    # Shapes with a texture SDF are handled by the cheaper SDF soft-contact
+    # kernel (one sample per particle instead of a per-triangle mesh query).
+    # On CPU no shape has an SDF, so this never skips and behavior is unchanged.
+    if shape_sdf_index[shape_index] >= 0:
         return
 
     # Check world indices

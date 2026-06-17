@@ -769,11 +769,57 @@ add_example_test(
     use_viewer=True,
 )
 
+# The XPBD fluid examples default to ~100k particles; the tests override the
+# grid down to a few thousand so CI stays fast while still exercising the full
+# fluid pipeline (the perf of the 100k defaults is validated separately).
 add_example_test(
     TestFluidExamples,
     name="fluid.example_fluid_xpbd_dam_break",
     devices=cuda_test_devices,
-    test_options={"num-frames": 60},
+    test_options={"num-frames": 60, "dim-x": 14, "dim-y": 20, "dim-z": 24, "spacing": 0.05, "substeps": 4},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
+    name="fluid.example_fluid_xpbd_cereal_bowl",
+    devices=cuda_test_devices,
+    # coarser milk + low SDF resolution keep CI fast
+    test_options={"num-frames": 90, "spacing": 0.006, "sdf-resolution": 64, "cereal-sdf-resolution": 32},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
+    name="fluid.example_fluid_xpbd_interactive_tank",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 90, "dim-z": 8, "spacing": 0.04},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
+    name="fluid.example_fluid_xpbd_wave_pool",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "dim-x": 52, "dim-y": 18, "dim-z": 8, "spacing": 0.05},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
+    name="fluid.example_fluid_xpbd_cup_transfer",
+    devices=cuda_test_devices,
+    # coarser water + low SDF resolution keep CI fast
+    test_options={"num-frames": 40, "substeps": 4, "spacing": 0.008, "fill-layers": 6, "sdf-resolution": 48},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestFluidExamples,
+    name="fluid.example_fluid_xpbd_cup",
+    devices=cuda_test_devices,
+    # coarse water + low SDF resolution keep CI fast
+    test_options={"num-frames": 60, "spacing": 0.008, "sdf-resolution": 48},
     use_viewer=True,
 )
 
