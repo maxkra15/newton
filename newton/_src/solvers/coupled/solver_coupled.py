@@ -2276,6 +2276,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 dim=contact_update_dim,
                 inputs=[
                     contacts.contact_generation,
+                    filtered.contact_generation,
                     self._entry_rigid_contact_generation[entry.name],
                     self._entry_soft_contact_generation[entry.name],
                     self._entry_rigid_contact_update[entry.name],
@@ -2404,8 +2405,6 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 ],
                 device=self.model.device,
             )
-
-        wp.copy(filtered.contact_generation, contacts.contact_generation)
 
         return filtered
 
@@ -2899,6 +2898,7 @@ def _add_mapped_particle_forces_kernel(
 @wp.kernel(enable_backward=False)
 def _prepare_filtered_contact_update_kernel(
     src_generation: wp.array[wp.int32],
+    dst_generation: wp.array[wp.int32],
     rigid_generation: wp.array[wp.int32],
     soft_generation: wp.array[wp.int32],
     rigid_update_out: wp.array[wp.int32],
@@ -2925,6 +2925,8 @@ def _prepare_filtered_contact_update_kernel(
             rigid_generation[0] = src_generation[0]
         if soft_update != 0:
             soft_generation[0] = src_generation[0]
+        if rigid_update != 0 or soft_update != 0:
+            dst_generation[0] += wp.int32(1)
         if rigid_update != 0 and counter_count > 0:
             dst_counters[0] = 0
         if soft_update != 0 and counter_count > 1:

@@ -799,7 +799,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         if body_body_state is not None:
             self._init_body_body_contact_state(rigid_contact_max)
 
-        self._init_body_particle_contact_state(soft_contact_max)
+        if self.model.particle_count > 0 and self.model.shape_count > 0:
+            self._init_body_particle_contact_state(soft_contact_max)
 
         self._rigid_contact_body0 = self._grow_contact_array(
             self._rigid_contact_body0, rigid_contact_max, wp.int32, fill_value=-1

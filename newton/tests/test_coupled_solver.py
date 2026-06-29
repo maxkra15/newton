@@ -774,6 +774,7 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         coupled.prepare_cuda_graph_capture(contacts)
 
         outer_filtered = coupled.entry_contacts("nested", contacts)
+        outer_generation = int(outer_filtered.contact_generation.numpy()[0])
         left_filtered = nested.entry_contacts("left", outer_filtered)
         right_filtered = nested.entry_contacts("right", outer_filtered)
         self.assertIs(leaves["left"].prepared_contacts[0], left_filtered)
@@ -789,17 +790,28 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         for name in ("left", "right"):
             np.testing.assert_array_equal(nested.entry_state(name, "input").body_q.numpy(), nested_state_before[name])
 
-        contacts.clear()
-        contacts.rigid_contact_count.fill_(1)
-        contacts.rigid_contact_shape0.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
-        contacts.rigid_contact_shape1.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
+        replacement_contacts = newton.Contacts(rigid_contact_max=4, soft_contact_max=0, device=model.device)
+        replacement_contacts.rigid_contact_count.fill_(1)
+        replacement_contacts.rigid_contact_shape0.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
+        replacement_contacts.rigid_contact_shape1.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
 
-        coupled.prepare_cuda_graph_capture(contacts)
+        coupled.prepare_cuda_graph_capture(replacement_contacts)
 
         self.assertIs(leaves["left"].prepared_contacts[1], left_filtered)
         self.assertIs(leaves["right"].prepared_contacts[1], right_filtered)
+        self.assertGreater(int(outer_filtered.contact_generation.numpy()[0]), outer_generation)
         self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 1)
+
+        replacement_contacts.clear()
+        replacement_contacts.rigid_contact_count.fill_(1)
+        replacement_contacts.rigid_contact_shape0.assign(np.array([shape_left, -1, -1, -1], dtype=np.int32))
+        replacement_contacts.rigid_contact_shape1.assign(np.array([shape_left, -1, -1, -1], dtype=np.int32))
+
+        coupled.prepare_cuda_graph_capture(replacement_contacts)
+
+        self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 1)
+        self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 0)
 
     def test_implicit_mpm_cuda_graph_capability_requires_fixed_topology(self):
         """Resolved fixed-grid MPM supports capture while dynamic grids do not."""

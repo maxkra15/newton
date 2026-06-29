@@ -2145,6 +2145,35 @@ def _prepare_cuda_graph_capture_preallocates_vbd_contacts(test, device):
         np.testing.assert_array_equal(solver.particle_q_prev.numpy(), particle_q_prev_before)
 
 
+def _prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts(test, device):
+    """VBD should not allocate soft-contact state without both particles and shapes."""
+    with wp.ScopedDevice(device):
+        for topology in ("shape_only", "particle_only"):
+            with test.subTest(topology=topology):
+                builder = newton.ModelBuilder()
+                if topology == "shape_only":
+                    body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+                    builder.add_shape_sphere(body=body, radius=0.1)
+                else:
+                    builder.add_particle(
+                        pos=(0.0, 0.0, 0.0),
+                        vel=(0.0, 0.0, 0.0),
+                        mass=1.0,
+                        radius=0.05,
+                    )
+                builder.color()
+                model = builder.finalize()
+                solver = newton.solvers.SolverVBD(model)
+                contacts = newton.Contacts(rigid_contact_max=0, soft_contact_max=5, device=device)
+
+                solver.prepare_cuda_graph_capture(contacts)
+
+                test.assertEqual(solver.body_particle_contact_penalty_k.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_ke.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_kd.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_mu.shape[0], 0)
+
+
 class TestSolverVBD(unittest.TestCase):
     pass
 
@@ -2295,6 +2324,12 @@ add_function_test(
     TestSolverVBD,
     "test_prepare_cuda_graph_capture_preallocates_vbd_contacts",
     _prepare_cuda_graph_capture_preallocates_vbd_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts",
+    _prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts,
     devices=devices,
 )
 
