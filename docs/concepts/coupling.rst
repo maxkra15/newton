@@ -327,6 +327,45 @@ fixed-point iteration over solver-specific dynamics. ADMM behaves like a fixed
 iteration constrained optimization split over the entry solvers and interface
 rows.
 
+CUDA Graph Capture and Reset
+----------------------------
+
+Every solver exposes the public
+:attr:`~newton.solvers.SolverBase.supports_cuda_graph_capture` capability and
+:meth:`~newton.solvers.SolverBase.prepare_cuda_graph_capture` preparation hook.
+Preparation allocates persistent buffers, including contact-dependent storage,
+without advancing simulation state. A
+:class:`~newton.solvers.experimental.coupled.SolverCoupled` advertises capture
+support only when every entry solver and every entry-local collision provider
+supports it. Collision providers with a replay cadence other than every step
+also make the coupled configuration ineligible.
+
+One layer owns the CUDA graph. An application or framework that captures a
+larger physics update should prepare the top-level coupled solver, record the
+complete coupled ``step()``, and replay that graph. Entry solvers remain
+capture-safe participants; they must not record or launch nested graphs. When
+two state buffers alternate, include the complete alternation in the outer
+graph so every replay begins with the same buffer roles.
+
+An implicit-MPM entry reports capture support for the validated Jacobi path
+with either a fixed grid and positive active-cell capacity or a
+capacity-bounded rebuildable sparse grid. Sparse capture additionally requires
+zero grid padding and installed Warp support for every selected basis topology.
+An allocating sparse MPM entry remains usable eagerly but makes the coupled
+solver's aggregate capture capability false. Applications should use the
+aggregate property as the decision point instead of assuming that all entries
+share one solver's capability.
+
+Reset remains an explicit host-side lifecycle operation and should occur
+outside graph capture. Calling ``SolverCoupled.reset(state, world_mask=...,
+flags=...)`` forwards the fixed-size world selection to its entries, reconciles
+their selected state, and preserves unselected worlds. For implicit MPM this
+also restores selected per-particle history when particle state flags are reset
+(or ``flags`` is omitted) and clears the sticky sparse-grid rebuild status at
+the reset boundary. Replay may resume afterward when graph structure,
+capacities, state-buffer sequence, and step arguments are unchanged; otherwise
+record a new graph.
+
 Solver-Specific Behavior
 ------------------------
 

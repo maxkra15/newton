@@ -287,9 +287,46 @@ or otherwise world-local bodies. Custom meshes passed to
 :meth:`~newton.solvers.SolverImplicitMPM.setup_collider` are global by default;
 use ``collider_world_ids`` to assign them to specific worlds.
 
-Dense and fixed grids use common physical bounds for all environments. Prefer
-a sparse grid for heterogeneous or physically separated particle bounds so
-each environment allocates only its active voxels.
+Dense and fixed grids use common physical bounds for all environments. Sparse
+grids instead store each world's active local voxels, so they are preferable
+when particle bounds differ substantially between worlds or worlds are far
+apart in physical coordinates. Dense-grid bounds are still recomputed through
+a host read and dense steps remain eager. Setting ``separate_worlds=False``
+continues to select the legacy shared FEM topology; the isolation and capacity
+rules below do not change that opt-in behavior.
+
+Sparse capacity and environment packing
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Implicit MPM has two sparse allocation modes:
+
+- An **allocating sparse grid** creates NanoVDB topology as needed. This is the
+  behavior when ``max_active_cell_count <= 0`` or when the selected Warp
+  artifact, padding, or basis topology cannot support an in-place rebuild. It
+  remains available for eager stepping but is not outer-capture safe.
+- A **capacity-bounded rebuildable sparse grid** reserves persistent topology
+  storage and rebuilds its active contents in place. It requires
+  ``max_active_cell_count > 0``, ``grid_padding == 0``, a ``"Q1"`` velocity
+  basis, compatible strain and collider bases, and rebuildable NanoVDB support
+  from the installed Warp artifact.
+
+For a multi-world solver, ``max_active_cell_count`` is one total capacity
+shared by the batched FEM geometry partition, not a separate quota for every
+world. Estimate the worst useful active-cell count per world, multiply it by
+the number of worlds, and pass that total. Worlds may use the shared reserve
+unevenly. The sparse topology contains active local voxels and guard regions;
+it does not allocate all voxels spanning the physical distance between worlds.
+
+When Newton generates packed-environment offsets, a rebuild recomputes their
+values on the device from current per-world bounds. This lets independently
+moving worlds remain disjoint in packed NanoVDB coordinates. Offset values and
+active counts may change between steps, but environment count, offset-array
+shape, guard width, alignment, storage addresses, and declared capacities are
+structural invariants. Explicit caller-provided offsets do not move
+automatically, so the caller must keep their packed bounds disjoint.
+
+Outer CUDA graph lifecycle
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 An isolated multi-world step can be captured in an outer CUDA graph when all of
 the following conditions hold:
@@ -300,33 +337,63 @@ the following conditions hold:
   ``enable_timers=False``. Section timers synchronize the device and therefore
   cannot run during outer capture.
 - ``SolverImplicitMPM.Config.separate_worlds`` is ``True``.
-- ``SolverImplicitMPM.Config.grid_type`` is ``"fixed"``. The grid bounds are
-  created before capture and remain fixed across replays.
-- ``SolverImplicitMPM.Config.max_active_cell_count`` is nonnegative and large
-  enough for every replay. This gives the active grid and FEM partitions fixed
-  capacities while allowing their active subsets to change.
-- ``SolverImplicitMPM.Config.solver`` is ``"jacobi"``, the nonlinear path
-  validated for isolated multi-world outer capture.
-- The installed Warp artifact contains capture-safe fixed-capacity environment
-  partitions, as tracked by `NVIDIA/warp#1407
-  <https://github.com/NVIDIA/warp/issues/1407>`__.
+- ``SolverImplicitMPM.Config.grid_type`` is either ``"fixed"`` with bounds
+  created before capture or ``"sparse"`` in the capacity-bounded rebuildable
+  mode described above.
+- ``SolverImplicitMPM.Config.max_active_cell_count`` is positive and large
+  enough for every replay. Active subsets may change within that fixed total
+  capacity.
+- The installed Warp artifact provides capture-safe fixed-capacity FEM
+  environment partitions and, for sparse grids, rebuildable topology for every
+  selected basis.
+- Every resolved rheology solver is ``"jacobi"``, the nonlinear path validated
+  for isolated multi-world outer capture.
 
-Model topology, world and particle assignments, array shapes, fixed-grid
-bounds, active-cell capacity, solver configuration, and captured step arguments
-must remain unchanged across replays. Particle state, active cells, and
-per-environment partition offsets may change within those fixed structures. If
-the application alternates two state buffers, capture the complete alternation
-and replay it as one graph; otherwise, recapture after changing a structural
-input, capacity, state-buffer sequence, or time step.
+Check :attr:`~newton.solvers.SolverImplicitMPM.supports_cuda_graph_capture`
+before recording, then call
+:meth:`~newton.solvers.SolverImplicitMPM.prepare_cuda_graph_capture` to
+materialize persistent buffers without advancing the simulation. Model
+topology, world and particle ordering, array shapes, fixed-grid bounds,
+capacities, solver configuration, captured state-buffer sequence, and captured
+step arguments must remain unchanged across replays. Particle state, active
+cells, and automatically generated sparse packing offsets may change within
+those fixed structures.
 
-Dense grids are excluded because their bounds are recomputed through a host
-read on every step. Sparse grids are excluded because they rebuild NanoVDB
-topology outside capture. The ``"cg"``, ``"cr"``, and ``"gmres"`` Krylov paths
-are also excluded from isolated multi-world capture because their batched
-tolerance scaling reads per-environment node counts on the host. Their
-single-world result-reporting path does not have this limitation. Other
+If the application alternates two state buffers, record both directions in one
+graph so every replay finishes with the buffers in the same roles:
+
+.. code-block:: python
+
+   solver.prepare_cuda_graph_capture()
+   with wp.ScopedCapture(device=model.device) as capture:
+       solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+       solver.step(state_1, state_0, control=None, contacts=None, dt=dt)
+
+   wp.capture_launch(capture.graph)
+   solver.check_sparse_grid_rebuild_status()
+
+For rebuildable sparse grids, call
+:meth:`~newton.solvers.SolverImplicitMPM.check_sparse_grid_rebuild_status` at
+an explicit safe host boundary after replay. Capacity failures accumulate in a
+sticky device status so a later successful rebuild cannot hide an earlier
+overflow. The check synchronizes and raises a descriptive capacity error. Once
+the error is handled, call
+:meth:`~newton.solvers.SolverImplicitMPM.clear_sparse_grid_rebuild_status`
+outside capture to establish a new status boundary.
+
+Keep resets outside the captured graph. Calling
+:meth:`~newton.solvers.SolverImplicitMPM.reset` with ``world_mask`` restores MPM
+history only for selected worlds and preserves unselected worlds; a valid reset
+also clears sparse rebuild status. Recapture after changing any structural
+input, capacity, buffer sequence, or time step.
+
+Allocating sparse and dense grids remain eager. The ``"cg"``, ``"cr"``, and
+``"gmres"`` Krylov paths are excluded from isolated multi-world capture because
+their batched tolerance scaling reads per-environment node counts on the host.
+Their single-world result-reporting path does not have this limitation. Other
 nonlinear solver choices are not part of the currently validated outer-capture
-configuration.
+configuration. The existing eager behavior of these configurations and the
+legacy shared-grid behavior are unchanged.
 
 .. _Per-world gravity:
 
