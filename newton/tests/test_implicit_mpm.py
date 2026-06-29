@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 import warp as wp
+import warp.fem as fem
 
 import newton
 from newton._src.solvers.implicit_mpm.rasterized_collisions import (
@@ -643,6 +644,50 @@ def test_multiworld_project_outside_filters_particle_world(test, device):
     )
 
 
+def test_multiworld_render_grains_follow_particle_world(test, device):
+    empty_world = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    empty_world.add_body(is_kinematic=True, label="empty_world_marker")
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_world(_make_mpm_particle_builder(gravity=0.0, velocity=(0.4, 0.0, 0.0)))
+    builder.add_world(empty_world)
+    builder.add_world(_make_mpm_particle_builder(gravity=0.0, velocity=(-0.4, 0.0, 0.0)))
+    model = builder.finalize(device=device)
+
+    temporary_store = fem.TemporaryStore()
+    config = _make_mpm_config(grid_type="dense", integration_scheme="pic")
+    config.grid_padding = 1
+    solver = SolverImplicitMPM(model, config=config, temporary_store=temporary_store)
+    state_0 = model.state()
+    state_1 = model.state()
+    grains = solver.sample_render_grains(state_0, grains_per_particle=2)
+    grains_initial = grains.numpy().copy()
+
+    dt = 0.01
+    solver.update_render_grains(state_0, state_0, grains, dt=dt)
+    np.testing.assert_array_equal(grains.numpy(), grains_initial)
+
+    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+    solver.update_render_grains(state_0, state_1, grains, dt=dt)
+
+    grain_positions = grains.numpy()
+    particle_world_start = model.particle_world_start.numpy()
+    test.assertEqual(grains.shape, (model.particle_count, 2))
+    test.assertTrue(np.isfinite(grain_positions).all())
+    test.assertEqual(particle_world_start[1], particle_world_start[2])
+
+    displacement_x = grain_positions[..., 0] - grains_initial[..., 0]
+    world_0 = slice(particle_world_start[0], particle_world_start[1])
+    world_2 = slice(particle_world_start[2], particle_world_start[3])
+    test.assertGreater(np.mean(displacement_x[world_0]), 1.0e-4)
+    test.assertLess(np.mean(displacement_x[world_2]), -1.0e-4)
+
+    zero_grains = solver.sample_render_grains(state_1, grains_per_particle=0)
+    solver.update_render_grains(state_0, state_1, zero_grains, dt=dt)
+    test.assertEqual(zero_grains.shape, (model.particle_count, 0))
+
+
 def test_multiworld_global_dynamic_collider_rejected(test, device):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
     inertia = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
@@ -1220,6 +1265,13 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_project_outside_filters_particle_world",
     test_multiworld_project_outside_filters_particle_world,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_render_grains_follow_particle_world",
+    test_multiworld_render_grains_follow_particle_world,
     devices=basic_devices,
 )
 
