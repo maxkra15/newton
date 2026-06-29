@@ -430,7 +430,11 @@ class SolverXPBD(SolverBase):
             self._fluid_vorticity = wp.zeros(n, dtype=wp.vec3, device=model.device)
 
     def reorder_particles(self, state: State) -> None:
-        """Sort fluid particles into spatial order to keep the density solve fast.
+        """Sort single-world fluid particles into spatial order.
+
+        Multi-world models are left unchanged because a global Morton permutation can
+        interleave worlds and invalidate :attr:`Model.particle_world_start`. A later
+        segmented reorder may sort independently inside each immutable world range.
 
         Free fluid particles are created in spatial order, so the hash-grid
         neighbor gathers in the density constraint start cache-coherent. As the
@@ -452,7 +456,7 @@ class SolverXPBD(SolverBase):
         """
         model = self.model
         n = model.particle_count
-        if not self._all_fluid or not self._has_fluid or n <= 1:
+        if model.world_count > 1 or not self._all_fluid or not self._has_fluid or n <= 1:
             return
 
         dev = model.device
