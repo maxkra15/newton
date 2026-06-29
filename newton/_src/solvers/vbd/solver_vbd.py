@@ -10,7 +10,9 @@ import numpy as np
 import warp as wp
 
 from ...core.types import override
+from ...geometry import ParticleFlags
 from ...sim import (
+    BodyFlags,
     Contacts,
     Control,
     JointType,
@@ -18,8 +20,10 @@ from ...sim import (
     ModelBuilder,
     ModelFlags,
     State,
+    StateFlags,
 )
 from ...utils.deprecation import deprecate_nonkeyword_arguments
+from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
 from ..xpbd.kernels import apply_joint_forces
 from .particle_vbd_kernels import (
@@ -68,6 +72,7 @@ from .rigid_vbd_kernels import (
     init_body_body_contact_materials,
     init_body_body_contacts_avbd,
     init_body_particle_contacts,
+    initialize_body_forces_and_torques,
     snapshot_body_body_contact_history,
     solve_rigid_body,
     step_body_body_contact_C0_lambda,
@@ -82,11 +87,18 @@ from .tri_mesh_collision import (
     TriMeshCollisionDetector,
     TriMeshCollisionInfo,
 )
+from .vbd_coupling_kernels import (
+    _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
+    _harvest_vbd_proxy_particle_body_contact_forces_kernel,
+    _harvest_vbd_proxy_particle_self_contact_forces_kernel,
+    _harvest_vbd_proxy_wrenches_kernel,
+    _update_vbd_body_input_state_kernel,
+)
 
 __all__ = ["SolverVBD"]
 
 
-class SolverVBD(SolverBase):
+class SolverVBD(SolverBase, CouplingInterface):
     """An implicit solver using Vertex Block Descent (VBD) for particles and Augmented VBD (AVBD) for rigid bodies.
 
     .. experimental::
@@ -429,6 +441,8 @@ class SolverVBD(SolverBase):
         # Defaults to True and is reset to True when consumed by step().
         self._update_rigid_history = True
 
+        self._coupling_has_rigid_avbd_state = not self.integrate_with_external_rigid_solver and model.body_count > 0
+
     def _init_particle_system(
         self,
         model: Model,
@@ -629,6 +643,7 @@ class SolverVBD(SolverBase):
             # Kinematic bodies: set body_q.
             # Dynamic teleportation: also set body_q_prev and body_qd.
             self.body_q_prev = wp.clone(model.body_q, device=self.device)
+            self._coupling_body_q_prev_snapshot = wp.clone(model.body_q, device=self.device)
             self.body_inertia_q = wp.zeros_like(model.body_q, device=self.device)  # inertial target poses for AVBD
 
             # Adjacency and dimensions
@@ -767,42 +782,375 @@ class SolverVBD(SolverBase):
             )
 
     @override
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Preallocate contact-capacity-dependent buffers before graph capture.
+
+        Args:
+            contacts: Contact buffers whose capacities determine persistent
+                rigid-rigid, rigid-particle, history, and query storage.
+        """
+        if contacts is None:
+            return
+
+        rigid_contact_max = int(contacts.rigid_contact_max)
+        soft_contact_max = int(contacts.soft_contact_max)
+
+        body_body_state = getattr(self, "body_body_contact_penalty_k", None)
+        if body_body_state is not None:
+            self._init_body_body_contact_state(rigid_contact_max)
+
+        if self.model.particle_count > 0 and self.model.shape_count > 0:
+            self._init_body_particle_contact_state(soft_contact_max)
+
+        self._rigid_contact_body0 = self._grow_contact_array(
+            self._rigid_contact_body0, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_body1 = self._grow_contact_array(
+            self._rigid_contact_body1, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_point0_world = self._grow_contact_array(
+            self._rigid_contact_point0_world, rigid_contact_max, wp.vec3
+        )
+        self._rigid_contact_point1_world = self._grow_contact_array(
+            self._rigid_contact_point1_world, rigid_contact_max, wp.vec3
+        )
+
+        if self.rigid_contact_history and hasattr(self, "_prev_contact_lambda"):
+            self._init_rigid_contact_warmstart(max(1, rigid_contact_max))
+
+    @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
+
+    @override
+    def coupling_supports_inertial_property_refresh(self) -> bool:
+        return True
+
+    def coupling_notify_input_state_update(
+        self,
+        state: State,
+        flags: StateFlags | int,
+        *,
+        iteration_restart: bool = False,
+        dt: float = 0.0,
+    ) -> None:
+        """Convert input body pose updates into VBD-compatible history updates."""
+        flags = StateFlags(flags)
+
+        if (
+            not (flags & StateFlags.BODY_Q)
+            or state.body_q is None
+            or state.body_qd is None
+            or not self._coupling_has_rigid_avbd_state
+        ):
+            return
+
+        if dt <= 0.0:
+            wp.copy(dest=self.body_q_prev, src=state.body_q)
+            return
+
+        if iteration_restart:
+            # Restore the beginning-of-iteration history after a previous solve advanced it.
+            wp.copy(dest=self.body_q_prev, src=self._coupling_body_q_prev_snapshot)
+        else:
+            wp.copy(dest=self._coupling_body_q_prev_snapshot, src=self.body_q_prev)
+
+        wp.launch(
+            _update_vbd_body_input_state_kernel,
+            dim=self.model.body_count,
+            inputs=[
+                float(dt),
+                self.model.body_flags,
+                int(BodyFlags.KINEMATIC),
+                state.body_q,
+                self.body_q_prev,
+                state.body_qd,
+            ],
+            device=self.device,
+        )
+
+    def coupling_prepare_proxy_contacts(
+        self,
+        state: State,
+        contacts: Contacts | None,
+        *,
+        contacts_freshly_detected: bool = False,
+    ) -> Contacts | None:
+        """Update rigid history cadence for proxy contacts."""
+        # Do not call super(); we can keep proxy-proxy collisions as we
+        # are using a custom force harvesting hook
+        self.set_rigid_history_update(bool(contacts_freshly_detected))
+        return contacts
+
+    def coupling_harvest_proxy_wrenches(
+        self,
+        body_local_to_proxy_global: wp.array[int],
+        out_body_f: wp.array[wp.spatial_vector],
+        *,
+        body_qd_before: wp.array[wp.spatial_vector],
+        state: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """Harvest contact-only proxy-body wrenches.
+
+        VBD deliberately does not rely on the default momentum harvest here.
+        The generic proxy path filters proxy-vs-proxy and proxy-vs-static rigid
+        contacts so harvested momentum only reflects coupling-relevant
+        interactions. VBD relaxes that restriction because allowing some proxy
+        interaction inside the destination solve can strengthen the coupled
+        solve. Those extra interactions still must not feed back through the
+        coupling interface, so VBD harvests explicit contact forces instead of
+        inferring feedback from total proxy momentum change.
+        """
+        if not self._coupling_has_rigid_avbd_state:
+            super().coupling_harvest_proxy_wrenches(
+                body_local_to_proxy_global,
+                out_body_f,
+                body_qd_before=body_qd_before,
+                state=state,
+                state_out=state_out,
+                contacts=contacts,
+                dt=dt,
+            )
+            return
+
+        out_body_f.zero_()
+        if contacts is None:
+            return
+
+        body_q_prev = self._coupling_body_q_prev_snapshot
+
+        if contacts.rigid_contact_max > 0:
+            body0, body1, point0, point1, force_on_body1, rigid_contact_count = self.collect_rigid_contact_forces(
+                state_out.body_q,
+                body_q_prev,
+                contacts,
+                dt,
+            )
+            wp.launch(
+                _harvest_vbd_proxy_wrenches_kernel,
+                dim=contacts.rigid_contact_max,
+                inputs=[
+                    rigid_contact_count,
+                    body0,
+                    body1,
+                    point0,
+                    point1,
+                    force_on_body1,
+                    self.model.body_inv_mass,
+                    self.model.body_flags,
+                    body_local_to_proxy_global,
+                    int(BodyFlags.PROXY),
+                    self.model.body_com,
+                    state_out.body_q,
+                    out_body_f,
+                ],
+                device=self.device,
+            )
+
+        if contacts.soft_contact_max > 0 and self.body_particle_contact_penalty_k.shape[0] >= contacts.soft_contact_max:
+            wp.launch(
+                _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    float(dt),
+                    body_local_to_proxy_global,
+                    state_out.particle_q,
+                    self.particle_q_prev,
+                    self.model.particle_radius,
+                    state_out.body_q,
+                    body_q_prev,
+                    state_out.body_qd,
+                    self.model.body_com,
+                    float(self.friction_epsilon),
+                    self.body_particle_contact_penalty_k,
+                    self.body_particle_contact_material_kd,
+                    self.body_particle_contact_material_mu,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_particle,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    self.model.shape_margin,
+                    self.model.shape_body,
+                    out_body_f,
+                ],
+                device=self.device,
+            )
+
+    def coupling_harvest_proxy_particle_forces(
+        self,
+        particle_local_to_proxy_global: wp.array[int],
+        out_particle_f: wp.array[wp.vec3],
+        *,
+        particle_qd_before: wp.array[wp.vec3],
+        state: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """Harvest contact-only proxy-particle forces.
+
+        As for proxy-body harvest, this stays contact-based because VBD allows
+        some proxy interaction inside the destination solve for stronger
+        coupling, but those proxy-only interactions should not appear as
+        feedback forces on the source side.
+        """
+        del particle_qd_before
+        out_particle_f.zero_()
+        if self.model.particle_count == 0 or particle_local_to_proxy_global.shape[0] == 0:
+            return
+
+        if (
+            contacts is not None
+            and contacts.soft_contact_max > 0
+            and contacts.soft_contact_count is not None
+            and contacts.soft_contact_particle is not None
+            and contacts.soft_contact_shape is not None
+            and self.body_particle_contact_penalty_k.shape[0] >= contacts.soft_contact_max
+        ):
+            body_q_for_particles = state.body_q
+            body_q_prev_for_particles = self._coupling_body_q_prev_snapshot if self.model.body_count > 0 else None
+            body_qd_for_particles = state.body_qd
+            if self.integrate_with_external_rigid_solver and state_out is not None:
+                body_q_for_particles = state_out.body_q
+                body_q_prev_for_particles = state.body_q
+                body_qd_for_particles = state_out.body_qd
+
+            wp.launch(
+                _harvest_vbd_proxy_particle_body_contact_forces_kernel,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    float(dt),
+                    particle_local_to_proxy_global,
+                    state.particle_q,
+                    self.particle_q_prev,
+                    self.model.particle_flags,
+                    self.model.particle_inv_mass,
+                    int(ParticleFlags.ACTIVE),
+                    int(ParticleFlags.PROXY),
+                    self.friction_epsilon,
+                    self.model.particle_radius,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_particle,
+                    self.body_particle_contact_penalty_k,
+                    self.body_particle_contact_material_kd,
+                    self.body_particle_contact_material_mu,
+                    self.model.shape_body,
+                    self.model.body_flags,
+                    self.model.body_inv_mass,
+                    int(BodyFlags.PROXY),
+                    body_q_for_particles,
+                    body_q_prev_for_particles,
+                    body_qd_for_particles,
+                    self.model.body_com,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    self.model.shape_margin,
+                    out_particle_f,
+                ],
+                device=self.device,
+            )
+
+        if self.particle_enable_self_contact:
+            wp.launch(
+                _harvest_vbd_proxy_particle_self_contact_forces_kernel,
+                dim=self.particle_self_contact_evaluation_kernel_launch_size,
+                inputs=[
+                    float(dt),
+                    particle_local_to_proxy_global,
+                    self.particle_q_prev,
+                    state.particle_q,
+                    self.model.particle_flags,
+                    self.model.particle_inv_mass,
+                    int(ParticleFlags.ACTIVE),
+                    int(ParticleFlags.PROXY),
+                    self.model.tri_indices,
+                    self.model.edge_indices,
+                    self.trimesh_collision_info,
+                    self.particle_self_contact_radius,
+                    self.model.soft_contact_ke,
+                    self.model.soft_contact_kd,
+                    self.model.soft_contact_mu,
+                    self.friction_epsilon,
+                    self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                    out_particle_f,
+                ],
+                device=self.device,
+                max_blocks=self.model.device.sm_count,
+            )
 
     # =====================================================
     # Initialization Helper Methods
     # =====================================================
 
+    def _grow_contact_array(self, array, capacity: int, dtype, *, fill_value=None):
+        """Grow a contact array while preserving its existing prefix."""
+        if array is not None and array.shape[0] >= capacity:
+            return array
+
+        if fill_value is None:
+            grown = wp.zeros(capacity, dtype=dtype, device=self.device)
+        else:
+            grown = wp.full(capacity, fill_value, dtype=dtype, device=self.device)
+        if array is not None and array.shape[0] > 0:
+            wp.copy(grown, array, count=array.shape[0])
+        return grown
+
     def _init_body_body_contact_state(self, rigid_contact_max: int) -> None:
-        """Allocate body-body contact state arrays sized to the given contact buffer capacity."""
-        self.body_body_contact_penalty_k = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_ke = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_kd = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_mu = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_lambda = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_C0 = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_stick_flag = wp.zeros(rigid_contact_max, dtype=wp.int32, device=self.device)
+        """Ensure body-body contact state arrays have the requested capacity."""
+        self.body_body_contact_penalty_k = self._grow_contact_array(
+            self.body_body_contact_penalty_k, rigid_contact_max, float
+        )
+        self.body_body_contact_material_ke = self._grow_contact_array(
+            self.body_body_contact_material_ke, rigid_contact_max, float
+        )
+        self.body_body_contact_material_kd = self._grow_contact_array(
+            self.body_body_contact_material_kd, rigid_contact_max, float
+        )
+        self.body_body_contact_material_mu = self._grow_contact_array(
+            self.body_body_contact_material_mu, rigid_contact_max, float
+        )
+        self.body_body_contact_lambda = self._grow_contact_array(
+            self.body_body_contact_lambda, rigid_contact_max, wp.vec3
+        )
+        self.body_body_contact_C0 = self._grow_contact_array(self.body_body_contact_C0, rigid_contact_max, wp.vec3)
+        self.body_body_contact_stick_flag = self._grow_contact_array(
+            self.body_body_contact_stick_flag, rigid_contact_max, wp.int32
+        )
 
     def _init_body_particle_contact_state(self, soft_contact_max: int) -> None:
-        """Allocate body-particle material arrays sized to the given soft contact capacity."""
-        self.body_particle_contact_penalty_k = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_ke = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_kd = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_mu = wp.zeros(soft_contact_max, dtype=float, device=self.device)
+        """Ensure body-particle material arrays have the requested capacity."""
+        self.body_particle_contact_penalty_k = self._grow_contact_array(
+            self.body_particle_contact_penalty_k, soft_contact_max, float
+        )
+        self.body_particle_contact_material_ke = self._grow_contact_array(
+            self.body_particle_contact_material_ke, soft_contact_max, float
+        )
+        self.body_particle_contact_material_kd = self._grow_contact_array(
+            self.body_particle_contact_material_kd, soft_contact_max, float
+        )
+        self.body_particle_contact_material_mu = self._grow_contact_array(
+            self.body_particle_contact_material_mu, soft_contact_max, float
+        )
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
-        """Allocate rigid contact warm-start buffers."""
+        """Ensure rigid contact warm-start buffers have the requested capacity."""
         cap = max(1, rigid_contact_max)
-        self._prev_contact_lambda = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_stick_flag = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        self._prev_contact_penalty_k = wp.zeros(cap, dtype=float, device=self.device)
-        self._prev_contact_point0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_point1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_normal = wp.zeros(cap, dtype=wp.vec3, device=self.device)
+        self._prev_contact_lambda = self._grow_contact_array(self._prev_contact_lambda, cap, wp.vec3)
+        self._prev_contact_stick_flag = self._grow_contact_array(self._prev_contact_stick_flag, cap, wp.int32)
+        self._prev_contact_penalty_k = self._grow_contact_array(self._prev_contact_penalty_k, cap, float)
+        self._prev_contact_point0 = self._grow_contact_array(self._prev_contact_point0, cap, wp.vec3)
+        self._prev_contact_point1 = self._grow_contact_array(self._prev_contact_point1, cap, wp.vec3)
+        self._prev_contact_offset0 = self._grow_contact_array(self._prev_contact_offset0, cap, wp.vec3)
+        self._prev_contact_offset1 = self._grow_contact_array(self._prev_contact_offset1, cap, wp.vec3)
+        self._prev_contact_normal = self._grow_contact_array(self._prev_contact_normal, cap, wp.vec3)
 
     def _raise_if_capturing_resize(self, name: str, current: int, required: int) -> None:
         if self.device.is_capturing and not wp.is_mempool_enabled(self.device):
@@ -1953,10 +2301,9 @@ class SolverVBD(SolverBase):
                 self.body_body_contact_stick_flag.zero_()
 
             # Accumulate joint_f into body wrenches (scratch buffer avoids mutating user state).
-            body_f_for_integration = state_in.body_f
+            body_f_for_integration = self._body_f_for_integration
+            body_f_for_integration.zero_()
             if model.joint_count > 0 and control is not None and control.joint_f is not None:
-                wp.copy(self._body_f_for_integration, state_in.body_f)
-                body_f_for_integration = self._body_f_for_integration
                 wp.launch(
                     kernel=apply_joint_forces,
                     dim=model.joint_count,
@@ -1983,6 +2330,7 @@ class SolverVBD(SolverBase):
                 )
 
             # Forward integrate rigid bodies (body_q modified in-place for dynamic bodies only).
+            # Public body_f are applied inside the AVBD solve rather than in this predictor.
             wp.launch(
                 kernel=forward_step_rigid_bodies,
                 inputs=[
@@ -2370,13 +2718,24 @@ class SolverVBD(SolverBase):
             return
 
         # Zero out forces and hessians
-        self.body_torques.zero_()
-        self.body_forces.zero_()
         self.body_hessian_aa.zero_()
         self.body_hessian_al.zero_()
         self.body_hessian_ll.zero_()
 
         body_color_groups = model.body_color_groups
+
+        wp.launch(
+            kernel=initialize_body_forces_and_torques,
+            dim=model.body_count,
+            inputs=[
+                state_in.body_f,
+            ],
+            outputs=[
+                self.body_forces,
+                self.body_torques,
+            ],
+            device=self.device,
+        )
 
         # Gauss-Seidel-style per-color updates
         for color in range(len(body_color_groups)):
