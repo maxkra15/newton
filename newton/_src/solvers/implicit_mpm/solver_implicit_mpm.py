@@ -628,6 +628,12 @@ class SolverImplicitMPM(SolverBase):
     parameters and state variables (e.g. ``mpm:young_modulus``,
     ``mpm:friction``, ``mpm:particle_elastic_strain``).
 
+    By default, multi-world models use an independent FEM environment for each
+    world and therefore require every MPM particle to belong to a local world.
+    Global particles remain supported for single-world models. Set
+    :attr:`Config.separate_worlds` to ``False`` to retain the legacy shared-grid
+    topology for a multi-world model.
+
     [1] https://doi.org/10.1145/2897824.2925877
 
     Args:
@@ -646,6 +652,10 @@ class SolverImplicitMPM(SolverBase):
 
         Per-particle properties can be configured using custom attributes on the Model.
         See :meth:`SolverImplicitMPM.register_custom_attributes` for details.
+
+        Multi-world models use independent FEM environments by default. This
+        mode requires local particles, while single-world models and the legacy
+        shared-grid mode support global particles.
         """
 
         # numerics
@@ -705,6 +715,13 @@ class SolverImplicitMPM(SolverBase):
         velocity_basis: _MPMVelocityBasisName = "Q1"
         """Velocity basis function. Common values are ``"Q1"``, ``"B2"``,
         or ``"B3"``."""
+
+        separate_worlds: bool = True
+        """Use independent FEM environments for each world in a multi-world model.
+
+        Set to ``False`` to retain the legacy shared-grid behavior. Isolated
+        multi-world models require every MPM particle to belong to a local world.
+        """
 
     @classmethod
     def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
@@ -920,6 +937,21 @@ class SolverImplicitMPM(SolverBase):
         enable_timers: bool = False,
     ):
         super().__init__(model)
+
+        self._separate_worlds = bool(config.separate_worlds and model.world_count > 1)
+        self._environment_count = model.world_count if self._separate_worlds else 1
+        self._particle_environment = model.particle_world if self._separate_worlds else None
+
+        if self._separate_worlds:
+            particle_world = model.particle_world.numpy()
+            if np.any(particle_world < 0):
+                raise ValueError(
+                    "SolverImplicitMPM cannot isolate a multi-world model containing global MPM particles; "
+                    "replicate the particles into each world or set Config.separate_worlds=False for legacy "
+                    "coupled behavior."
+                )
+            if np.any(particle_world >= model.world_count):
+                raise ValueError("MPM particle world IDs must be smaller than model.world_count.")
 
         self._mpm_model = ImplicitMPMModel(model, config)
 
