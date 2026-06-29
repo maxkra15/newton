@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import warp as wp
@@ -26,7 +26,7 @@ from .proxy_utils import (
     sync_proxy_particles_kernel,
     sync_proxy_states_kernel,
 )
-from .solver_coupled import SolverCoupled
+from .solver_coupled import SolverCoupled, _reset_world_selected
 
 if TYPE_CHECKING:
     from ...sim import Contacts, Control, Model, State
@@ -63,6 +63,8 @@ class _ProxyBodyMapping:
     aitken_stats: wp.array = field(default=None)
     aitken_relaxation: wp.array = field(default=None)
     aitken_has_previous: wp.array = field(default=None)
+    proxy_world_slots: wp.array[int] | None = field(default=None)
+    aitken_active_slots: wp.array[int] | None = field(default=None)
 
 
 @dataclass
@@ -95,6 +97,8 @@ class _ProxyParticleMapping:
     aitken_stats: wp.array = field(default=None)
     aitken_relaxation: wp.array = field(default=None)
     aitken_has_previous: wp.array = field(default=None)
+    proxy_world_slots: wp.array[int] | None = field(default=None)
+    aitken_active_slots: wp.array[int] | None = field(default=None)
 
 
 @dataclass
@@ -146,6 +150,116 @@ _PROXY_RELAXATION_MODE_BY_NAME = {
 
 
 @wp.kernel(enable_backward=False)
+def _sync_reset_proxy_bodies_kernel(
+    source_body_ids: wp.array[int],
+    proxy_body_ids_local: wp.array[int],
+    source_body_q: wp.array[wp.transform],
+    source_body_qd: wp.array[wp.spatial_vector],
+    destination_body_q: wp.array[wp.transform],
+    destination_body_qd: wp.array[wp.spatial_vector],
+):
+    index = wp.tid()
+    source_body = source_body_ids[index]
+    proxy_body = proxy_body_ids_local[index]
+    destination_body_q[proxy_body] = source_body_q[source_body]
+    destination_body_qd[proxy_body] = source_body_qd[source_body]
+
+
+@wp.kernel(enable_backward=False)
+def _sync_reset_proxy_bodies_masked_kernel(
+    source_body_ids: wp.array[int],
+    proxy_body_ids_local: wp.array[int],
+    body_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    source_body_q: wp.array[wp.transform],
+    source_body_qd: wp.array[wp.spatial_vector],
+    destination_body_q: wp.array[wp.transform],
+    destination_body_qd: wp.array[wp.spatial_vector],
+):
+    index = wp.tid()
+    source_body = source_body_ids[index]
+    if _reset_world_selected(body_world[source_body], world_mask):
+        proxy_body = proxy_body_ids_local[index]
+        destination_body_q[proxy_body] = source_body_q[source_body]
+        destination_body_qd[proxy_body] = source_body_qd[source_body]
+
+
+@wp.kernel(enable_backward=False)
+def _sync_reset_proxy_particles_kernel(
+    source_particle_ids: wp.array[int],
+    proxy_particle_ids_local: wp.array[int],
+    source_particle_q: wp.array[wp.vec3],
+    source_particle_qd: wp.array[wp.vec3],
+    destination_particle_q: wp.array[wp.vec3],
+    destination_particle_qd: wp.array[wp.vec3],
+):
+    index = wp.tid()
+    source_particle = source_particle_ids[index]
+    proxy_particle = proxy_particle_ids_local[index]
+    destination_particle_q[proxy_particle] = source_particle_q[source_particle]
+    destination_particle_qd[proxy_particle] = source_particle_qd[source_particle]
+
+
+@wp.kernel(enable_backward=False)
+def _sync_reset_proxy_particles_masked_kernel(
+    source_particle_ids: wp.array[int],
+    proxy_particle_ids_local: wp.array[int],
+    particle_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    source_particle_q: wp.array[wp.vec3],
+    source_particle_qd: wp.array[wp.vec3],
+    destination_particle_q: wp.array[wp.vec3],
+    destination_particle_qd: wp.array[wp.vec3],
+):
+    index = wp.tid()
+    source_particle = source_particle_ids[index]
+    if _reset_world_selected(particle_world[source_particle], world_mask):
+        proxy_particle = proxy_particle_ids_local[index]
+        destination_particle_q[proxy_particle] = source_particle_q[source_particle]
+        destination_particle_qd[proxy_particle] = source_particle_qd[source_particle]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _zero_global_proxy_values_masked_kernel(
+    proxy_ids_global: wp.array[int],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    values: wp.array[Any],
+):
+    index = wp.tid()
+    proxy_id = proxy_ids_global[index]
+    if _reset_world_selected(entity_world[proxy_id], world_mask):
+        values[proxy_id] = values.dtype(0.0)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _zero_proxy_row_values_masked_kernel(
+    proxy_ids_global: wp.array[int],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    values: wp.array[Any],
+):
+    index = wp.tid()
+    proxy_id = proxy_ids_global[index]
+    if _reset_world_selected(entity_world[proxy_id], world_mask):
+        values[index] = values.dtype(0.0)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _zero_local_proxy_values_masked_kernel(
+    proxy_ids_global: wp.array[int],
+    proxy_ids_local: wp.array[int],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    values: wp.array[Any],
+):
+    index = wp.tid()
+    proxy_id = proxy_ids_global[index]
+    if _reset_world_selected(entity_world[proxy_id], world_mask):
+        values[proxy_ids_local[index]] = values.dtype(0.0)
+
+
+@wp.kernel(enable_backward=False)
 def _copy_indexed_float_kernel(
     src_indices: wp.array[int],
     dst_indices: wp.array[int],
@@ -162,16 +276,41 @@ def _copy_indexed_float_kernel(
 @wp.kernel(enable_backward=False)
 def _reset_aitken_state_kernel(
     initial_relaxation: float,
+    active_slots: wp.array[int],
     relaxation: wp.array[float],
     has_previous: wp.array[int],
 ):
-    relaxation[0] = initial_relaxation
-    has_previous[0] = 0
+    slot = active_slots[wp.tid()]
+    relaxation[slot] = initial_relaxation
+    has_previous[slot] = 0
+
+
+@wp.kernel(enable_backward=False)
+def _reset_aitken_slots_masked_kernel(
+    initial_relaxation: float,
+    active_slots: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    stats: wp.array[float],
+    relaxation: wp.array[float],
+    has_previous: wp.array[int],
+):
+    slot = active_slots[wp.tid()]
+    selected = False
+    if slot > 0 and slot <= world_mask.shape[0]:
+        selected = world_mask[slot - 1]
+    elif slot == 0 and world_mask.shape[0] == 1:
+        selected = world_mask[0]
+    if selected:
+        stats[2 * slot] = 0.0
+        stats[2 * slot + 1] = 0.0
+        relaxation[slot] = initial_relaxation
+        has_previous[slot] = 0
 
 
 @wp.kernel(enable_backward=False)
 def _accumulate_aitken_body_stats_kernel(
     proxy_ids: wp.array[int],
+    proxy_world_slots: wp.array[int],
     force_previous: wp.array[wp.spatial_vector],
     force_raw: wp.array[wp.spatial_vector],
     residual_previous: wp.array[wp.spatial_vector],
@@ -180,16 +319,18 @@ def _accumulate_aitken_body_stats_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = proxy_world_slots[i]
     residual = force_raw[proxy_id] - force_previous[i]
-    if has_previous[0] != 0:
+    if has_previous[slot] != 0:
         delta = residual - residual_previous[i]
-        wp.atomic_add(stats, 0, wp.dot(residual_previous[i], delta))
-        wp.atomic_add(stats, 1, wp.dot(delta, delta))
+        wp.atomic_add(stats, 2 * slot, wp.dot(residual_previous[i], delta))
+        wp.atomic_add(stats, 2 * slot + 1, wp.dot(delta, delta))
 
 
 @wp.kernel(enable_backward=False)
 def _accumulate_aitken_particle_stats_kernel(
     proxy_ids: wp.array[int],
+    proxy_world_slots: wp.array[int],
     force_previous: wp.array[wp.vec3],
     force_raw: wp.array[wp.vec3],
     residual_previous: wp.array[wp.vec3],
@@ -198,32 +339,36 @@ def _accumulate_aitken_particle_stats_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = proxy_world_slots[i]
     residual = force_raw[proxy_id] - force_previous[i]
-    if has_previous[0] != 0:
+    if has_previous[slot] != 0:
         delta = residual - residual_previous[i]
-        wp.atomic_add(stats, 0, wp.dot(residual_previous[i], delta))
-        wp.atomic_add(stats, 1, wp.dot(delta, delta))
+        wp.atomic_add(stats, 2 * slot, wp.dot(residual_previous[i], delta))
+        wp.atomic_add(stats, 2 * slot + 1, wp.dot(delta, delta))
 
 
 @wp.kernel(enable_backward=False)
 def _update_aitken_relaxation_kernel(
     relaxation_min: float,
     relaxation_max: float,
+    active_slots: wp.array[int],
     stats: wp.array[float],
     relaxation: wp.array[float],
     has_previous: wp.array[int],
 ):
-    if has_previous[0] != 0:
-        denominator = stats[1]
+    slot = active_slots[wp.tid()]
+    if has_previous[slot] != 0:
+        denominator = stats[2 * slot + 1]
         if denominator > 1.0e-20:
-            candidate = -relaxation[0] * stats[0] / denominator
-            relaxation[0] = wp.clamp(candidate, relaxation_min, relaxation_max)
-    has_previous[0] = 1
+            candidate = -relaxation[slot] * stats[2 * slot] / denominator
+            relaxation[slot] = wp.clamp(candidate, relaxation_min, relaxation_max)
+    has_previous[slot] = 1
 
 
 @wp.kernel(enable_backward=False)
 def _blend_aitken_body_forces_kernel(
     proxy_ids: wp.array[int],
+    proxy_world_slots: wp.array[int],
     force_previous: wp.array[wp.spatial_vector],
     residual_previous: wp.array[wp.spatial_vector],
     relaxation: wp.array[float],
@@ -231,14 +376,16 @@ def _blend_aitken_body_forces_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = proxy_world_slots[i]
     residual = force[proxy_id] - force_previous[i]
-    force[proxy_id] = force_previous[i] + relaxation[0] * residual
+    force[proxy_id] = force_previous[i] + relaxation[slot] * residual
     residual_previous[i] = residual
 
 
 @wp.kernel(enable_backward=False)
 def _blend_aitken_particle_forces_kernel(
     proxy_ids: wp.array[int],
+    proxy_world_slots: wp.array[int],
     force_previous: wp.array[wp.vec3],
     residual_previous: wp.array[wp.vec3],
     relaxation: wp.array[float],
@@ -246,8 +393,9 @@ def _blend_aitken_particle_forces_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = proxy_world_slots[i]
     residual = force[proxy_id] - force_previous[i]
-    force[proxy_id] = force_previous[i] + relaxation[0] * residual
+    force[proxy_id] = force_previous[i] + relaxation[slot] * residual
     residual_previous[i] = residual
 
 
@@ -286,7 +434,8 @@ class SolverCoupledProxy(SolverCoupled):
                 harvested force unchanged, and values above ``1`` overrelax it.
             proxy_relaxation_mode: Feedback relaxation mode. ``"fixed"`` uses
                 ``proxy_relaxation`` directly. ``"aitken"`` updates it from
-                consecutive feedback residuals within one solver step.
+                consecutive feedback residuals within one solver step,
+                independently for each world.
             proxy_relaxation_min: Minimum Aitken relaxation factor.
             proxy_relaxation_max: Maximum Aitken relaxation factor.
             particles: Source particle ids to map into destination proxies.
@@ -435,19 +584,24 @@ class SolverCoupledProxy(SolverCoupled):
             )
 
     @staticmethod
-    def _validate_proxy_body_worlds(model: Model, source_ids: Sequence[int], proxy_ids: Sequence[int]) -> None:
-        if model.body_world is None:
+    def _validate_proxy_entity_worlds(
+        label: str,
+        entity_world: wp.array[int] | None,
+        source_ids: Sequence[int],
+        proxy_ids: Sequence[int],
+    ) -> None:
+        if entity_world is None:
             return
 
-        body_world = model.body_world.numpy()
+        worlds = entity_world.numpy()
         for source_id, proxy_id in zip(source_ids, proxy_ids, strict=True):
-            source_world = int(body_world[source_id])
-            proxy_world = int(body_world[proxy_id])
+            source_world = int(worlds[source_id])
+            proxy_world = int(worlds[proxy_id])
             if source_world != proxy_world:
                 raise ValueError(
-                    "Proxy source body and destination proxy body must live in the same world: "
-                    f"source body {source_id} is in world {source_world}, "
-                    f"proxy body {proxy_id} is in world {proxy_world}"
+                    f"Proxy source {label} and destination proxy {label} must live in the same world: "
+                    f"source {label} {source_id} is in world {source_world}, "
+                    f"proxy {label} {proxy_id} is in world {proxy_world}"
                 )
 
     def _proxy_body_sets_by_destination(self) -> dict[str, set[int]]:
@@ -608,7 +762,7 @@ class SolverCoupledProxy(SolverCoupled):
             self._validate_proxy_ids("Proxy destination body", proxy_local_ids, model.body_count)
             self._validate_unique_proxy_ids("source body", src_ids)
             self._validate_unique_proxy_ids("proxy body", proxy_local_ids)
-            self._validate_proxy_body_worlds(model, src_ids, proxy_local_ids)
+            self._validate_proxy_entity_worlds("body", model.body_world, src_ids, proxy_local_ids)
             self._validate_proxy_destination_ids_not_owned(
                 "body",
                 proxy_local_ids,
@@ -707,6 +861,7 @@ class SolverCoupledProxy(SolverCoupled):
             self._validate_proxy_ids("Proxy destination particle", proxy_local_ids, model.particle_count)
             self._validate_unique_proxy_ids("source particle", src_ids)
             self._validate_unique_proxy_ids("proxy particle", proxy_local_ids)
+            self._validate_proxy_entity_worlds("particle", model.particle_world, src_ids, proxy_local_ids)
             self._validate_proxy_destination_ids_not_owned(
                 "particle",
                 proxy_local_ids,
@@ -1065,6 +1220,27 @@ class SolverCoupledProxy(SolverCoupled):
             if config is not None:
                 config.collide_counter = int(collide_counter)
 
+    def _initialize_aitken_world_slots(
+        self,
+        mapping,
+        proxy_ids_global: wp.array[int],
+        entity_world: wp.array[int],
+    ) -> None:
+        proxy_ids = proxy_ids_global.numpy()
+        worlds = entity_world.numpy()[proxy_ids]
+        slots = np.where(worlds < 0, 0, worlds + 1).astype(np.int32)
+        active_slots = np.unique(slots)
+        slot_count = self.model.world_count + 1
+        mapping.proxy_world_slots = wp.array(slots, dtype=int, device=self.model.device)
+        mapping.aitken_active_slots = wp.array(active_slots, dtype=int, device=self.model.device)
+        mapping.aitken_stats = wp.zeros(2 * slot_count, dtype=float, device=self.model.device)
+        mapping.aitken_relaxation = wp.array(
+            [mapping.proxy_relaxation] * slot_count,
+            dtype=float,
+            device=self.model.device,
+        )
+        mapping.aitken_has_previous = wp.zeros(slot_count, dtype=int, device=self.model.device)
+
     def _after_entry_states_created(self) -> None:
         super()._after_entry_states_created()
         model = self.model
@@ -1085,9 +1261,7 @@ class SolverCoupledProxy(SolverCoupled):
                     dtype=wp.spatial_vector,
                     device=device,
                 )
-                mapping.aitken_stats = wp.zeros(2, dtype=float, device=device)
-                mapping.aitken_relaxation = wp.array([mapping.proxy_relaxation], dtype=float, device=device)
-                mapping.aitken_has_previous = wp.zeros(1, dtype=int, device=device)
+                self._initialize_aitken_world_slots(mapping, mapping.proxy_body_ids_global, model.body_world)
             mapping.proxy_qd_before = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
         for mapping in self._proxy_particle_mappings:
             mapping.coupling_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
@@ -1105,9 +1279,11 @@ class SolverCoupledProxy(SolverCoupled):
                     dtype=wp.vec3,
                     device=device,
                 )
-                mapping.aitken_stats = wp.zeros(2, dtype=float, device=device)
-                mapping.aitken_relaxation = wp.array([mapping.proxy_relaxation], dtype=float, device=device)
-                mapping.aitken_has_previous = wp.zeros(1, dtype=int, device=device)
+                self._initialize_aitken_world_slots(
+                    mapping,
+                    mapping.proxy_particle_ids_global,
+                    model.particle_world,
+                )
             mapping.proxy_qd_before = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
 
     def _entry_needs_gravity_acceleration(self, entry) -> bool:
@@ -1115,45 +1291,151 @@ class SolverCoupledProxy(SolverCoupled):
             mapping.dst_name == entry.name for mapping in self._proxy_particle_mappings
         )
 
+    def _prepare_entry_reset_state(
+        self,
+        state: State,
+        *,
+        world_mask: wp.array[wp.bool] | None,
+        flags: StateFlags | int | None,
+    ) -> None:
+        """Synchronize reset proxy state before destination solver resets."""
+        super()._prepare_entry_reset_state(state, world_mask=world_mask, flags=flags)
+        del flags
+        for mapping in self._proxy_mappings:
+            destination = self._entries[mapping.dst_name]
+            kernel = _sync_reset_proxy_bodies_kernel
+            inputs = [
+                mapping.src_body_ids,
+                mapping.proxy_body_ids_local,
+                state.body_q,
+                state.body_qd,
+                destination.state_0.body_q,
+                destination.state_0.body_qd,
+            ]
+            if world_mask is not None:
+                kernel = _sync_reset_proxy_bodies_masked_kernel
+                inputs[2:2] = [self.model.body_world, world_mask]
+            wp.launch(
+                kernel,
+                dim=mapping.src_body_ids.shape[0],
+                inputs=inputs,
+                device=self.model.device,
+            )
+            self._notify_input_state_update(destination, StateFlags.BODY, iteration_restart=True)
+
+        for mapping in self._proxy_particle_mappings:
+            destination = self._entries[mapping.dst_name]
+            kernel = _sync_reset_proxy_particles_kernel
+            inputs = [
+                mapping.src_particle_ids,
+                mapping.proxy_particle_ids_local,
+                state.particle_q,
+                state.particle_qd,
+                destination.state_0.particle_q,
+                destination.state_0.particle_qd,
+            ]
+            if world_mask is not None:
+                kernel = _sync_reset_proxy_particles_masked_kernel
+                inputs[2:2] = [self.model.particle_world, world_mask]
+            wp.launch(
+                kernel,
+                dim=mapping.src_particle_ids.shape[0],
+                inputs=inputs,
+                device=self.model.device,
+            )
+            self._notify_input_state_update(destination, StateFlags.PARTICLE, iteration_restart=True)
+
+    def _reset_proxy_mapping_arrays(
+        self,
+        mapping,
+        proxy_ids_global: wp.array[int],
+        proxy_ids_local: wp.array[int],
+        entity_world: wp.array[int],
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if world_mask is None:
+            if mapping.coupling_forces is not None:
+                mapping.coupling_forces.zero_()
+            if mapping.coupling_forces_previous is not None:
+                mapping.coupling_forces_previous.zero_()
+            if mapping.aitken_residual_previous is not None:
+                mapping.aitken_residual_previous.zero_()
+            if mapping.proxy_qd_before is not None:
+                mapping.proxy_qd_before.zero_()
+            return
+
+        if mapping.coupling_forces is not None:
+            wp.launch(
+                _zero_global_proxy_values_masked_kernel,
+                dim=proxy_ids_global.shape[0],
+                inputs=[proxy_ids_global, entity_world, world_mask, mapping.coupling_forces],
+                device=self.model.device,
+            )
+        for values in (mapping.coupling_forces_previous, mapping.aitken_residual_previous):
+            if values is not None:
+                wp.launch(
+                    _zero_proxy_row_values_masked_kernel,
+                    dim=proxy_ids_global.shape[0],
+                    inputs=[proxy_ids_global, entity_world, world_mask, values],
+                    device=self.model.device,
+                )
+        if mapping.proxy_qd_before is not None:
+            wp.launch(
+                _zero_local_proxy_values_masked_kernel,
+                dim=proxy_ids_global.shape[0],
+                inputs=[proxy_ids_global, proxy_ids_local, entity_world, world_mask, mapping.proxy_qd_before],
+                device=self.model.device,
+            )
+
+    def _reset_proxy_aitken_state(self, mapping, world_mask: wp.array[wp.bool] | None) -> None:
+        if mapping.aitken_stats is None:
+            return
+        if world_mask is None:
+            mapping.aitken_stats.zero_()
+            mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
+            mapping.aitken_has_previous.zero_()
+            return
+        wp.launch(
+            _reset_aitken_slots_masked_kernel,
+            dim=mapping.aitken_active_slots.shape[0],
+            inputs=[
+                float(mapping.proxy_relaxation),
+                mapping.aitken_active_slots,
+                world_mask,
+                mapping.aitken_stats,
+                mapping.aitken_relaxation,
+                mapping.aitken_has_previous,
+            ],
+            device=self.model.device,
+        )
+
     def _reset_coupling_state(
         self,
         state: State,
         *,
-        world_mask: wp.array | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
         """Clear lagged proxy feedback and collision caches after reset."""
         super()._reset_coupling_state(state, world_mask=world_mask, flags=flags)
         for mapping in self._proxy_mappings:
-            if mapping.coupling_forces is not None:
-                mapping.coupling_forces.zero_()
-            if mapping.coupling_forces_previous is not None:
-                mapping.coupling_forces_previous.zero_()
-            if mapping.aitken_residual_previous is not None:
-                mapping.aitken_residual_previous.zero_()
-            if mapping.aitken_stats is not None:
-                mapping.aitken_stats.zero_()
-            if mapping.aitken_relaxation is not None:
-                mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
-            if mapping.aitken_has_previous is not None:
-                mapping.aitken_has_previous.zero_()
-            if mapping.proxy_qd_before is not None:
-                mapping.proxy_qd_before.zero_()
+            self._reset_proxy_mapping_arrays(
+                mapping,
+                mapping.proxy_body_ids_global,
+                mapping.proxy_body_ids_local,
+                self.model.body_world,
+                world_mask,
+            )
+            self._reset_proxy_aitken_state(mapping, world_mask)
         for mapping in self._proxy_particle_mappings:
-            if mapping.coupling_forces is not None:
-                mapping.coupling_forces.zero_()
-            if mapping.coupling_forces_previous is not None:
-                mapping.coupling_forces_previous.zero_()
-            if mapping.aitken_residual_previous is not None:
-                mapping.aitken_residual_previous.zero_()
-            if mapping.aitken_stats is not None:
-                mapping.aitken_stats.zero_()
-            if mapping.aitken_relaxation is not None:
-                mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
-            if mapping.aitken_has_previous is not None:
-                mapping.aitken_has_previous.zero_()
-            if mapping.proxy_qd_before is not None:
-                mapping.proxy_qd_before.zero_()
+            self._reset_proxy_mapping_arrays(
+                mapping,
+                mapping.proxy_particle_ids_global,
+                mapping.proxy_particle_ids_local,
+                self.model.particle_world,
+                world_mask,
+            )
+            self._reset_proxy_aitken_state(mapping, world_mask)
         for config in self._proxy_collision_configs.values():
             config.collide_counter = 0
             if config.contacts is not None:
@@ -1197,6 +1479,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_body_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_body_ids_global,
+                    proxy.proxy_world_slots,
                     proxy.coupling_forces_previous,
                     proxy.coupling_forces,
                     proxy.aitken_residual_previous,
@@ -1207,10 +1490,11 @@ class SolverCoupledProxy(SolverCoupled):
             )
             wp.launch(
                 _update_aitken_relaxation_kernel,
-                dim=1,
+                dim=proxy.aitken_active_slots.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation_min),
                     float(proxy.proxy_relaxation_max),
+                    proxy.aitken_active_slots,
                     proxy.aitken_stats,
                     proxy.aitken_relaxation,
                     proxy.aitken_has_previous,
@@ -1222,6 +1506,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_body_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_body_ids_global,
+                    proxy.proxy_world_slots,
                     proxy.coupling_forces_previous,
                     proxy.aitken_residual_previous,
                     proxy.aitken_relaxation,
@@ -1252,6 +1537,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_particle_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_particle_ids_global,
+                    proxy.proxy_world_slots,
                     proxy.coupling_forces_previous,
                     proxy.coupling_forces,
                     proxy.aitken_residual_previous,
@@ -1262,10 +1548,11 @@ class SolverCoupledProxy(SolverCoupled):
             )
             wp.launch(
                 _update_aitken_relaxation_kernel,
-                dim=1,
+                dim=proxy.aitken_active_slots.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation_min),
                     float(proxy.proxy_relaxation_max),
+                    proxy.aitken_active_slots,
                     proxy.aitken_stats,
                     proxy.aitken_relaxation,
                     proxy.aitken_has_previous,
@@ -1277,6 +1564,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_particle_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_particle_ids_global,
+                    proxy.proxy_world_slots,
                     proxy.coupling_forces_previous,
                     proxy.aitken_residual_previous,
                     proxy.aitken_relaxation,
@@ -1459,9 +1747,10 @@ class SolverCoupledProxy(SolverCoupled):
                 continue
             wp.launch(
                 _reset_aitken_state_kernel,
-                dim=1,
+                dim=proxy.aitken_active_slots.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation),
+                    proxy.aitken_active_slots,
                     proxy.aitken_relaxation,
                     proxy.aitken_has_previous,
                 ],

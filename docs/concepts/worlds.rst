@@ -370,14 +370,15 @@ graph so every replay finishes with the buffers in the same roles:
        solver.step(state_1, state_0, control=None, contacts=None, dt=dt)
 
    wp.capture_launch(capture.graph)
-   solver.check_sparse_grid_rebuild_status()
+   solver.check_status()
 
-For rebuildable sparse grids, call
-:meth:`~newton.solvers.SolverImplicitMPM.check_sparse_grid_rebuild_status` at
-an explicit safe host boundary after replay. Capacity failures accumulate in a
-sticky device status so a later successful rebuild cannot hide an earlier
-overflow. The check synchronizes and raises a descriptive capacity error. Once
-the error is handled, call
+Call :meth:`~newton.solvers.SolverBase.check_status` at an explicit safe host
+boundary after replay. Coupled solvers forward this check recursively to their
+entries. For rebuildable sparse grids, capacity failures accumulate in a sticky
+device status so a later successful rebuild cannot hide an earlier overflow.
+The check synchronizes and raises a descriptive capacity error. The MPM-specific
+:meth:`~newton.solvers.SolverImplicitMPM.check_sparse_grid_rebuild_status`
+method remains available for direct diagnostics. Once the error is handled, call
 :meth:`~newton.solvers.SolverImplicitMPM.clear_sparse_grid_rebuild_status`
 outside capture to establish a new status boundary.
 

@@ -39,6 +39,7 @@ from .implicit_mpm_solver_kernels import (
     EPSILON,
     INFINITY,
     YIELD_PARAM_LENGTH,
+    _rebuild_capacity,
     advect_particles,
     allocate_by_voxels,
     average_elastic_parameters,
@@ -76,6 +77,7 @@ from .implicit_mpm_solver_kernels import (
     mat66,
     node_color,
     record_volume_rebuild_status,
+    reset_mpm_collider_history,
     reset_mpm_particle_history,
     reset_mpm_point_warmstart,
     rotate_matrix_columns,
@@ -656,16 +658,32 @@ class LastStepData:
                 ),
             )
 
-    def require_collider_previous_position(self, collider_body_q: wp.array | None):
+    def require_collider_previous_position(self, collider_body_q: wp.array[wp.transform] | None):
         if collider_body_q is None:
             self.body_q_prev = None
         elif self.body_q_prev is None or self.body_q_prev.shape != collider_body_q.shape:
             self.body_q_prev = wp.clone(collider_body_q)
 
-    def save_collider_current_position(self, collider_body_q: wp.array | None):
+    def save_collider_current_position(
+        self,
+        collider_body_q: wp.array[wp.transform] | None,
+        body_world: wp.array[wp.int32] | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
+    ):
+        had_previous = self.body_q_prev is not None and (
+            collider_body_q is None or self.body_q_prev.shape == collider_body_q.shape
+        )
         self.require_collider_previous_position(collider_body_q)
         if collider_body_q is not None:
-            self.body_q_prev.assign(collider_body_q)
+            if world_mask is None or body_world is None or not had_previous:
+                self.body_q_prev.assign(collider_body_q)
+            else:
+                wp.launch(
+                    reset_mpm_collider_history,
+                    dim=collider_body_q.shape[0],
+                    inputs=[body_world, world_mask, collider_body_q, self.body_q_prev],
+                    device=collider_body_q.device,
+                )
 
 
 class SolverImplicitMPM(SolverBase, CouplingInterface):
@@ -1280,6 +1298,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             self._require_collision_space_fields(scratch, self._last_step_data)
             self._require_strain_space_fields(scratch, self._last_step_data)
 
+    @override
+    def check_status(self) -> None:
+        """Raise if a prior step exceeded reserved sparse-grid capacity."""
+        self.check_sparse_grid_rebuild_status()
+
     def check_sparse_grid_rebuild_status(self) -> None:
         """Raise if a rebuildable sparse grid exceeded its reserved capacity.
 
@@ -1334,7 +1357,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         if array.device != device:
             raise ValueError(f"state.{name} is on device {array.device}, expected {device}.")
 
-    def _validate_reset_inputs(self, state: newton.State, world_mask: wp.array | None) -> None:
+    def _validate_reset_inputs(self, state: newton.State, world_mask: wp.array[wp.bool] | None) -> None:
         if state is None:
             raise ValueError("'state' argument is required.")
 
@@ -1418,7 +1441,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     f"last-step {name}.dof_values has shape {field.dof_values.shape}, expected {expected_shape}."
                 )
 
-    def _clear_reset_warmstarts(self, world_mask: wp.array | None) -> None:
+    def _clear_reset_warmstarts(self, world_mask: wp.array[wp.bool] | None) -> None:
         for field in (
             self._last_step_data.ws_impulse_field,
             self._last_step_data.ws_stress_field,
@@ -1439,7 +1462,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     def reset(
         self,
         state: newton.State,
-        world_mask: wp.array | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
         """Reset implicit MPM history for all or selected worlds.
@@ -1495,7 +1518,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                         device=self.model.device,
                     )
 
-            self._last_step_data.save_collider_current_position(state.body_q)
+            self._last_step_data.save_collider_current_position(
+                state.body_q,
+                body_world=self.model.body_world,
+                world_mask=world_mask,
+            )
 
     @override
     def step(
@@ -1948,17 +1975,29 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                             self._grid_status = wp.zeros(1, dtype=wp.uint32, device=positions.device)
                             self._grid_accumulated_status = wp.zeros(1, dtype=wp.uint32, device=positions.device)
                         point_mask = self._update_grid_point_mask(self._mpm_model.particle_flags)
+                        guard_cells = 3
+                        capacity_kwargs = _rebuild_capacity(
+                            positions,
+                            voxel_size,
+                            16.0,
+                            self.max_active_cell_count,
+                            point_mask=point_mask,
+                            point_environment=self._particle_environment,
+                            environment_count=self._environment_count,
+                            guard_cells=guard_cells,
+                        )
                         grid = fem.Nanogrid.from_environment_voxels(
                             positions,
                             self._particle_environment,
                             self._environment_count,
                             point_mask=point_mask,
+                            guard_cells=guard_cells,
                             voxel_size=voxel_size,
                             temporary_store=temporary_store,
                             device=positions.device,
                             rebuildable=True,
-                            max_active_voxels=self.max_active_cell_count,
                             status=self._grid_status,
+                            **capacity_kwargs,
                         )
                         self.check_sparse_grid_rebuild_status()
                     else:

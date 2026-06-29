@@ -758,6 +758,192 @@ class TestAdmmSmoke(unittest.TestCase):
         np.testing.assert_allclose(body_a, body_b, atol=1e-6)
         np.testing.assert_allclose(part_a, part_b, atol=1e-6)
 
+    def test_masked_reset_preserves_unselected_entry_private_state(self):
+        template = newton.ModelBuilder(gravity=0.0)
+        template.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        template.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        template.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.0)
+        template.add_particle(pos=(1.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.0)
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device="cpu")
+        solver = SolverCoupledADMM(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="a",
+                    solver=lambda view: SolverSemiImplicit(view, enable_tri_contact=False),
+                    bodies=[0, 2],
+                    particles=[0, 2],
+                ),
+                SolverCoupled.Entry(
+                    name="b",
+                    solver=lambda view: SolverSemiImplicit(view, enable_tri_contact=False),
+                    bodies=[1, 3],
+                    particles=[1, 3],
+                ),
+            ],
+            coupling=SolverCoupledADMM.Config(iterations=1),
+        )
+        entry = solver._entries["a"]
+        buffers = solver._admm_buffers["a"]
+        selected_body = int(entry.body_global_to_local.numpy()[0])
+        unselected_body = int(entry.body_global_to_local.numpy()[2])
+        selected_particle = int(entry.particle_global_to_local.numpy()[0])
+        unselected_particle = int(entry.particle_global_to_local.numpy()[2])
+        old_body_q = entry.state_0.body_q.numpy()
+        old_body_q[:, :3] = np.arange(old_body_q.shape[0] * 3, dtype=np.float32).reshape(-1, 3) + 10.0
+        buffers.body_q_n.assign(old_body_q)
+        body_shape = buffers.body_qd_n.numpy().shape
+        particle_shape = buffers.particle_qd_n.numpy().shape
+        buffers.body_qd_n.assign(np.arange(np.prod(body_shape), dtype=np.float32).reshape(body_shape) + 1.0)
+        buffers.body_qd_k.assign(np.arange(np.prod(body_shape), dtype=np.float32).reshape(body_shape) + 21.0)
+        buffers.particle_q_n.assign(np.arange(np.prod(particle_shape), dtype=np.float32).reshape(particle_shape) + 1.0)
+        buffers.particle_qd_n.assign(
+            np.arange(np.prod(particle_shape), dtype=np.float32).reshape(particle_shape) + 11.0
+        )
+        buffers.particle_qd_k.assign(
+            np.arange(np.prod(particle_shape), dtype=np.float32).reshape(particle_shape) + 21.0
+        )
+        buffers.body_f.assign(np.arange(np.prod(body_shape), dtype=np.float32).reshape(body_shape) + 41.0)
+        buffers.particle_f.assign(np.arange(np.prod(particle_shape), dtype=np.float32).reshape(particle_shape) + 31.0)
+        before = {
+            name: getattr(buffers, name).numpy().copy()
+            for name in (
+                "body_q_n",
+                "body_qd_n",
+                "body_qd_k",
+                "particle_q_n",
+                "particle_qd_n",
+                "particle_qd_k",
+                "body_f",
+                "particle_f",
+            )
+        }
+
+        state = model.state()
+        body_q = state.body_q.numpy()
+        body_q[0, :3] = (100.0, 101.0, 102.0)
+        state.body_q.assign(body_q)
+        body_qd = state.body_qd.numpy()
+        body_qd[0] = np.arange(101, 107, dtype=np.float32)
+        state.body_qd.assign(body_qd)
+        particle_q = state.particle_q.numpy()
+        particle_q[0] = (200.0, 201.0, 202.0)
+        state.particle_q.assign(particle_q)
+        particle_qd = state.particle_qd.numpy()
+        particle_qd[0] = (210.0, 211.0, 212.0)
+        state.particle_qd.assign(particle_qd)
+
+        solver.reset(
+            state,
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+        )
+
+        np.testing.assert_array_equal(
+            buffers.body_q_n.numpy()[selected_body], entry.state_0.body_q.numpy()[selected_body]
+        )
+        np.testing.assert_array_equal(
+            buffers.body_qd_n.numpy()[selected_body], entry.state_0.body_qd.numpy()[selected_body]
+        )
+        np.testing.assert_array_equal(
+            buffers.body_qd_k.numpy()[selected_body], entry.state_0.body_qd.numpy()[selected_body]
+        )
+        np.testing.assert_array_equal(
+            buffers.particle_q_n.numpy()[selected_particle], entry.state_0.particle_q.numpy()[selected_particle]
+        )
+        np.testing.assert_array_equal(
+            buffers.particle_qd_n.numpy()[selected_particle], entry.state_0.particle_qd.numpy()[selected_particle]
+        )
+        np.testing.assert_array_equal(
+            buffers.particle_qd_k.numpy()[selected_particle], entry.state_0.particle_qd.numpy()[selected_particle]
+        )
+        for name in before:
+            actual = getattr(buffers, name).numpy()
+            index = selected_body if name.startswith("body") else selected_particle
+            unselected_index = unselected_body if name.startswith("body") else unselected_particle
+            if name.endswith("_f"):
+                np.testing.assert_array_equal(actual[index], np.zeros_like(actual[index]))
+            np.testing.assert_array_equal(actual[unselected_index], before[name][unselected_index])
+
+        body_private_names = ("body_q_n", "body_qd_n", "body_qd_k")
+        for offset, name in enumerate(body_private_names):
+            array = getattr(buffers, name)
+            shape = array.numpy().shape
+            values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 500.0 + 100.0 * offset
+            array.assign(values)
+        body_before_particle_reset = {name: getattr(buffers, name).numpy().copy() for name in body_private_names}
+
+        solver.reset(
+            state,
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+            flags=newton.StateFlags.PARTICLE,
+        )
+
+        for name in body_private_names:
+            np.testing.assert_array_equal(getattr(buffers, name).numpy(), body_before_particle_reset[name])
+
+        particle_private_names = ("particle_q_n", "particle_qd_n", "particle_qd_k")
+        for offset, name in enumerate(particle_private_names):
+            array = getattr(buffers, name)
+            shape = array.numpy().shape
+            values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 800.0 + 100.0 * offset
+            array.assign(values)
+        particle_before_body_reset = {name: getattr(buffers, name).numpy().copy() for name in particle_private_names}
+
+        solver.reset(
+            state,
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+            flags=newton.StateFlags.BODY,
+        )
+
+        for name in particle_private_names:
+            np.testing.assert_array_equal(getattr(buffers, name).numpy(), particle_before_body_reset[name])
+
+    def test_reset_flags_gate_joint_private_state(self):
+        builder = newton.ModelBuilder(gravity=0.0)
+        parent = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        child = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        joint = builder.add_joint_revolute(parent=parent, child=child, axis=(0.0, 0.0, 1.0))
+        model = builder.finalize(device="cpu")
+        solver = SolverCoupledADMM(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="joint",
+                    solver=lambda view: SolverSemiImplicit(view, enable_tri_contact=False),
+                    bodies=[parent, child],
+                    joints=[joint],
+                )
+            ],
+            coupling=SolverCoupledADMM.Config(iterations=1),
+        )
+        entry = solver._entries["joint"]
+        buffers = solver._admm_buffers["joint"]
+        buffers.joint_q_n.fill_(10.0)
+        buffers.joint_qd_n.fill_(20.0)
+        buffers.joint_qd_k.fill_(30.0)
+        state = model.state()
+        state.joint_q.fill_(1.0)
+        state.joint_qd.fill_(2.0)
+
+        solver.reset(state, flags=newton.StateFlags.BODY)
+
+        np.testing.assert_array_equal(buffers.joint_q_n.numpy(), np.array([10.0], dtype=np.float32))
+        np.testing.assert_array_equal(buffers.joint_qd_n.numpy(), np.array([20.0], dtype=np.float32))
+        np.testing.assert_array_equal(buffers.joint_qd_k.numpy(), np.array([30.0], dtype=np.float32))
+
+        solver.reset(state, flags=newton.StateFlags.JOINT_Q)
+
+        np.testing.assert_array_equal(buffers.joint_q_n.numpy(), entry.state_0.joint_q.numpy())
+        np.testing.assert_array_equal(buffers.joint_qd_n.numpy(), np.array([20.0], dtype=np.float32))
+        np.testing.assert_array_equal(buffers.joint_qd_k.numpy(), np.array([30.0], dtype=np.float32))
+
+        solver.reset(state, flags=newton.StateFlags.JOINT_QD)
+
+        np.testing.assert_array_equal(buffers.joint_qd_n.numpy(), entry.state_0.joint_qd.numpy())
+        np.testing.assert_array_equal(buffers.joint_qd_k.numpy(), entry.state_0.joint_qd.numpy())
+
 
 class TestAdmmProximal(unittest.TestCase):
     """Proximal terms affect constrained DOFs only."""

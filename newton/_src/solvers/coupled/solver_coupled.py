@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import warp as wp
@@ -38,6 +38,17 @@ def _inverse_index_map(local_to_global: wp.array, global_count: int, device) -> 
         if 0 <= global_id < global_count:
             mapping[global_id] = local_id
     return wp.array(mapping, dtype=int, device=device)
+
+
+def _joint_state_worlds(model: Model, starts: wp.array[wp.int32], count: int) -> wp.array[wp.int32]:
+    """Return a world id for every joint coordinate or degree of freedom."""
+    worlds = np.full(int(count), -1, dtype=np.int32)
+    if model.joint_count > 0 and count > 0:
+        joint_starts = starts.numpy()
+        joint_worlds = model.joint_world.numpy()
+        for joint, world in enumerate(joint_worlds):
+            worlds[int(joint_starts[joint]) : int(joint_starts[joint + 1])] = int(world)
+    return wp.array(worlds, dtype=wp.int32, device=model.device)
 
 
 @dataclass(frozen=True)
@@ -214,6 +225,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
         self._entry_rigid_contact_src_to_dst: dict[str, wp.array] = {}
         self._entry_soft_contact_src_to_dst: dict[str, wp.array] = {}
         self._entry_output_state_valid = False
+        self._joint_coord_world = _joint_state_worlds(model, model.joint_q_start, model.joint_coord_count)
+        self._joint_dof_world = _joint_state_worlds(model, model.joint_qd_start, model.joint_dof_count)
 
         self._validate_entry_names()
         self._body_owner = self._build_owner_map(model.body_count, [e.bodies for e in self._entry_configs])
@@ -1901,10 +1914,35 @@ class SolverCoupled(SolverBase, CouplingInterface):
         self._distribute_state(state_in, dt=dt)
         self._entry_output_state_valid = False
 
+    def reconcile_entry_state(
+        self,
+        name: str,
+        state_out: State,
+        phase: Literal["current", "input", "output"] = "current",
+    ) -> None:
+        """Reconcile one entry-local state into a parent-model state.
+
+        This is the public counterpart to :meth:`entry_state` for callers that
+        apply a solver-specific operation directly to an entry state. Only the
+        entry's owned bodies, particles, joints, and registered custom state
+        arrays are written; all other parent-state values are preserved.
+
+        Args:
+            name: Coupled sub-solver entry name.
+            state_out: Parent-model state to update in place.
+            phase: Entry state phase to reconcile. ``"current"`` follows the
+                same input-versus-output selection as :meth:`entry_state`.
+        """
+        if state_out is None:
+            raise ValueError("'state_out' argument is required.")
+        entry = self._entries[name]
+        source = self.entry_state(name, phase)
+        self._reconcile_entry_state(entry, source, state_out)
+
     def reset(
         self,
         state: State,
-        world_mask: wp.array | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
         """Reset coupled sub-solvers and clear coupled-solver transient state.
@@ -1921,12 +1959,20 @@ class SolverCoupled(SolverBase, CouplingInterface):
         if state is None:
             raise ValueError("'state' argument is required.")
 
-        self._distribute_state(state, iteration_restart=True)
+        self._validate_reset_world_mask(world_mask)
+
+        self._distribute_state(
+            state,
+            iteration_restart=True,
+            world_mask=world_mask,
+            reset_flags=flags,
+        )
+        self._prepare_entry_reset_state(state, world_mask=world_mask, flags=flags)
         for entry in self._entries.values():
             entry.solver.reset(entry.state_0, world_mask=world_mask, flags=flags)
-            self._sync_entry_reset_state(entry)
+            self._sync_entry_reset_state(entry, world_mask=world_mask, flags=flags)
 
-        self._reconcile_state(state)
+        self._reconcile_state(state, world_mask=world_mask, flags=flags)
         self._reset_coupling_state(state, world_mask=world_mask, flags=flags)
         self._clear_entry_contact_buffers()
         self._rebuild_entry_solver_state_caches()
@@ -1964,6 +2010,11 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 entry_contacts = self.entry_contacts(entry.name, contacts)
             entry.solver.prepare_cuda_graph_capture(entry_contacts)
 
+    def check_status(self) -> None:
+        """Raise if any coupled sub-solver reports an asynchronous failure."""
+        for entry in self._entries.values():
+            entry.solver.check_status()
+
     def step(
         self,
         state_in: State,
@@ -1982,7 +2033,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
         self._distribute_state(state_in, dt=dt)
         self._refresh_entry_collision_pipelines()
         self._step_coupled(state_in, state_out, control, contacts, dt)
-        _copy_state(state_in, state_out)
+        self._copy_parent_state(state_in, state_out)
         self._reconcile_state(state_out)
         self._entry_output_state_valid = True
 
@@ -1994,20 +2045,37 @@ class SolverCoupled(SolverBase, CouplingInterface):
             if entry.preserve_shape_ids:
                 self._ensure_entry_contact_buffer(entry, contacts)
 
-    def _sync_entry_reset_state(self, entry: SolverEntry) -> None:
+    def _sync_entry_reset_state(
+        self,
+        entry: SolverEntry,
+        *,
+        world_mask: wp.array[wp.bool] | None,
+        flags: StateFlags | int | None,
+    ) -> None:
         """Mirror a reset entry input state to persistent entry buffers."""
-        if entry.state_1 is not None and entry.state_1 is not entry.state_0:
-            _copy_same_view_state(entry.state_0, entry.state_1)
+        for entry_state in (entry.state_1, entry.state_tmp):
+            if entry_state is not None and entry_state is not entry.state_0:
+                self._copy_entry_state(entry, entry.state_0, entry_state, world_mask=world_mask, flags=flags)
 
-        for entry_state in (entry.state_0, entry.state_1):
+        for entry_state in (entry.state_0, entry.state_1, entry.state_tmp):
             if entry_state is not None:
-                _clear_transient_state_buffers(entry_state)
+                self._clear_entry_transient_state(entry, entry_state, world_mask)
+
+    def _prepare_entry_reset_state(
+        self,
+        state: State,
+        *,
+        world_mask: wp.array[wp.bool] | None,
+        flags: StateFlags | int | None,
+    ) -> None:
+        """Hook for subclasses to synchronize entry inputs before reset."""
+        del state, world_mask, flags
 
     def _reset_coupling_state(
         self,
         state: State,
         *,
-        world_mask: wp.array | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
         """Hook for subclasses to clear algorithm-specific reset state."""
@@ -2068,88 +2136,460 @@ class SolverCoupled(SolverBase, CouplingInterface):
     # State distribution and reconciliation
     # ------------------------------------------------------------------
 
+    def _validate_reset_world_mask(self, world_mask: wp.array[wp.bool] | None) -> None:
+        if world_mask is None:
+            return
+        if not isinstance(world_mask, wp.array) or world_mask.dtype != wp.bool:
+            raise TypeError("world_mask must be a Warp array with dtype wp.bool.")
+        if world_mask.shape != (self.model.world_count,):
+            raise ValueError(f"world_mask has shape {world_mask.shape}, expected ({self.model.world_count},).")
+        if world_mask.device != self.model.device:
+            raise ValueError(f"world_mask is on device {world_mask.device}, expected {self.model.device}.")
+
+    @staticmethod
+    def _state_attribute_array(state: State, full_name: str) -> wp.array[Any] | None:
+        if ":" not in full_name:
+            value = getattr(state, full_name, None)
+        else:
+            namespace_name, attribute_name = full_name.split(":", 1)
+            namespace = getattr(state, namespace_name, None)
+            value = None if namespace is None else getattr(namespace, attribute_name, None)
+        return value if isinstance(value, wp.array) else None
+
+    def _state_frequency_mapping(
+        self,
+        entry: SolverEntry,
+        frequency: Model.AttributeFrequency | str,
+    ) -> (
+        tuple[
+            wp.array[wp.int32],
+            wp.array[wp.int32],
+            wp.array[wp.int32],
+            wp.array[wp.int32],
+            StateFlags,
+        ]
+        | None
+    ):
+        if frequency == Model.AttributeFrequency.BODY:
+            return (
+                entry.body_local_to_global,
+                entry.body_global_to_local,
+                entry.body_indices,
+                self.model.body_world,
+                StateFlags.BODY,
+            )
+        if frequency == Model.AttributeFrequency.PARTICLE:
+            return (
+                entry.particle_local_to_global,
+                entry.particle_global_to_local,
+                entry.particle_indices,
+                self.model.particle_world,
+                StateFlags.PARTICLE,
+            )
+        if frequency == Model.AttributeFrequency.JOINT_COORD:
+            return (
+                entry.joint_coord_local_to_global,
+                entry.joint_coord_global_to_local,
+                entry.joint_q_indices,
+                self._joint_coord_world,
+                StateFlags.JOINT_Q,
+            )
+        if frequency == Model.AttributeFrequency.JOINT_DOF:
+            return (
+                entry.joint_dof_local_to_global,
+                entry.joint_dof_global_to_local,
+                entry.joint_qd_indices,
+                self._joint_dof_world,
+                StateFlags.JOINT_QD,
+            )
+        return None
+
+    def _registered_state_arrays(self, state: State):
+        assignment_state = Model.AttributeAssignment.STATE
+        for full_name, frequency in self.model.attribute_frequency.items():
+            if self.model.attribute_assignment.get(full_name) != assignment_state:
+                continue
+            array = self._state_attribute_array(state, full_name)
+            if array is not None:
+                yield full_name, frequency, array
+
+    def _copy_parent_state(self, src: State, dst: State) -> None:
+        """Copy registered parent state, including custom state arrays."""
+        if src is dst:
+            return
+        _copy_state(src, dst)
+        for full_name, _frequency, src_array in self._registered_state_arrays(src):
+            dst_array = self._state_attribute_array(dst, full_name)
+            if dst_array is None:
+                raise ValueError(f"State is missing registered custom array '{full_name}'.")
+            dst_array.assign(src_array)
+
+    def _copy_array_to_entry(
+        self,
+        src: wp.array[Any] | None,
+        dst: wp.array[Any] | None,
+        local_to_global: wp.array[wp.int32],
+        entity_world: wp.array[wp.int32],
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if src is None or dst is None or local_to_global.shape[0] == 0:
+            return
+        kernel = _copy_mapped_array if world_mask is None else _copy_mapped_array_masked
+        inputs = [local_to_global, src, dst]
+        if world_mask is not None:
+            inputs.extend((entity_world, world_mask))
+        wp.launch(kernel, dim=local_to_global.shape[0], inputs=inputs, device=self.model.device)
+
+    def _copy_local_entry_array(
+        self,
+        src: wp.array[Any] | None,
+        dst: wp.array[Any] | None,
+        local_to_global: wp.array[wp.int32],
+        entity_world: wp.array[wp.int32],
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if src is None or dst is None or src is dst:
+            return
+        if world_mask is None:
+            dst.assign(src)
+            return
+        wp.launch(
+            _copy_local_array_masked,
+            dim=local_to_global.shape[0],
+            inputs=[local_to_global, entity_world, world_mask, src, dst],
+            device=self.model.device,
+        )
+
+    def _scatter_entry_array(
+        self,
+        src: wp.array[Any] | None,
+        dst: wp.array[Any] | None,
+        indices: wp.array[wp.int32],
+        global_to_local: wp.array[wp.int32],
+        entity_world: wp.array[wp.int32],
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if src is None or dst is None or indices.shape[0] == 0:
+            return
+        kernel = _scatter_mapped_array if world_mask is None else _scatter_mapped_array_masked
+        inputs = [indices, global_to_local, src, dst]
+        if world_mask is not None:
+            inputs.extend((entity_world, world_mask))
+        wp.launch(kernel, dim=indices.shape[0], inputs=inputs, device=self.model.device)
+
+    def _copy_custom_state_to_entry(
+        self,
+        src: State,
+        dst: State,
+        entry: SolverEntry,
+        *,
+        world_mask: wp.array[wp.bool] | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        for full_name, frequency, src_array in self._registered_state_arrays(src):
+            mapping = self._state_frequency_mapping(entry, frequency)
+            if mapping is None:
+                continue
+            local_to_global, _global_to_local, _indices, entity_world, frequency_flags = mapping
+            if not state_flags & frequency_flags:
+                continue
+            dst_array = self._state_attribute_array(dst, full_name)
+            if dst_array is None:
+                raise ValueError(f"Entry state is missing registered custom array '{full_name}'.")
+            self._copy_array_to_entry(src_array, dst_array, local_to_global, entity_world, world_mask)
+
+    def _copy_filtered_state_to_entry(
+        self,
+        src: State,
+        dst: State,
+        entry: SolverEntry,
+        world_mask: wp.array[wp.bool] | None,
+        flags: StateFlags | int | None,
+    ) -> None:
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        body_map = entry.body_local_to_global
+        particle_map = entry.particle_local_to_global
+        if state_flags & StateFlags.BODY_Q:
+            self._copy_array_to_entry(src.body_q, dst.body_q, body_map, self.model.body_world, world_mask)
+        if state_flags & StateFlags.BODY_QD:
+            self._copy_array_to_entry(src.body_qd, dst.body_qd, body_map, self.model.body_world, world_mask)
+        if state_flags & StateFlags.BODY_F:
+            self._copy_array_to_entry(src.body_f, dst.body_f, body_map, self.model.body_world, world_mask)
+        if state_flags & StateFlags.PARTICLE_Q:
+            self._copy_array_to_entry(
+                src.particle_q,
+                dst.particle_q,
+                particle_map,
+                self.model.particle_world,
+                world_mask,
+            )
+        if state_flags & StateFlags.PARTICLE_QD:
+            self._copy_array_to_entry(
+                src.particle_qd,
+                dst.particle_qd,
+                particle_map,
+                self.model.particle_world,
+                world_mask,
+            )
+        if state_flags & StateFlags.PARTICLE_F:
+            self._copy_array_to_entry(
+                src.particle_f,
+                dst.particle_f,
+                particle_map,
+                self.model.particle_world,
+                world_mask,
+            )
+        if state_flags & StateFlags.JOINT_Q:
+            self._copy_array_to_entry(
+                src.joint_q,
+                dst.joint_q,
+                entry.joint_coord_local_to_global,
+                self._joint_coord_world,
+                world_mask,
+            )
+        if state_flags & StateFlags.JOINT_QD:
+            self._copy_array_to_entry(
+                src.joint_qd,
+                dst.joint_qd,
+                entry.joint_dof_local_to_global,
+                self._joint_dof_world,
+                world_mask,
+            )
+        self._copy_custom_state_to_entry(src, dst, entry, world_mask=world_mask, flags=state_flags)
+
+    def _copy_entry_state(
+        self,
+        entry: SolverEntry,
+        src: State,
+        dst: State,
+        *,
+        world_mask: wp.array[wp.bool] | None,
+        flags: StateFlags | int | None,
+    ) -> None:
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        mappings = (
+            (StateFlags.BODY_Q, src.body_q, dst.body_q, entry.body_local_to_global, self.model.body_world),
+            (StateFlags.BODY_QD, src.body_qd, dst.body_qd, entry.body_local_to_global, self.model.body_world),
+            (StateFlags.BODY_F, src.body_f, dst.body_f, entry.body_local_to_global, self.model.body_world),
+            (
+                StateFlags.PARTICLE_Q,
+                src.particle_q,
+                dst.particle_q,
+                entry.particle_local_to_global,
+                self.model.particle_world,
+            ),
+            (
+                StateFlags.PARTICLE_QD,
+                src.particle_qd,
+                dst.particle_qd,
+                entry.particle_local_to_global,
+                self.model.particle_world,
+            ),
+            (
+                StateFlags.PARTICLE_F,
+                src.particle_f,
+                dst.particle_f,
+                entry.particle_local_to_global,
+                self.model.particle_world,
+            ),
+            (
+                StateFlags.JOINT_Q,
+                src.joint_q,
+                dst.joint_q,
+                entry.joint_coord_local_to_global,
+                self._joint_coord_world,
+            ),
+            (
+                StateFlags.JOINT_QD,
+                src.joint_qd,
+                dst.joint_qd,
+                entry.joint_dof_local_to_global,
+                self._joint_dof_world,
+            ),
+        )
+        for field_flags, src_array, dst_array, local_to_global, entity_world in mappings:
+            if state_flags & field_flags:
+                self._copy_local_entry_array(
+                    src_array,
+                    dst_array,
+                    local_to_global,
+                    entity_world,
+                    world_mask,
+                )
+
+        for full_name, frequency, src_array in self._registered_state_arrays(src):
+            mapping = self._state_frequency_mapping(entry, frequency)
+            if mapping is None:
+                continue
+            local_to_global, _global_to_local, _indices, entity_world, frequency_flags = mapping
+            if not state_flags & frequency_flags:
+                continue
+            dst_array = self._state_attribute_array(dst, full_name)
+            if dst_array is None:
+                raise ValueError(f"Entry state is missing registered custom array '{full_name}'.")
+            self._copy_local_entry_array(
+                src_array,
+                dst_array,
+                local_to_global,
+                entity_world,
+                world_mask,
+            )
+
+    def _clear_entry_transient_state(
+        self,
+        entry: SolverEntry,
+        state: State,
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if world_mask is None:
+            _clear_transient_state_buffers(state)
+            return
+        for name in ("body_f", "body_qdd", "body_parent_f"):
+            array = getattr(state, name, None)
+            if array is not None:
+                wp.launch(
+                    _zero_local_array_masked,
+                    dim=entry.body_local_to_global.shape[0],
+                    inputs=[entry.body_local_to_global, self.model.body_world, world_mask, array],
+                    device=self.model.device,
+                )
+        if state.particle_f is not None:
+            wp.launch(
+                _zero_local_array_masked,
+                dim=entry.particle_local_to_global.shape[0],
+                inputs=[entry.particle_local_to_global, self.model.particle_world, world_mask, state.particle_f],
+                device=self.model.device,
+            )
+
     def _distribute_state(
         self,
         state_in: State,
         *,
         dt: float = 0.0,
         iteration_restart: bool = False,
+        world_mask: wp.array[wp.bool] | None = None,
+        reset_flags: StateFlags | int | None = None,
     ) -> None:
         """Copy ``state_in`` into each sub-solver's ``state_0``."""
         for entry in self._entries.values():
-            flags = self._input_state_copy_flags(state_in, entry.state_0)
-            _copy_state_to_entry(state_in, entry.state_0, entry)
+            if iteration_restart:
+                flags = StateFlags.ALL if reset_flags is None else StateFlags(reset_flags)
+                self._copy_filtered_state_to_entry(state_in, entry.state_0, entry, world_mask, flags)
+            else:
+                flags = self._input_state_copy_flags(state_in, entry.state_0)
+                _copy_state_to_entry(state_in, entry.state_0, entry)
+                self._copy_custom_state_to_entry(state_in, entry.state_0, entry)
             self._notify_input_state_update(entry, flags, dt=dt, iteration_restart=iteration_restart)
 
-    def _reconcile_state(self, state_out: State) -> None:
+    def _reconcile_entry_state(
+        self,
+        entry: SolverEntry,
+        source: State,
+        state_out: State,
+        *,
+        world_mask: wp.array[wp.bool] | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        core_mappings = (
+            (
+                StateFlags.BODY_Q,
+                source.body_q,
+                state_out.body_q,
+                entry.body_indices,
+                entry.body_global_to_local,
+                self.model.body_world,
+            ),
+            (
+                StateFlags.BODY_QD,
+                source.body_qd,
+                state_out.body_qd,
+                entry.body_indices,
+                entry.body_global_to_local,
+                self.model.body_world,
+            ),
+            (
+                StateFlags.PARTICLE_Q,
+                source.particle_q,
+                state_out.particle_q,
+                entry.particle_indices,
+                entry.particle_global_to_local,
+                self.model.particle_world,
+            ),
+            (
+                StateFlags.PARTICLE_QD,
+                source.particle_qd,
+                state_out.particle_qd,
+                entry.particle_indices,
+                entry.particle_global_to_local,
+                self.model.particle_world,
+            ),
+            (
+                StateFlags.JOINT_Q,
+                source.joint_q,
+                state_out.joint_q,
+                entry.joint_q_indices,
+                entry.joint_coord_global_to_local,
+                self._joint_coord_world,
+            ),
+            (
+                StateFlags.JOINT_QD,
+                source.joint_qd,
+                state_out.joint_qd,
+                entry.joint_qd_indices,
+                entry.joint_dof_global_to_local,
+                self._joint_dof_world,
+            ),
+        )
+        for field_flags, src_array, dst_array, indices, global_to_local, entity_world in core_mappings:
+            if state_flags & field_flags:
+                self._scatter_entry_array(
+                    src_array,
+                    dst_array,
+                    indices,
+                    global_to_local,
+                    entity_world,
+                    world_mask,
+                )
+
+        for full_name, frequency, src_array in self._registered_state_arrays(source):
+            mapping = self._state_frequency_mapping(entry, frequency)
+            if mapping is None:
+                continue
+            _local_to_global, global_to_local, indices, entity_world, frequency_flags = mapping
+            if not state_flags & frequency_flags:
+                continue
+            dst_array = self._state_attribute_array(state_out, full_name)
+            if dst_array is None:
+                raise ValueError(f"Parent state is missing registered custom array '{full_name}'.")
+            self._scatter_entry_array(
+                src_array,
+                dst_array,
+                indices,
+                global_to_local,
+                entity_world,
+                world_mask,
+            )
+
+    def _reconcile_state(
+        self,
+        state_out: State,
+        *,
+        world_mask: wp.array[wp.bool] | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
         """Merge owned sub-solver state into ``state_out``."""
         for entry in self._entries.values():
             if entry.state_1 is None:
                 continue
-            if entry.body_indices.shape[0] > 0 and entry.state_1.body_q is not None and state_out.body_q is not None:
-                wp.launch(
-                    _scatter_body_state_mapped,
-                    dim=entry.body_indices.shape[0],
-                    inputs=[
-                        entry.body_indices,
-                        entry.body_global_to_local,
-                        entry.state_1.body_q,
-                        entry.state_1.body_qd,
-                        state_out.body_q,
-                        state_out.body_qd,
-                    ],
-                    device=self.model.device,
-                )
-            if (
-                entry.particle_indices.shape[0] > 0
-                and entry.state_1.particle_q is not None
-                and state_out.particle_q is not None
-            ):
-                wp.launch(
-                    _scatter_particle_state_mapped,
-                    dim=entry.particle_indices.shape[0],
-                    inputs=[
-                        entry.particle_indices,
-                        entry.particle_global_to_local,
-                        entry.state_1.particle_q,
-                        entry.state_1.particle_qd,
-                        state_out.particle_q,
-                        state_out.particle_qd,
-                    ],
-                    device=self.model.device,
-                )
-            if (
-                entry.joint_q_indices.shape[0] > 0
-                and entry.state_1.joint_q is not None
-                and state_out.joint_q is not None
-            ):
-                wp.launch(
-                    _scatter_scalar_state_mapped,
-                    dim=entry.joint_q_indices.shape[0],
-                    inputs=[
-                        entry.joint_q_indices,
-                        entry.joint_coord_global_to_local,
-                        entry.state_1.joint_q,
-                        state_out.joint_q,
-                    ],
-                    device=self.model.device,
-                )
-            if (
-                entry.joint_qd_indices.shape[0] > 0
-                and entry.state_1.joint_qd is not None
-                and state_out.joint_qd is not None
-            ):
-                wp.launch(
-                    _scatter_scalar_state_mapped,
-                    dim=entry.joint_qd_indices.shape[0],
-                    inputs=[
-                        entry.joint_qd_indices,
-                        entry.joint_dof_global_to_local,
-                        entry.state_1.joint_qd,
-                        state_out.joint_qd,
-                    ],
-                    device=self.model.device,
-                )
+            self._reconcile_entry_state(
+                entry,
+                entry.state_1,
+                state_out,
+                world_mask=world_mask,
+                flags=flags,
+            )
 
     # ------------------------------------------------------------------
     # Generic proxy implementation
@@ -2330,7 +2770,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
         substep_dt = dt / float(entry.substeps)
         if entry.state_tmp is None:
             raise RuntimeError(f"SolverCoupled.Entry {entry.name!r} is missing a substep scratch state")
-        _copy_same_view_state(entry.state_0, entry.state_1)
+        self._copy_entry_state(entry, entry.state_0, entry.state_1, world_mask=None, flags=None)
         state_in = entry.state_1
         state_out = entry.state_tmp
         for substep in range(entry.substeps):
@@ -2339,7 +2779,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
             entry.solver.step(state_in, state_out, control, contacts, substep_dt)
             state_in, state_out = state_out, state_in
         if state_in is entry.state_tmp:
-            _copy_same_view_state(entry.state_tmp, entry.state_1)
+            self._copy_entry_state(entry, entry.state_tmp, entry.state_1, world_mask=None, flags=None)
         return contacts
 
     def _contacts_for_entry(self, entry: SolverEntry, contacts: Contacts | None) -> Contacts | None:
@@ -2763,43 +3203,6 @@ def _copy_state(src: State, dst: State) -> None:
         _copy_prefix(dst.joint_qd, src.joint_qd, "joint_qd")
 
 
-def _copy_same_view_state(src: State, dst: State) -> None:
-    """Copy persistent arrays between states allocated from the same model view.
-
-    Core state arrays retain the coupled solver's established copy semantics,
-    while custom namespaced arrays (such as implicit MPM history) are copied in
-    full. Solver-produced top-level output annotations are intentionally not
-    copied; they are not persistent state and may only exist on output buffers.
-    """
-    if src is dst:
-        return
-
-    _copy_state(src, dst)
-
-    src_namespaces = {name: value for name, value in vars(src).items() if isinstance(value, Model.AttributeNamespace)}
-    dst_namespaces = {name: value for name, value in vars(dst).items() if isinstance(value, Model.AttributeNamespace)}
-    for namespace_name in src_namespaces.keys() | dst_namespaces.keys():
-        src_namespace = src_namespaces.get(namespace_name)
-        dst_namespace = dst_namespaces.get(namespace_name)
-        src_arrays = (
-            {}
-            if src_namespace is None
-            else {name: value for name, value in vars(src_namespace).items() if isinstance(value, wp.array)}
-        )
-        dst_arrays = (
-            {}
-            if dst_namespace is None
-            else {name: value for name, value in vars(dst_namespace).items() if isinstance(value, wp.array)}
-        )
-        for array_name in src_arrays.keys() | dst_arrays.keys():
-            qualified_name = f"{namespace_name}.{array_name}"
-            if array_name not in dst_arrays:
-                raise ValueError(f"State is missing array for '{qualified_name}' which is present in the other state.")
-            if array_name not in src_arrays:
-                raise ValueError(f"Other state is missing array for '{qualified_name}' which is present in this state.")
-            dst_arrays[array_name].assign(src_arrays[array_name])
-
-
 def _copy_forces(src: State, dst: State) -> None:
     """Copy force buffers without disturbing positions or velocities."""
     if dst.body_f is not None:
@@ -2832,6 +3235,96 @@ def _copy_prefix(dst: wp.array, src: wp.array, name: str) -> None:
         wp.copy(dst, src, count=dst_len)
     else:
         raise RuntimeError(f"Cannot copy {name}: source length {src_len} is smaller than destination length {dst_len}")
+
+
+@wp.func
+def _reset_world_selected(world: int, world_mask: wp.array[wp.bool]) -> bool:
+    if world >= 0 and world < world_mask.shape[0]:
+        return world_mask[world]
+    return world < 0 and world_mask.shape[0] == 1 and world_mask[0]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _copy_mapped_array(
+    local_to_global: wp.array[int],
+    src: wp.array[Any],
+    dst: wp.array[Any],
+):
+    local_id = wp.tid()
+    global_id = local_to_global[local_id]
+    if global_id >= 0:
+        dst[local_id] = src[global_id]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _copy_mapped_array_masked(
+    local_to_global: wp.array[int],
+    src: wp.array[Any],
+    dst: wp.array[Any],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+):
+    local_id = wp.tid()
+    global_id = local_to_global[local_id]
+    if global_id >= 0 and _reset_world_selected(entity_world[global_id], world_mask):
+        dst[local_id] = src[global_id]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _copy_local_array_masked(
+    local_to_global: wp.array[int],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    src: wp.array[Any],
+    dst: wp.array[Any],
+):
+    local_id = wp.tid()
+    global_id = local_to_global[local_id]
+    if global_id >= 0 and _reset_world_selected(entity_world[global_id], world_mask):
+        dst[local_id] = src[local_id]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _scatter_mapped_array(
+    indices: wp.array[int],
+    global_to_local: wp.array[int],
+    src: wp.array[Any],
+    dst: wp.array[Any],
+):
+    index = wp.tid()
+    global_id = indices[index]
+    local_id = global_to_local[global_id]
+    if local_id >= 0:
+        dst[global_id] = src[local_id]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _scatter_mapped_array_masked(
+    indices: wp.array[int],
+    global_to_local: wp.array[int],
+    src: wp.array[Any],
+    dst: wp.array[Any],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+):
+    index = wp.tid()
+    global_id = indices[index]
+    local_id = global_to_local[global_id]
+    if local_id >= 0 and _reset_world_selected(entity_world[global_id], world_mask):
+        dst[global_id] = src[local_id]
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _zero_local_array_masked(
+    local_to_global: wp.array[int],
+    entity_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    values: wp.array[Any],
+):
+    local_id = wp.tid()
+    global_id = local_to_global[local_id]
+    if global_id >= 0 and _reset_world_selected(entity_world[global_id], world_mask):
+        values[local_id] = values.dtype(0.0)
 
 
 @wp.kernel(enable_backward=False)

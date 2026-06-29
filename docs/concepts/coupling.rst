@@ -89,6 +89,11 @@ The shared base also manages:
   state;
 - entry-local collision visibility and shape ownership;
 - input-state notifications for solvers with private history buffers;
+- distribution and reconciliation of mapped custom ``State`` arrays at
+  ``BODY``, ``PARTICLE``, ``JOINT_COORD``, and ``JOINT_DOF`` frequency,
+  including implicit-MPM particle history. State arrays at other frequencies
+  remain preserved in the parent state but are not entry-local coupling
+  channels;
 - fallback effective-mass estimates from public model mass and inertia arrays.
 
 ``ModelView`` applies view-local changes with copy-on-write semantics so the
@@ -356,15 +361,41 @@ solver's aggregate capture capability false. Applications should use the
 aggregate property as the decision point instead of assuming that all entries
 share one solver's capability.
 
+After an eager top-level step or outer graph replay, call
+:meth:`~newton.solvers.SolverBase.check_status` at a safe host boundary before
+consuming the output. ``SolverCoupled`` forwards the call recursively so a
+nested implicit-MPM sparse-grid overflow is not hidden. Do not call this hook
+inside graph capture because a leaf status check may synchronize its device.
+
 Reset remains an explicit host-side lifecycle operation and should occur
 outside graph capture. Calling ``SolverCoupled.reset(state, world_mask=...,
 flags=...)`` forwards the fixed-size world selection to its entries, reconciles
 their selected state, and preserves unselected worlds. For implicit MPM this
 also restores selected per-particle history when particle state flags are reset
 (or ``flags`` is omitted) and clears the sticky sparse-grid rebuild status at
-the reset boundary. Replay may resume afterward when graph structure,
+the reset boundary. ADMM preserves unselected entry-local iteration buffers;
+its shared compact contact caches are conservatively invalidated and rebuilt on
+the next step. Replay may resume afterward when graph structure,
 capacities, state-buffer sequence, and step arguments are unchanged; otherwise
 record a new graph.
+
+Like :meth:`~newton.solvers.SolverBase.reset`, a coupled reset modifies exactly
+the supplied parent state. Applications that alternate two parent states must
+call ``reset()`` once for each state that should be reset. The coupled solver
+does not retain or mutate other parent-state objects implicitly.
+
+Solver-specific state operations use the public entry-state pair. Read the
+current local state with :meth:`SolverCoupled.entry_state`, apply the operation
+through :meth:`SolverCoupled.solver`, then call
+:meth:`SolverCoupled.reconcile_entry_state` to write only that entry's owned
+core and custom state back to the parent. For example, post-step MPM collider
+projection is expressed as:
+
+.. code-block:: python
+
+   mpm_state = solver.entry_state("material")
+   solver.solver("material").project_outside(mpm_state, mpm_state, dt)
+   solver.reconcile_entry_state("material", state_out)
 
 Solver-Specific Behavior
 ------------------------

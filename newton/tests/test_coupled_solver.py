@@ -51,6 +51,27 @@ def _kick_proxy_particle_kernel(particle_qd: wp.array[wp.vec3]):
 
 
 @wp.kernel(enable_backward=False)
+def _increment_float_state_kernel(src: wp.array[float], dst: wp.array[float]):
+    i = wp.tid()
+    dst[i] = src[i] + 1.0
+
+
+def _make_box_collider_mesh(device, half_extent=0.2):
+    box = newton.Mesh.create_box(
+        half_extent,
+        half_extent,
+        half_extent,
+        duplicate_vertices=False,
+        compute_normals=False,
+        compute_uvs=False,
+        compute_inertia=False,
+    )
+    points = wp.array(box.vertices, dtype=wp.vec3, device=device)
+    indices = wp.array(box.indices, dtype=int, device=device)
+    return wp.Mesh(points, indices, wp.zeros_like(points))
+
+
+@wp.kernel(enable_backward=False)
 def _write_proxy_particle_force_kernel(
     particle_local_to_proxy_global: wp.array[int],
     out_particle_f: wp.array[wp.vec3],
@@ -346,6 +367,19 @@ class _StepCountingCopySolver(SolverBase, CouplingInterface):
             wp.copy(state_out.particle_qd, state_in.particle_qd)
 
 
+class _CustomBodyStateIncrementSolver(_StepCountingCopySolver):
+    """Copy solver that increments a registered top-level body state array."""
+
+    def step(self, state_in, state_out, control, contacts, dt):
+        super().step(state_in, state_out, control, contacts, dt)
+        wp.launch(
+            _increment_float_state_kernel,
+            dim=state_in.temperature.shape[0],
+            inputs=[state_in.temperature, state_out.temperature],
+            device=self.model.device,
+        )
+
+
 class _BodyVelocityKickSolver(_StepCountingCopySolver):
     """Copy solver that leaves a recognizable source velocity for proxy sync."""
 
@@ -363,6 +397,7 @@ class _GraphCaptureRecordingSolver(_StepCountingCopySolver):
         super().__init__(model)
         self.supported = supported
         self.prepared_contacts = []
+        self.status_checks = 0
 
     @property
     def supports_cuda_graph_capture(self) -> bool:
@@ -370,6 +405,9 @@ class _GraphCaptureRecordingSolver(_StepCountingCopySolver):
 
     def prepare_cuda_graph_capture(self, contacts=None) -> None:
         self.prepared_contacts.append(contacts)
+
+    def check_status(self) -> None:
+        self.status_checks += 1
 
 
 class _ContactRecordingCopySolver(_StepCountingCopySolver):
@@ -735,6 +773,53 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         self.assertFalse(nested_solvers[0].supports_cuda_graph_capture)
         self.assertFalse(coupled.supports_cuda_graph_capture)
 
+    def test_check_status_forwards_recursively(self):
+        model = newton.ModelBuilder().finalize(device="cpu")
+        leaves = {}
+
+        def nested_factory(view):
+            return SolverCoupled(
+                model=view,
+                entries=[
+                    SolverCoupled.Entry(
+                        name="left",
+                        solver=self._recording_factory(leaves, "left"),
+                    ),
+                    SolverCoupled.Entry(
+                        name="right",
+                        solver=self._recording_factory(leaves, "right"),
+                    ),
+                ],
+            )
+
+        coupled = SolverCoupled(
+            model=model,
+            entries=[SolverCoupled.Entry(name="nested", solver=nested_factory)],
+        )
+
+        coupled.check_status()
+
+        self.assertEqual(leaves["left"].status_checks, 1)
+        self.assertEqual(leaves["right"].status_checks, 1)
+
+        leaves["right"].check_status = mock.Mock(side_effect=RuntimeError("leaf status"))
+        with self.assertRaisesRegex(RuntimeError, "leaf status"):
+            coupled.check_status()
+        self.assertEqual(leaves["left"].status_checks, 2)
+        leaves["right"].check_status.assert_called_once_with()
+
+    def test_solver_base_check_status_is_noop(self):
+        model = newton.ModelBuilder().finalize(device="cpu")
+
+        self.assertIsNone(SolverBase(model).check_status())
+
+    def test_implicit_mpm_check_status_delegates_to_sparse_grid_check(self):
+        solver = SolverImplicitMPM.__new__(SolverImplicitMPM)
+        with mock.patch.object(solver, "check_sparse_grid_rebuild_status") as check_sparse_status:
+            solver.check_status()
+
+        check_sparse_status.assert_called_once_with()
+
     def test_prepare_cuda_graph_capture_forwards_filtered_contacts_recursively(self):
         """Preparation should pass exact filtered buffers without stepping or changing state."""
         builder = newton.ModelBuilder()
@@ -878,7 +963,7 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
             self.assertFalse(solver.supports_cuda_graph_capture)
 
     def test_implicit_mpm_reset_syncs_namespaced_non_in_place_state(self):
-        """Coupled reset should mirror MPM history into the non-in-place output state."""
+        """Masked reset should update selected MPM history without changing other worlds."""
         world_builder = newton.ModelBuilder(gravity=0.0)
         SolverImplicitMPM.register_custom_attributes(world_builder)
         world_builder.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
@@ -932,22 +1017,33 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
                 "particle_Jp": state.mpm.particle_Jp.numpy().copy(),
             }
 
-        assign_history(entry.state_0, 0.0)
-        assign_history(entry.state_1, 1000.0)
-        expected = history(entry.state_0)
-        expected["particle_elastic_strain"][0] = np.eye(3, dtype=np.float32)
-        expected["particle_transform"][0] = np.eye(3, dtype=np.float32)
-        expected["particle_qd_grad"][0] = 0.0
-        expected["particle_stress"][0] = 0.0
-        expected["particle_Jp"][0] = 1.0
-
         parent_state_0 = model.state()
         parent_state_1 = model.state()
+        assign_history(entry.state_0, 0.0)
+        assign_history(entry.state_1, 1000.0)
+        assign_history(entry.state_tmp, 2000.0)
+        assign_history(parent_state_0, 3000.0)
+        assign_history(parent_state_1, 4000.0)
+        parent_state_1_before = history(parent_state_1)
+
+        states = (entry.state_0, entry.state_1, entry.state_tmp, parent_state_0)
+        expected_by_state = []
+        for state in states:
+            expected = history(state)
+            expected["particle_elastic_strain"][0] = np.eye(3, dtype=np.float32)
+            expected["particle_transform"][0] = np.eye(3, dtype=np.float32)
+            expected["particle_qd_grad"][0] = 0.0
+            expected["particle_stress"][0] = 0.0
+            expected["particle_Jp"][0] = 1.0
+            expected_by_state.append(expected)
+
         coupled.reset(parent_state_0, world_mask=wp.array((True, False), dtype=wp.bool, device=model.device))
 
-        for name, values in expected.items():
-            np.testing.assert_array_equal(history(entry.state_0)[name], values)
-            np.testing.assert_array_equal(history(entry.state_1)[name], values)
+        for state, expected in zip(states, expected_by_state, strict=True):
+            for name, values in expected.items():
+                np.testing.assert_array_equal(history(state)[name], values)
+        for name, values in parent_state_1_before.items():
+            np.testing.assert_array_equal(history(parent_state_1)[name], values)
 
         # Implicit MPM attaches output-only arrays to entry states during a
         # step. Repeated substeps and post-step reset must remain compatible
@@ -979,6 +1075,74 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         for name, values in history(entry.state_tmp).items():
             np.testing.assert_array_equal(history_after_odd_substeps[name], values)
         np.testing.assert_array_equal(history_after_odd_substeps["particle_Jp"], np.full(model.particle_count, 7.0))
+
+    def test_implicit_mpm_projection_reconciles_public_entry_state(self):
+        """Entry-local projection should reconcile core and MPM history through public APIs."""
+        world_builder = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(world_builder)
+        world_builder.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.25, 0.0, 0.0), mass=1.0, radius=0.05)
+
+        builder = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.add_world(world_builder)
+        builder.add_world(world_builder)
+        model = builder.finalize(device="cpu")
+        config = SolverImplicitMPM.Config(
+            grid_type="fixed",
+            grid_padding=1,
+            max_active_cell_count=32,
+            max_iterations=1,
+            solver="jacobi",
+            transfer_scheme="pic",
+            warmstart_mode="none",
+        )
+        coupled = SolverCoupled(
+            model=model,
+            entries=(
+                SolverCoupled.Entry(
+                    name="mpm",
+                    solver=lambda view: SolverImplicitMPM(view, config=config, enable_timers=False),
+                    particles=range(model.particle_count),
+                ),
+            ),
+        )
+        entry_solver = coupled.solver("mpm")
+        entry_solver.setup_collider(
+            collider_meshes=[_make_box_collider_mesh(model.device)],
+            collider_world_ids=[0],
+        )
+
+        parent_state = model.state()
+        initial_gradients = np.arange(1, 19, dtype=np.float32).reshape(2, 3, 3)
+        parent_state.mpm.particle_qd_grad.assign(initial_gradients)
+        parent_history_before = {
+            name: getattr(parent_state.mpm, name).numpy().copy()
+            for name in (
+                "particle_elastic_strain",
+                "particle_transform",
+                "particle_stress",
+                "particle_Jp",
+            )
+        }
+        initial_positions = parent_state.particle_q.numpy().copy()
+
+        coupled.sync_entry_states(parent_state)
+        entry_state = coupled.entry_state("mpm")
+        np.testing.assert_array_equal(entry_state.mpm.particle_qd_grad.numpy(), initial_gradients)
+        entry_solver.project_outside(entry_state, entry_state, dt=0.01, gap=1.0)
+        expected_positions = entry_state.particle_q.numpy().copy()
+        expected_velocities = entry_state.particle_qd.numpy().copy()
+        expected_gradients = entry_state.mpm.particle_qd_grad.numpy().copy()
+
+        self.assertFalse(np.array_equal(expected_positions[0], initial_positions[0]))
+        np.testing.assert_array_equal(expected_positions[1], initial_positions[1])
+        coupled.reconcile_entry_state("mpm", parent_state)
+
+        np.testing.assert_array_equal(parent_state.particle_q.numpy(), expected_positions)
+        np.testing.assert_array_equal(parent_state.particle_qd.numpy(), expected_velocities)
+        np.testing.assert_array_equal(parent_state.mpm.particle_qd_grad.numpy(), expected_gradients)
+        for name, expected in parent_history_before.items():
+            np.testing.assert_array_equal(getattr(parent_state.mpm, name).numpy(), expected)
 
 
 class TestSolverCoupledEntryCollision(unittest.TestCase):
@@ -1540,6 +1704,74 @@ class TestSolverCoupledBasic(unittest.TestCase):
         np.testing.assert_array_equal(solver_b.joint_f[0], np.array([7.0], dtype=np.float32))
         np.testing.assert_array_equal(solver_a.joint_target_pos[0], np.array([11.0], dtype=np.float32))
         np.testing.assert_array_equal(solver_b.joint_target_pos[0], np.array([13.0], dtype=np.float32))
+
+    def test_entry_substeps_preserve_registered_top_level_state(self):
+        """Each non-in-place substep should consume the preceding custom state output."""
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.add_custom_attribute(
+            newton.ModelBuilder.CustomAttribute(
+                name="temperature",
+                frequency=newton.Model.AttributeFrequency.BODY,
+                dtype=wp.float32,
+                default=0.0,
+                assignment=newton.Model.AttributeAssignment.STATE,
+            )
+        )
+        body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        model = builder.finalize(device="cpu")
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="increment",
+                    solver=_CustomBodyStateIncrementSolver,
+                    bodies=[body],
+                    substeps=2,
+                )
+            ],
+        )
+        state_in = model.state()
+        state_out = model.state()
+        state_in.temperature.assign(np.array([10.0], dtype=np.float32))
+
+        coupled.step(state_in, state_out, control=None, contacts=None, dt=1.0)
+
+        np.testing.assert_array_equal(state_out.temperature.numpy(), np.array([12.0], dtype=np.float32))
+
+    def test_unmapped_custom_state_frequency_stays_parent_side(self):
+        """Custom state without an endpoint mapping should remain unchanged in the parent."""
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.add_custom_attribute(
+            newton.ModelBuilder.CustomAttribute(
+                name="shape_epoch",
+                frequency=newton.Model.AttributeFrequency.SHAPE,
+                dtype=wp.float32,
+                default=0.0,
+                assignment=newton.Model.AttributeAssignment.STATE,
+            )
+        )
+        body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        shape = builder.add_shape_sphere(body=body, radius=0.1)
+        model = builder.finalize(device="cpu")
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="body",
+                    solver=_StepCountingCopySolver,
+                    bodies=[body],
+                    shapes=[shape],
+                )
+            ],
+        )
+        state_in = model.state()
+        state_out = model.state()
+        state_in.shape_epoch.assign(np.array([10.0], dtype=np.float32))
+
+        coupled.step(state_in, state_out, control=None, contacts=None, dt=1.0)
+
+        np.testing.assert_array_equal(state_out.shape_epoch.numpy(), np.array([10.0], dtype=np.float32))
+        np.testing.assert_array_equal(coupled.entry_state("body", "input").shape_epoch.numpy(), np.array([0.0]))
 
     def test_notify_model_changed_refreshes_view_inertial_masks(self):
         """Runtime parent inertial edits should refresh derived view masks."""
@@ -2313,6 +2545,142 @@ class TestSolverCoupledBodyProxyInertia(unittest.TestCase):
         np.testing.assert_allclose(mapping.coupling_forces.numpy()[body, 0], 1.0 / 3.0, atol=1.0e-6)
         np.testing.assert_allclose(mapping.aitken_relaxation.numpy()[0], 1.0 / 3.0, atol=1.0e-6)
 
+    def test_masked_reset_preserves_unselected_proxy_feedback(self):
+        template = newton.ModelBuilder(gravity=0.0)
+        template.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device="cpu")
+        body_ids = list(range(model.body_count))
+
+        coupled = SolverCoupledProxy(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(name="src", solver=_StepCountingCopySolver, bodies=body_ids),
+                SolverCoupled.Entry(name="dst", solver=_StepCountingCopySolver),
+            ],
+            coupling=SolverCoupledProxy.Config(
+                proxies=[
+                    SolverCoupledProxy.Proxy(
+                        source="src",
+                        destination="dst",
+                        bodies=body_ids,
+                        proxy_relaxation_mode="aitken",
+                    )
+                ]
+            ),
+        )
+        mapping = coupled._proxy_mappings[0]
+        values = np.arange(1, 13, dtype=np.float32).reshape(2, 6)
+        mapping.coupling_forces.assign(values)
+        mapping.coupling_forces_previous.assign(values + 100.0)
+        mapping.aitken_residual_previous.assign(values + 200.0)
+        mapping.proxy_qd_before.assign(values + 300.0)
+        mapping.aitken_stats.assign(np.arange(1, 7, dtype=np.float32))
+        mapping.aitken_relaxation.assign(np.array((0.2, 0.3, 0.4), dtype=np.float32))
+        mapping.aitken_has_previous.assign(np.ones(3, dtype=np.int32))
+        before = {
+            "coupling_forces": mapping.coupling_forces.numpy().copy(),
+            "coupling_forces_previous": mapping.coupling_forces_previous.numpy().copy(),
+            "aitken_residual_previous": mapping.aitken_residual_previous.numpy().copy(),
+            "proxy_qd_before": mapping.proxy_qd_before.numpy().copy(),
+            "aitken_stats": mapping.aitken_stats.numpy().copy(),
+            "aitken_relaxation": mapping.aitken_relaxation.numpy().copy(),
+            "aitken_has_previous": mapping.aitken_has_previous.numpy().copy(),
+        }
+
+        coupled.reset(
+            model.state(),
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+        )
+
+        for name in (
+            "coupling_forces",
+            "coupling_forces_previous",
+            "aitken_residual_previous",
+            "proxy_qd_before",
+        ):
+            expected = before[name]
+            actual = getattr(mapping, name).numpy()
+            np.testing.assert_array_equal(actual[0], np.zeros_like(actual[0]))
+            np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[:2], before["aitken_stats"][:2])
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[2:4], np.zeros(2, dtype=np.float32))
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[4:], before["aitken_stats"][4:])
+        np.testing.assert_array_equal(
+            mapping.aitken_relaxation.numpy(),
+            np.array((0.2, mapping.proxy_relaxation, 0.4), dtype=np.float32),
+        )
+        np.testing.assert_array_equal(mapping.aitken_has_previous.numpy(), np.array((1, 0, 1), dtype=np.int32))
+
+    def test_masked_reset_syncs_teleported_proxy_before_mpm_history_reset(self):
+        template = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(template)
+        template.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        template.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
+        builder = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device="cpu")
+        body_ids = list(range(model.body_count))
+        particle_ids = list(range(model.particle_count))
+        config = SolverImplicitMPM.Config(
+            grid_type="fixed",
+            grid_padding=1,
+            max_active_cell_count=32,
+            max_iterations=1,
+            solver="jacobi",
+            transfer_scheme="pic",
+            warmstart_mode="none",
+        )
+        coupled = SolverCoupledProxy(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(name="rigid", solver=_StepCountingCopySolver, bodies=body_ids),
+                SolverCoupled.Entry(
+                    name="mpm",
+                    solver=lambda view: SolverImplicitMPM(view, config=config, enable_timers=False),
+                    particles=particle_ids,
+                ),
+            ],
+            coupling=SolverCoupledProxy.Config(
+                proxies=[SolverCoupledProxy.Proxy(source="rigid", destination="mpm", bodies=body_ids)]
+            ),
+        )
+        mapping = coupled._proxy_mappings[0]
+        destination_state = coupled.entry_state("mpm", "input")
+        destination_local_ids = mapping.proxy_body_ids_local.numpy()
+        old_destination = [
+            wp.transform((10.0, 0.0, 0.0), wp.quat_identity()),
+            wp.transform((20.0, 0.0, 0.0), wp.quat_identity()),
+        ]
+        old_history = [
+            wp.transform((30.0, 0.0, 0.0), wp.quat_identity()),
+            wp.transform((40.0, 0.0, 0.0), wp.quat_identity()),
+        ]
+        destination_state.body_q.assign(old_destination)
+        mpm_solver = coupled.solver("mpm")
+        mpm_solver._last_step_data.body_q_prev = wp.array(old_history, dtype=wp.transform, device=model.device)
+
+        parent_state = model.state()
+        teleported = [
+            wp.transform((100.0, 0.0, 0.0), wp.quat_identity()),
+            wp.transform((200.0, 0.0, 0.0), wp.quat_identity()),
+        ]
+        parent_state.body_q.assign(teleported)
+        coupled.reset(
+            parent_state,
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+            flags=newton.StateFlags.PARTICLE,
+        )
+
+        destination_q = destination_state.body_q.numpy()
+        history_q = mpm_solver._last_step_data.body_q_prev.numpy()
+        np.testing.assert_array_equal(destination_q[destination_local_ids[0]], parent_state.body_q.numpy()[0])
+        np.testing.assert_array_equal(destination_q[destination_local_ids[1]], np.asarray(old_destination[1]))
+        np.testing.assert_array_equal(history_q[destination_local_ids[0]], parent_state.body_q.numpy()[0])
+        np.testing.assert_array_equal(history_q[destination_local_ids[1]], np.asarray(old_history[1]))
+
     def test_duplicate_body_proxy_mapping_ids_are_rejected(self):
         builder = newton.ModelBuilder(gravity=0.0)
         for _ in range(3):
@@ -2494,6 +2862,118 @@ class TestSolverCoupledParticleProxy(unittest.TestCase):
                 ],
             ),
         )
+
+    def test_masked_reset_preserves_unselected_particle_proxy_feedback(self):
+        template = newton.ModelBuilder(gravity=0.0)
+        template.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.0)
+        template.add_particle(pos=(1.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.0)
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device="cpu")
+        source_ids = [0, 2]
+        proxy_ids = [1, 3]
+
+        coupled = SolverCoupledProxy(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(name="src", solver=_StepCountingCopySolver, particles=source_ids),
+                SolverCoupled.Entry(name="dst", solver=_StepCountingCopySolver),
+            ],
+            coupling=SolverCoupledProxy.Config(
+                proxies=[
+                    SolverCoupledProxy.Proxy(
+                        source="src",
+                        destination="dst",
+                        particles=source_ids,
+                        proxy_particles=proxy_ids,
+                        proxy_relaxation_mode="aitken",
+                    )
+                ]
+            ),
+        )
+        mapping = coupled._proxy_particle_mappings[0]
+        values = np.arange(1, 13, dtype=np.float32).reshape(4, 3)
+        mapping.coupling_forces.assign(values)
+        mapping.coupling_forces_previous.assign(values[:2] + 100.0)
+        mapping.aitken_residual_previous.assign(values[:2] + 200.0)
+        mapping.proxy_qd_before.assign(values + 300.0)
+        mapping.aitken_stats.assign(np.arange(1, 7, dtype=np.float32))
+        mapping.aitken_relaxation.assign(np.array((0.2, 0.3, 0.4), dtype=np.float32))
+        mapping.aitken_has_previous.assign(np.ones(3, dtype=np.int32))
+        before = {
+            "coupling_forces": mapping.coupling_forces.numpy().copy(),
+            "coupling_forces_previous": mapping.coupling_forces_previous.numpy().copy(),
+            "aitken_residual_previous": mapping.aitken_residual_previous.numpy().copy(),
+            "proxy_qd_before": mapping.proxy_qd_before.numpy().copy(),
+            "aitken_stats": mapping.aitken_stats.numpy().copy(),
+            "aitken_relaxation": mapping.aitken_relaxation.numpy().copy(),
+            "aitken_has_previous": mapping.aitken_has_previous.numpy().copy(),
+        }
+
+        coupled.reset(
+            model.state(),
+            world_mask=wp.array((True, False), dtype=wp.bool, device=model.device),
+        )
+
+        for name in ("coupling_forces_previous", "aitken_residual_previous"):
+            actual = getattr(mapping, name).numpy()
+            np.testing.assert_array_equal(actual[0], np.zeros_like(actual[0]))
+            np.testing.assert_array_equal(actual[1], before[name][1])
+        for name in ("coupling_forces", "proxy_qd_before"):
+            actual = getattr(mapping, name).numpy()
+            np.testing.assert_array_equal(actual[proxy_ids[0]], np.zeros_like(actual[proxy_ids[0]]))
+            np.testing.assert_array_equal(actual[proxy_ids[1]], before[name][proxy_ids[1]])
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[:2], before["aitken_stats"][:2])
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[2:4], np.zeros(2, dtype=np.float32))
+        np.testing.assert_array_equal(mapping.aitken_stats.numpy()[4:], before["aitken_stats"][4:])
+        np.testing.assert_array_equal(
+            mapping.aitken_relaxation.numpy(),
+            np.array((0.2, mapping.proxy_relaxation, 0.4), dtype=np.float32),
+        )
+        np.testing.assert_array_equal(mapping.aitken_has_previous.numpy(), np.array((1, 0, 1), dtype=np.int32))
+
+    def test_cross_world_particle_proxy_mapping_is_rejected(self):
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.begin_world()
+        source_particle = builder.add_particle(
+            pos=(0.0, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=0.0,
+        )
+        builder.end_world()
+        builder.begin_world()
+        proxy_particle = builder.add_particle(
+            pos=(1.0, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=0.0,
+        )
+        builder.end_world()
+        model = builder.finalize(device="cpu")
+
+        with self.assertRaisesRegex(ValueError, "same world"):
+            SolverCoupledProxy(
+                model=model,
+                entries=[
+                    SolverCoupled.Entry(
+                        name="src",
+                        solver=_StepCountingCopySolver,
+                        particles=[source_particle],
+                    ),
+                    SolverCoupled.Entry(name="dst", solver=_StepCountingCopySolver),
+                ],
+                coupling=SolverCoupledProxy.Config(
+                    proxies=[
+                        SolverCoupledProxy.Proxy(
+                            source="src",
+                            destination="dst",
+                            particles=[source_particle],
+                            proxy_particles=[proxy_particle],
+                        )
+                    ]
+                ),
+            )
 
     def test_duplicate_particle_proxy_mapping_ids_are_rejected(self):
         builder = newton.ModelBuilder(gravity=0.0)

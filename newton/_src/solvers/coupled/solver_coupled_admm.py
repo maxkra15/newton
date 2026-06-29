@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import warp as wp
@@ -92,6 +92,7 @@ from .solver_coupled import (
     SolverEntry,
     _copy_mapped_spatial_vector,
     _copy_mapped_vec3,
+    _zero_local_array_masked,
 )
 
 if TYPE_CHECKING:
@@ -1685,28 +1686,81 @@ class SolverCoupledADMM(SolverCoupled):
         self,
         state: State,
         *,
-        world_mask: wp.array | None = None,
+        world_mask: wp.array[wp.bool] | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
         """Clear ADMM warm-start and internal contact buffers after reset."""
         super()._reset_coupling_state(state, world_mask=world_mask, flags=flags)
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
         for name, entry in self._entries.items():
             buf = self._admm_buffers[name]
-            if buf.body_q_n is not None:
-                wp.copy(buf.body_q_n, entry.state_0.body_q)
-                wp.copy(buf.body_qd_n, entry.state_0.body_qd)
-                wp.copy(buf.body_qd_k, entry.state_0.body_qd)
-            if buf.particle_q_n is not None:
-                wp.copy(buf.particle_q_n, entry.state_0.particle_q)
-                wp.copy(buf.particle_qd_n, entry.state_0.particle_qd)
-                wp.copy(buf.particle_qd_k, entry.state_0.particle_qd)
-            if buf.joint_q_n is not None:
-                wp.copy(buf.joint_q_n, entry.state_0.joint_q)
-                wp.copy(buf.joint_qd_n, entry.state_0.joint_qd)
-                wp.copy(buf.joint_qd_k, entry.state_0.joint_qd)
-            self._zero_array(buf.body_f)
-            self._zero_array(buf.particle_f)
+            if buf.body_q_n is not None and state_flags & StateFlags.BODY_Q:
+                self._copy_local_entry_array(
+                    entry.state_0.body_q,
+                    buf.body_q_n,
+                    entry.body_local_to_global,
+                    self.model.body_world,
+                    world_mask,
+                )
+            if buf.body_qd_n is not None and state_flags & StateFlags.BODY_QD:
+                for body_qd in (buf.body_qd_n, buf.body_qd_k):
+                    self._copy_local_entry_array(
+                        entry.state_0.body_qd,
+                        body_qd,
+                        entry.body_local_to_global,
+                        self.model.body_world,
+                        world_mask,
+                    )
+            if buf.particle_q_n is not None and state_flags & StateFlags.PARTICLE_Q:
+                self._copy_local_entry_array(
+                    entry.state_0.particle_q,
+                    buf.particle_q_n,
+                    entry.particle_local_to_global,
+                    self.model.particle_world,
+                    world_mask,
+                )
+            if buf.particle_qd_n is not None and state_flags & StateFlags.PARTICLE_QD:
+                for particle_qd in (buf.particle_qd_n, buf.particle_qd_k):
+                    self._copy_local_entry_array(
+                        entry.state_0.particle_qd,
+                        particle_qd,
+                        entry.particle_local_to_global,
+                        self.model.particle_world,
+                        world_mask,
+                    )
+            if buf.joint_q_n is not None and state_flags & StateFlags.JOINT_Q:
+                self._copy_local_entry_array(
+                    entry.state_0.joint_q,
+                    buf.joint_q_n,
+                    entry.joint_coord_local_to_global,
+                    self._joint_coord_world,
+                    world_mask,
+                )
+            if buf.joint_qd_n is not None and state_flags & StateFlags.JOINT_QD:
+                for joint_qd in (buf.joint_qd_n, buf.joint_qd_k):
+                    self._copy_local_entry_array(
+                        entry.state_0.joint_qd,
+                        joint_qd,
+                        entry.joint_dof_local_to_global,
+                        self._joint_dof_world,
+                        world_mask,
+                    )
+            self._zero_entry_array_masked(
+                buf.body_f,
+                entry.body_local_to_global,
+                self.model.body_world,
+                world_mask,
+            )
+            self._zero_entry_array_masked(
+                buf.particle_f,
+                entry.particle_local_to_global,
+                self.model.particle_world,
+                world_mask,
+            )
 
+        # Constraint/contact rows use shared compact counters rather than
+        # per-world storage. Conservatively invalidate these transient caches;
+        # the next step rebuilds them from the preserved public entry states.
         for group in (
             *self._admm_rr_groups,
             *self._admm_rr_angular_groups,
@@ -1724,6 +1778,25 @@ class SolverCoupledADMM(SolverCoupled):
         if float(self._coupling.gamma) > 0.0:
             self._refresh_admm_proximal_masks()
             self._refresh_admm_proximal_view_overrides(refresh_supported_solvers=True)
+
+    def _zero_entry_array_masked(
+        self,
+        array: wp.array[Any] | None,
+        local_to_global: wp.array[int],
+        entity_world: wp.array[int],
+        world_mask: wp.array[wp.bool] | None,
+    ) -> None:
+        if array is None:
+            return
+        if world_mask is None:
+            array.zero_()
+            return
+        wp.launch(
+            _zero_local_array_masked,
+            dim=local_to_global.shape[0],
+            inputs=[local_to_global, entity_world, world_mask, array],
+            device=self.model.device,
+        )
 
     @staticmethod
     def _zero_array(array) -> None:

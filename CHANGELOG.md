@@ -12,6 +12,7 @@
 - Add opt-in `body_frame_origin="com"` to `ModelBuilder.add_rod()` and `ModelBuilder.add_rod_graph()` for COM-centered cable capsule body frames.
 - Add independent multi-world grids, rheology solves, collider filtering, and grain interpolation to `SolverImplicitMPM`.
 - Add outer CUDA graph capture support for isolated multi-world `SolverImplicitMPM` steps using capacity-bounded fixed or rebuildable sparse grids and the nonlinear Jacobi path.
+- Add `SolverBase.check_status()` for post-step asynchronous failure reporting, including recursive `SolverCoupled` propagation and implicit-MPM sparse-grid capacity checks.
 - Add synchronized total-step implicit-MPM benchmarks for shared allocating sparse, isolated eager and captured rebuildable sparse, and isolated captured fixed grids, including setup, graph recording, latency, throughput, topology, and CUDA-memory metrics.
 - Add user-defined pressure laws to hydroelastic SDF contact via `HydroelasticSDF.Config.pressure_func` (a `@wp.func` mapping `(signed_depth, shape_idx, data) -> pressure`) and `pressure_data` (a `@wp.struct` carrying per-shape state). The contact patch is the iso-pressure surface `p_a == p_b`; the default linear law `pressure = -kh * signed_depth` is preserved when no callback is supplied.
 - Add `SensorTiledCamera.utils.assign_checkerboard_material(shape_indices=...)` for applying the checkerboard texture to selected shapes.
@@ -30,6 +31,7 @@
 
 ### Changed
 
+- Change experimental `SolverCoupledProxy` Aitken feedback to accumulate independently per world so relaxation and masked resets do not couple environments.
 - Change `SolverImplicitMPM` multi-world models to use isolated FEM environments by default; set `SolverImplicitMPM.Config.separate_worlds = False` to preserve the legacy shared-grid behavior.
 - Change the default CoACD convex decomposition threshold from `0.5` to `0.05` to match CoACD's default; pass `remeshing_kwargs={"threshold": 0.5}` to preserve the previous coarse decomposition.
 - **Breaking change (experimental `SolverVBD`):** VBD now interprets all damping coefficients as absolute physical units instead of dimensionless stiffness-relative (Rayleigh) multipliers (`D = kd · ke`). Existing `kd`-family values will produce different damping. Affected parameters: tetrahedral `k_damp` [Pa·s], `tri_kd`, spring `kd` [N·s/m], cable `stretch_damping` [N·s/m] and `bend_damping` [N·m·s/rad] in `add_joint_cable()`/`add_rod()`/`add_rod_graph()`, `joint_target_kd` and `joint_limit_kd` (including `JointDofConfig.limit_kd`), shape contact `kd`/`shape_material_kd` and `soft_contact_kd` [N·s/m], and `SolverVBD(rigid_joint_linear_kd=…, rigid_joint_angular_kd=…)`. To preserve previous behavior, set `kd_new = kd_old · k`, where `k` is the stiffness or penalty coefficient the value was previously paired with, and pass the product to the same field.
@@ -49,6 +51,7 @@
 
 ### Fixed
 
+- Fix `SolverCoupled` to preserve BODY-, PARTICLE-, JOINT_COORD-, and JOINT_DOF-mapped custom state such as implicit-MPM history across steps, selectively reset and reconcile only requested worlds, and expose `reconcile_entry_state()` for public entry-local post-processing.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)

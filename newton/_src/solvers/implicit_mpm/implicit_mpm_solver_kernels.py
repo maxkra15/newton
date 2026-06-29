@@ -929,6 +929,25 @@ def reset_mpm_particle_history(
         particle_Jp[particle_index] = 1.0
 
 
+@wp.kernel
+def reset_mpm_collider_history(
+    body_world: wp.array[wp.int32],
+    world_mask: wp.array[wp.bool],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+):
+    """Refresh previous collider poses for bodies in selected worlds."""
+    body_index = wp.tid()
+    world = body_world[body_index]
+    selected = False
+    if world >= 0 and world < world_mask.shape[0]:
+        selected = world_mask[world]
+    elif world < 0 and world_mask.shape[0] == 1:
+        selected = world_mask[0]
+    if selected:
+        body_q_prev[body_index] = body_q[body_index]
+
+
 @wp.kernel(module="unique")
 def reset_mpm_point_warmstart(
     particle_world: wp.array[wp.int32],
@@ -996,7 +1015,52 @@ def supports_rebuildable_nanogrid() -> bool:
         return False
 
 
-def _rebuild_capacity(particle_q, voxel_size, ratio: float, max_active_voxels: int, point_mask=None) -> dict[str, int]:
+def _packed_environment_voxels(
+    particle_q,
+    voxel_size,
+    point_environment,
+    environment_count: int,
+    point_mask=None,
+    guard_cells: int = 3,
+) -> np.ndarray:
+    """Return the initially packed voxel coordinates for isolated environments."""
+    points = np.asarray(particle_q.numpy(), dtype=np.float32)
+    environments = np.asarray(point_environment.numpy(), dtype=np.int32)
+    active = np.ones(points.shape[0], dtype=bool)
+    if point_mask is not None:
+        active &= np.asarray(point_mask.numpy(), dtype=np.int32) != 0
+
+    voxel_ijks = np.floor(points / np.float32(voxel_size) + np.float32(0.5)).astype(np.int64)
+    packed_ijks = []
+    packed_start = 0
+    for environment in range(environment_count):
+        environment_ijks = voxel_ijks[active & (environments == environment)]
+        if environment_ijks.shape[0] == 0:
+            packed_start += guard_cells
+            continue
+        min_x = int(np.min(environment_ijks[:, 0]))
+        max_x = int(np.max(environment_ijks[:, 0]))
+        environment_ijks = environment_ijks.copy()
+        environment_ijks[:, 0] += packed_start - min_x
+        packed_ijks.append(environment_ijks)
+        packed_start += max_x - min_x + 1 + guard_cells
+
+    if not packed_ijks:
+        return np.empty((0, 3), dtype=np.int64)
+    return np.unique(np.concatenate(packed_ijks), axis=0)
+
+
+def _rebuild_capacity(
+    particle_q,
+    voxel_size,
+    ratio: float,
+    max_active_voxels: int,
+    point_mask=None,
+    *,
+    point_environment=None,
+    environment_count: int | None = None,
+    guard_cells: int = 3,
+) -> dict[str, int]:
     """Estimate rebuildable-volume capacities (active voxels + NanoVDB node counts).
 
     Active-voxel and leaf-node storage reserves ``max_active_voxels`` entries.
@@ -1005,19 +1069,32 @@ def _rebuild_capacity(particle_q, voxel_size, ratio: float, max_active_voxels: i
     the current particles scaled by ``ratio`` for spreading headroom. Rebuild
     status reports when any reserved capacity is exceeded.
     """
-    initial = wp.Volume.allocate_by_voxels(
-        voxel_points=particle_q,
-        voxel_size=voxel_size,
-        point_mask=point_mask,
-    )
-    if initial.get_voxel_count() == 0:
+    if point_environment is None:
+        initial = wp.Volume.allocate_by_voxels(
+            voxel_points=particle_q,
+            voxel_size=voxel_size,
+            point_mask=point_mask,
+        )
+        ijk = initial.get_voxels().numpy()
+    else:
+        if environment_count is None:
+            raise ValueError("environment_count is required with point_environment")
+        ijk = _packed_environment_voxels(
+            particle_q,
+            voxel_size,
+            point_environment,
+            environment_count,
+            point_mask=point_mask,
+            guard_cells=guard_cells,
+        )
+
+    if ijk.shape[0] == 0:
         return {
             "max_active_voxels": max_active_voxels,
             "max_leaf_nodes": max_active_voxels,
             "max_lower_nodes": min(max_active_voxels, 8),
             "max_upper_nodes": min(max_active_voxels, 4),
         }
-    ijk = initial.get_voxels().numpy()
     lower = np.unique(np.floor_divide(ijk, 8 * 16), axis=0).shape[0]
     upper = np.unique(np.floor_divide(ijk, 8 * 16 * 32), axis=0).shape[0]
     return {

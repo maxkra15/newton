@@ -366,6 +366,12 @@ def test_sparse_multiworld_constructs_environment_grid(test, device):
     test.assertEqual(grid.environment_count(), 2)
     test.assertTrue(solver.supports_cuda_graph_capture)
     test.assertEqual(solver.max_active_cell_count, 128)
+    cell_capacity = grid.cell_grid.get_rebuild_info()
+    vertex_capacity = grid.vertex_grid.get_rebuild_info()
+    test.assertLess(cell_capacity.max_lower_node_count, cell_capacity.max_voxel_count)
+    test.assertLess(cell_capacity.max_upper_node_count, cell_capacity.max_voxel_count)
+    test.assertLess(vertex_capacity.max_lower_node_count, vertex_capacity.max_voxel_count)
+    test.assertLess(vertex_capacity.max_upper_node_count, vertex_capacity.max_voxel_count)
 
 
 def test_cuda_graph_capture_capability_and_preparation(test, device):
@@ -497,7 +503,7 @@ def test_sparse_status_is_sticky_until_explicitly_cleared(test, device):
     test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
     test.assertTrue(int(solver._grid_accumulated_status.numpy()[0]) & wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
     with test.assertRaisesRegex(RuntimeError, "sparse grid rebuild capacity"):
-        solver.check_sparse_grid_rebuild_status()
+        solver.check_status()
 
     solver.clear_sparse_grid_rebuild_status()
     test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
@@ -543,12 +549,18 @@ def test_masked_reset_restores_only_selected_world_history(test, device):
     starts = model.particle_world_start.numpy()
     selected = slice(starts[0], starts[1])
     unselected = slice(starts[1], starts[2])
+    body_starts = model.body_world_start.numpy()
+    selected_bodies = slice(body_starts[0], body_starts[1])
+    unselected_bodies = slice(body_starts[1], body_starts[2])
     before = _mpm_history_snapshot(state)
 
     body_q = state.body_q.numpy()
     body_q[:, :3] = np.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=np.float32)
     state.body_q.assign(body_q)
-    solver._last_step_data.body_q_prev.zero_()
+    body_q_prev = state.body_q.numpy()
+    body_q_prev[:, :3] = np.array(((10.0, 20.0, 30.0), (40.0, 50.0, 60.0)), dtype=np.float32)
+    solver._last_step_data.body_q_prev.assign(body_q_prev)
+    body_q_prev_before = solver._last_step_data.body_q_prev.numpy().copy()
     solver._grid_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
     solver._grid_accumulated_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
 
@@ -566,7 +578,9 @@ def test_masked_reset_restores_only_selected_world_history(test, device):
         np.testing.assert_array_equal(after[name][unselected], before[name][unselected])
     for field, expected in zip(grid_warmstarts, warmstarts_before, strict=True):
         np.testing.assert_array_equal(field.dof_values.numpy(), expected)
-    np.testing.assert_array_equal(solver._last_step_data.body_q_prev.numpy(), state.body_q.numpy())
+    body_q_prev_after = solver._last_step_data.body_q_prev.numpy()
+    np.testing.assert_array_equal(body_q_prev_after[selected_bodies], state.body_q.numpy()[selected_bodies])
+    np.testing.assert_array_equal(body_q_prev_after[unselected_bodies], body_q_prev_before[unselected_bodies])
     test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
     test.assertEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
 
@@ -652,21 +666,38 @@ def test_coupled_mpm_non_in_place_capture_replays_after_reset(test, device):
 
     state_0 = model.state()
     state_1 = model.state()
+    _assign_nondefault_mpm_history(state_0)
     coupled.step(state_0, state_1, control=None, contacts=None, dt=1.0e-4)
+    entry = coupled._entries["mpm"]
+
+    def assert_parent_history_matches_entry():
+        parent_history = _mpm_history_snapshot(state_1)
+        entry_history = _mpm_history_snapshot(entry.state_1)
+        for name, expected in entry_history.items():
+            np.testing.assert_array_equal(parent_history[name], expected)
+
+    assert_parent_history_matches_entry()
     coupled.reset(state_1)
+    assert_parent_history_matches_entry()
 
     with wp.ScopedCapture(device=device, force_module_load=False) as capture:
         coupled.step(state_1, state_0, control=None, contacts=None, dt=1.0e-4)
         coupled.step(state_0, state_1, control=None, contacts=None, dt=1.0e-4)
 
     wp.capture_launch(capture.graph)
+    coupled.check_status()
+    assert_parent_history_matches_entry()
     wp.capture_launch(capture.graph)
+    coupled.check_status()
+    assert_parent_history_matches_entry()
     coupled.reset(state_1, world_mask=wp.array((True, False), dtype=wp.bool, device=device))
+    assert_parent_history_matches_entry()
     wp.capture_launch(capture.graph)
+    coupled.check_status()
+    assert_parent_history_matches_entry()
 
     test.assertTrue(np.isfinite(state_0.particle_q.numpy()).all())
     test.assertTrue(np.isfinite(state_1.particle_q.numpy()).all())
-    entry = coupled._entries["mpm"]
     for values in _mpm_history_snapshot(entry.state_1).values():
         test.assertTrue(np.isfinite(values).all())
 

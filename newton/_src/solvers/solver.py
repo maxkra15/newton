@@ -210,6 +210,14 @@ class SolverBase:
         """
         del contacts
 
+    def check_status(self) -> None:
+        """Raise for asynchronous failures reported by prior solver steps.
+
+        This method may synchronize the solver device. Call it only at an
+        explicit host boundary after eager stepping or CUDA graph replay,
+        never during CUDA graph capture.
+        """
+
     def _init_kinematic_state(self):
         """Allocate and populate effective inverse mass/inertia arrays."""
         model = self.model
