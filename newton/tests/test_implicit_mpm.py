@@ -111,6 +111,14 @@ def test_multiworld_fixed_pic_matches_independent(test, device):
     _run_multiworld_reference_case(device, grid_type="fixed", integration_scheme="pic")
 
 
+def test_multiworld_sparse_pic_matches_independent(test, device):
+    _run_multiworld_reference_case(device, grid_type="sparse", integration_scheme="pic")
+
+
+def test_multiworld_sparse_gimp_matches_independent(test, device):
+    _run_multiworld_reference_case(device, grid_type="sparse", integration_scheme="gimp")
+
+
 def test_multiworld_isolation_config(test, device):
     config = SolverImplicitMPM.Config()
     test.assertTrue(config.separate_worlds)
@@ -434,6 +442,20 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_fixed_pic_matches_independent",
     test_multiworld_fixed_pic_matches_independent,
+    devices=basic_cuda_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_sparse_pic_matches_independent",
+    test_multiworld_sparse_pic_matches_independent,
+    devices=basic_cuda_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_sparse_gimp_matches_independent",
+    test_multiworld_sparse_gimp_matches_independent,
     devices=basic_cuda_devices,
 )
 

@@ -863,6 +863,16 @@ def allocate_by_voxels(particle_q, voxel_size, padding_voxels: int = 0):
     return volume
 
 
+def voxel_coordinates(particle_q: wp.array[wp.vec3], voxel_size: float, padding_voxels: int = 0) -> wp.array[wp.vec3i]:
+    if particle_q.shape[0] == 0:
+        return wp.empty(0, dtype=wp.vec3i, device=particle_q.device)
+
+    volume = allocate_by_voxels(particle_q, voxel_size, padding_voxels=padding_voxels)
+    voxels = wp.empty(volume.get_voxel_count(), dtype=wp.vec3i, device=particle_q.device)
+    volume.get_voxels(voxels)
+    return voxels
+
+
 @wp.kernel
 def node_color(
     space_node_indices: wp.array[int],
