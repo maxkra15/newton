@@ -823,6 +823,130 @@ def test_sand_cube_on_plane(test, device):
     assert np.all(contact_impulses[:, model.up_axis] < 0.0)
 
 
+def test_multiworld_moving_platforms_are_isolated(test, device):
+    voxel_size = 0.1
+    particle_spacing = 0.5 * voxel_size
+    dt = 0.02
+    step_count = 15
+    platform_speed = 0.5
+
+    def run_simulation(velocity_mode, separate_worlds=True):
+        local_builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        SolverImplicitMPM.register_custom_attributes(local_builder)
+        local_builder.add_particle_grid(
+            pos=wp.vec3(-0.05, 0.12, -0.05),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=4,
+            dim_y=4,
+            dim_z=4,
+            cell_x=particle_spacing,
+            cell_y=particle_spacing,
+            cell_z=particle_spacing,
+            mass=1.0,
+            jitter=0.0,
+            custom_attributes={"mpm:friction": 1.0},
+        )
+        platform_body = local_builder.add_body(xform=wp.transform(wp.vec3(0.0), wp.quat_identity()), is_kinematic=True)
+        platform_mesh = newton.Mesh.create_box(
+            0.5,
+            0.1,
+            0.5,
+            duplicate_vertices=False,
+            compute_normals=False,
+            compute_uvs=False,
+            compute_inertia=False,
+        )
+        shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+        shape_cfg.margin = 0.02
+        local_builder.add_shape_mesh(platform_body, mesh=platform_mesh, cfg=shape_cfg)
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.add_world(local_builder)
+        builder.add_world(local_builder)
+        model = builder.finalize(device=device)
+
+        config = SolverImplicitMPM.Config()
+        config.voxel_size = voxel_size
+        config.grid_type = "dense"
+        config.collider_velocity_mode = velocity_mode
+        config.separate_worlds = separate_worlds
+        solver = SolverImplicitMPM(model, config=config)
+
+        if not separate_worlds:
+            # Shared mode must query every collider even when metadata retains a local tag.
+            solver.setup_collider(collider_body_ids=[0], collider_world_ids=[0])
+
+        state_0 = model.state()
+        state_1 = model.state()
+        initial_positions = state_0.particle_q.numpy().copy()
+
+        for step in range(step_count):
+            platform_offset = platform_speed * dt * (step + 1)
+            body_q = state_0.body_q.numpy()
+            body_q[0] = (platform_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            body_q[1] = (-platform_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            state_0.body_q.assign(body_q)
+
+            body_qd = state_0.body_qd.numpy()
+            body_qd.fill(0.0)
+            if velocity_mode == "forward":
+                body_qd[0] = (platform_speed, 0.0, 0.0, 0.0, 0.0, 0.0)
+                body_qd[1] = (-platform_speed, 0.0, 0.0, 0.0, 0.0, 0.0)
+            state_0.body_qd.assign(body_qd)
+
+            solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+            state_0, state_1 = state_1, state_0
+
+        particle_world_start = model.particle_world_start.numpy()
+        positions = state_0.particle_q.numpy()
+        velocities = state_0.particle_qd.numpy()
+        mean_velocity_x = np.empty(2)
+        mean_displacement_x = np.empty(2)
+        for world in range(2):
+            world_slice = slice(particle_world_start[world], particle_world_start[world + 1])
+            mean_velocity_x[world] = np.mean(velocities[world_slice, 0])
+            mean_displacement_x[world] = np.mean(positions[world_slice, 0] - initial_positions[world_slice, 0])
+
+        collider = solver._mpm_model.collider
+        node_environment_offsets = solver._scratchpad.collider_environment_offsets
+        return (
+            mean_velocity_x,
+            mean_displacement_x,
+            collider.collider_world.numpy(),
+            collider.collider_body_index.numpy(),
+            None if node_environment_offsets is None else node_environment_offsets.numpy(),
+        )
+
+    for velocity_mode in ("forward", "backward"):
+        with test.subTest(velocity_mode=velocity_mode):
+            velocity_x, displacement_x, collider_world, collider_body, node_environment_offsets = run_simulation(
+                velocity_mode
+            )
+
+            np.testing.assert_array_equal(collider_world, np.array((0, 1)))
+            np.testing.assert_array_equal(collider_body, np.array((0, 1)))
+            test.assertIsNotNone(node_environment_offsets)
+            test.assertGreater(node_environment_offsets[1], node_environment_offsets[0])
+            test.assertGreater(node_environment_offsets[2], node_environment_offsets[1])
+            test.assertGreater(velocity_x[0], 0.1)
+            test.assertLess(velocity_x[1], -0.1)
+            test.assertGreater(displacement_x[0], 0.03)
+            test.assertLess(displacement_x[1], -0.03)
+
+    # This is the response that bypassed isolation would produce: both coincident
+    # particle blocks select the stable first collider and follow it in +X.
+    velocity_x, displacement_x, collider_world, collider_body, node_environment_offsets = run_simulation(
+        "forward", separate_worlds=False
+    )
+    np.testing.assert_array_equal(collider_world, np.array((0,)))
+    np.testing.assert_array_equal(collider_body, np.array((0,)))
+    test.assertIsNone(node_environment_offsets)
+    test.assertTrue(np.all(velocity_x > 0.1))
+    test.assertTrue(np.all(displacement_x > 0.03))
+
+
 def test_finite_difference_collider_velocity(test, device):
     """Test that finite-difference velocity mode correctly computes collider velocity.
 
@@ -1143,6 +1267,13 @@ add_function_test(
 
 add_function_test(
     TestImplicitMPM, "test_sand_cube_on_plane", test_sand_cube_on_plane, devices=devices, check_output=False
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_moving_platforms_are_isolated",
+    test_multiworld_moving_platforms_are_isolated,
+    devices=basic_devices,
 )
 
 add_function_test(
