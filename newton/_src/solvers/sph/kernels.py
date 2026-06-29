@@ -5,6 +5,7 @@ import warp as wp
 
 from ...core.types import Axis
 from ...geometry import GeoType, ParticleFlags, ShapeFlags
+from ...geometry.broad_phase_common import test_world_pair
 from ...geometry.kernels import (
     sample_sdf_grad_heightfield,
     sdf_box,
@@ -481,6 +482,7 @@ def compute_sph_density_pressure(
     particle_q: wp.array[wp.vec3],
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     smoothing_length: float,
     rest_density: float,
     gas_constant: float,
@@ -497,11 +499,14 @@ def compute_sph_density_pressure(
         out_pressure[i] = 0.0
         return
 
+    world_i = particle_world[i]
     xi = particle_q[i]
     density = float(0.0)
     query = wp.hash_grid_query(grid, xi, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if _is_active_particle(particle_flags[j]):
             r = xi - particle_q[j]
             density += particle_mass[j] * _poly6_kernel(wp.dot(r, r), smoothing_length)
@@ -518,6 +523,7 @@ def compute_sph_vorticity(
     particle_qd: wp.array[wp.vec3],
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     density: wp.array[float],
     smoothing_length: float,
     out_vorticity: wp.array[wp.vec3],
@@ -531,6 +537,7 @@ def compute_sph_vorticity(
         out_vorticity[i] = wp.vec3(0.0)
         return
 
+    world_i = particle_world[i]
     xi = particle_q[i]
     vi = particle_qd[i]
     omega = wp.vec3(0.0)
@@ -538,6 +545,8 @@ def compute_sph_vorticity(
     query = wp.hash_grid_query(grid, xi, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j != i and _is_active_particle(particle_flags[j]):
             r_vec = xi - particle_q[j]
             r = wp.length(r_vec)
@@ -626,6 +635,8 @@ def integrate_sph_particles(
     eta = wp.vec3(0.0)
     contact_count = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_idx, particle_world[j]):
+            continue
         if j != i and _is_active_particle(particle_flags[j]):
             xj = particle_q[j]
             r_vec = xi - xj
@@ -1036,6 +1047,7 @@ def compute_pbf_lambdas(
     particle_q: wp.array[wp.vec3],
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     smoothing_length: float,
     rest_density: float,
     relaxation_epsilon: float,
@@ -1052,6 +1064,7 @@ def compute_pbf_lambdas(
         out_lambda[i] = 0.0
         return
 
+    world_i = particle_world[i]
     xi = particle_q[i]
     inv_rest_density = 1.0 / wp.max(rest_density, EPS)
     density = float(0.0)
@@ -1061,6 +1074,8 @@ def compute_pbf_lambdas(
     query = wp.hash_grid_query(grid, xi, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if not _is_active_particle(particle_flags[j]):
             continue
 
@@ -1087,6 +1102,7 @@ def solve_pbf_deltas(
     particle_mass: wp.array[float],
     particle_inv_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     lambdas: wp.array[float],
     smoothing_length: float,
     rest_density: float,
@@ -1105,6 +1121,7 @@ def solve_pbf_deltas(
         out_delta[i] = wp.vec3(0.0)
         return
 
+    world_i = particle_world[i]
     xi = particle_q[i]
     inv_rest_density = 1.0 / wp.max(rest_density, EPS)
     lambda_i = lambdas[i]
@@ -1114,6 +1131,8 @@ def solve_pbf_deltas(
     query = wp.hash_grid_query(grid, xi, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j == i or not _is_active_particle(particle_flags[j]):
             continue
 
@@ -1188,6 +1207,7 @@ def smooth_sph_velocities(
     particle_q: wp.array[wp.vec3],
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     particle_inv_mass: wp.array[float],
     smoothing_length: float,
     xsph_strength: float,
@@ -1206,6 +1226,7 @@ def smooth_sph_velocities(
         out_qd[i] = vi
         return
 
+    world_i = particle_world[i]
     xi = particle_q[i]
     h = wp.max(smoothing_length, EPS)
     h2 = h * h
@@ -1215,6 +1236,8 @@ def smooth_sph_velocities(
     query = wp.hash_grid_query(grid, xi, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if not _is_active_particle(particle_flags[j]):
             continue
 
