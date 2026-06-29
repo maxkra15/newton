@@ -169,6 +169,84 @@ def test_xpbd_multiworld_reorder_is_noop(test, device):
         np.testing.assert_array_equal(array.numpy(), expected)
 
 
+def test_sph_multiworld_matches_independent_baselines(test, device):
+    positions = [(0.0, 0.0, 0.0), (0.04, 0.0, 0.0), (0.0, 0.05, 0.0), (0.035, 0.04, 0.015)]
+    velocities = [
+        [(0.4, 0.0, 0.0), (0.0, 0.3, 0.0), (-0.2, 0.0, 0.1), (0.0, -0.1, 0.0)],
+        [(-0.3, 0.1, 0.0), (0.1, -0.4, 0.0), (0.0, 0.2, -0.1), (0.25, 0.0, 0.0)],
+    ]
+    templates = [_make_particle_builder(positions, world_velocities, ACTIVE_FLAGS) for world_velocities in velocities]
+    multi_model = _make_colocated_model(device, *templates)
+    baseline_models = [template.finalize(device=device) for template in templates]
+    kwargs = {
+        "smoothing_length": 0.12,
+        "rest_density": 80.0,
+        "gas_constant": 12.0,
+        "viscosity": 0.2,
+        "particle_friction": 0.15,
+        "cohesion": 0.1,
+        "surface_tension": 0.05,
+        "vorticity_confinement": 0.1,
+        "pbf_iterations": 2,
+        "xsph_strength": 0.25,
+        "shape_collision": False,
+        "render_smoothing": 0.0,
+        "render_anisotropy_scale": 0.0,
+    }
+
+    multi_state, multi_solver = _step_sph(multi_model, **kwargs)
+    baselines = [_step_sph(model, **kwargs) for model in baseline_models]
+    worlds = multi_model.particle_world.numpy()
+    multi_q = multi_state.particle_q.numpy()
+    multi_qd = multi_state.particle_qd.numpy()
+    multi_density = multi_solver.particle_density.numpy()
+    multi_pressure = multi_solver.particle_pressure.numpy()
+    multi_vorticity = multi_solver.particle_vorticity.numpy()
+    for values in (multi_q, multi_qd, multi_density, multi_pressure, multi_vorticity):
+        test.assertTrue(np.isfinite(values).all())
+
+    for world_id, (baseline_state, baseline_solver) in enumerate(baselines):
+        mask = worlds == world_id
+        baseline_q = baseline_state.particle_q.numpy()
+        baseline_qd = baseline_state.particle_qd.numpy()
+        baseline_density = baseline_solver.particle_density.numpy()
+        baseline_pressure = baseline_solver.particle_pressure.numpy()
+        baseline_vorticity = baseline_solver.particle_vorticity.numpy()
+        for values in (baseline_q, baseline_qd, baseline_density, baseline_pressure, baseline_vorticity):
+            test.assertTrue(np.isfinite(values).all())
+
+        np.testing.assert_allclose(multi_q[mask], baseline_q, rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(multi_qd[mask], baseline_qd, rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(multi_density[mask], baseline_density, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(multi_pressure[mask], baseline_pressure, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(multi_vorticity[mask], baseline_vorticity, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_particle_global_world_keeps_fallback_interactions(test, device):
+    local = _make_particle_builder([(0.0, 0.0, 0.0)], [(0.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    global_particle = _make_particle_builder([(0.0, 0.0, 0.0)], [(0.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    model = _make_colocated_model(device, local, local, global_builders=(global_particle,))
+    _state, solver = _step_sph(
+        model,
+        smoothing_length=0.1,
+        rest_density=1.0,
+        gas_constant=0.0,
+        viscosity=0.0,
+        shape_collision=False,
+        render_smoothing=0.0,
+        render_anisotropy_scale=0.0,
+    )
+    worlds = model.particle_world.numpy()
+    density = solver.particle_density.numpy()
+    local_density = density[worlds >= 0]
+    global_density = density[worlds == -1]
+
+    test.assertTrue(np.isfinite(density).all())
+    test.assertEqual(local_density.shape, (2,))
+    test.assertEqual(global_density.shape, (1,))
+    np.testing.assert_allclose(local_density, global_density[0] * (2.0 / 3.0), rtol=1.0e-5, atol=1.0e-5)
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -181,6 +259,8 @@ for _name in (
     "test_xpbd_mixed_fluid_solid_contacts_are_isolated",
     "test_xpbd_multiworld_matches_independent_fluid_baselines",
     "test_xpbd_multiworld_reorder_is_noop",
+    "test_sph_multiworld_matches_independent_baselines",
+    "test_particle_global_world_keeps_fallback_interactions",
 ):
     add_function_test(
         TestParticleWorldFiltering,
