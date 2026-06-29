@@ -5,6 +5,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -75,6 +76,7 @@ from .implicit_mpm_solver_kernels import (
     strain_rhs,
     update_particle_frames,
     update_particle_strains,
+    voxel_coordinates,
 )
 
 
@@ -964,6 +966,7 @@ class SolverImplicitMPM(SolverBase):
         self._separate_worlds = bool(config.separate_worlds and model.world_count > 1)
         self._environment_count = model.world_count if self._separate_worlds else 1
         self._particle_environment = model.particle_world if self._separate_worlds else None
+        self._particle_world_ranges = None
 
         if self._separate_worlds:
             particle_world = model.particle_world.numpy()
@@ -980,6 +983,19 @@ class SolverImplicitMPM(SolverBase):
                     "replicate the particles into each world or set Config.separate_worlds=False for legacy "
                     "coupled behavior."
                 )
+
+            world_boundaries = np.searchsorted(particle_world, np.arange(model.world_count + 1))
+            particle_world_ranges = tuple((int(begin), int(end)) for begin, end in pairwise(world_boundaries))
+            ranges_cover_particles = world_boundaries[0] == 0 and world_boundaries[-1] == particle_world.shape[0]
+            ranges_match_worlds = all(
+                np.all(particle_world[begin:end] == world) for world, (begin, end) in enumerate(particle_world_ranges)
+            )
+            if not ranges_cover_particles or not ranges_match_worlds:
+                raise ValueError(
+                    "SolverImplicitMPM requires MPM particles to be stored contiguously by world when "
+                    "Config.separate_worlds=True."
+                )
+            self._particle_world_ranges = particle_world_ranges
 
         self._mpm_model = ImplicitMPMModel(model, config)
 
@@ -1289,8 +1305,22 @@ class SolverImplicitMPM(SolverBase):
         """
         with self._timer("Allocate grid"):
             if self.grid_type == "sparse":
-                volume = allocate_by_voxels(positions, voxel_size, padding_voxels=padding_voxels)
-                grid = fem.Nanogrid(volume, temporary_store=temporary_store)
+                if self._separate_worlds:
+                    cell_ijks = [
+                        voxel_coordinates(positions[begin:end], voxel_size, padding_voxels=padding_voxels)
+                        if begin != end
+                        else wp.empty(0, dtype=wp.vec3i, device=positions.device)
+                        for begin, end in self._particle_world_ranges
+                    ]
+                    grid = fem.Nanogrid.from_environment_voxels(
+                        cell_ijks,
+                        voxel_size=voxel_size,
+                        temporary_store=temporary_store,
+                        device=positions.device,
+                    )
+                else:
+                    volume = allocate_by_voxels(positions, voxel_size, padding_voxels=padding_voxels)
+                    grid = fem.Nanogrid(volume, temporary_store=temporary_store)
             else:
                 # Compute bounds and transfer to host
                 device = positions.device
