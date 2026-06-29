@@ -319,6 +319,182 @@ def test_multiworld_fixed_pic_matches_independent(test, device):
     _run_multiworld_reference_case(device, grid_type="fixed", integration_scheme="pic")
 
 
+def _make_multiworld_fixed_outer_cuda_graph_case(device, max_active_cell_count=16):
+    local_builder = _make_mpm_particle_builder(gravity=0.0)
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_world(local_builder)
+    builder.add_world(local_builder)
+    model = builder.finalize(device=device)
+
+    world_starts = model.particle_world_start.numpy()
+    initial_q = model.particle_q.numpy()
+    initial_qd = np.zeros((model.particle_count, 3), dtype=np.float32)
+    for world, translation in enumerate((1.0, -1.0)):
+        world_slice = slice(world_starts[world], world_starts[world + 1])
+        initial_qd[world_slice] = _compressive_shear_velocity(initial_q[world_slice], amplitude=4.0)
+        initial_qd[world_slice, 0] += translation
+    model.particle_qd.assign(initial_qd)
+
+    config = _make_mpm_config(grid_type="fixed", integration_scheme="pic", solver="jacobi")
+    config.grid_padding = 2
+    config.max_active_cell_count = max_active_cell_count
+    config.max_iterations = 5
+    config.tolerance = 0.0
+    config.transfer_scheme = "pic"
+
+    solver = SolverImplicitMPM(model, config=config)
+    return model, solver, model.state(), model.state(), world_starts
+
+
+def _mpm_particle_state_arrays(state):
+    return {
+        "particle_q": state.particle_q,
+        "particle_qd": state.particle_qd,
+        "particle_qd_grad": state.mpm.particle_qd_grad,
+        "particle_elastic_strain": state.mpm.particle_elastic_strain,
+        "particle_stress": state.mpm.particle_stress,
+    }
+
+
+def _mpm_strain_field_arrays(solver):
+    scratch = solver._scratchpad
+    return {
+        "stress": scratch.stress_field.dof_values,
+        "elastic_strain_delta": scratch.elastic_strain_delta_field.dof_values,
+        "plastic_strain_delta": scratch.plastic_strain_delta_field.dof_values,
+    }
+
+
+def test_multiworld_fixed_capped_jacobi_matches_uncapped(test, device):
+    _capped_model, capped_solver, capped_state_0, capped_state_1, _capped_world_starts = (
+        _make_multiworld_fixed_outer_cuda_graph_case(device, max_active_cell_count=16)
+    )
+    _uncapped_model, uncapped_solver, uncapped_state_0, uncapped_state_1, _uncapped_world_starts = (
+        _make_multiworld_fixed_outer_cuda_graph_case(device, max_active_cell_count=-1)
+    )
+
+    for solver in (capped_solver, uncapped_solver):
+        solver._use_cuda_graph = False
+        solver.max_iterations = 50
+
+    dt = 0.02
+    capped_solver.step(capped_state_0, capped_state_1, control=None, contacts=None, dt=dt)
+    uncapped_solver.step(uncapped_state_0, uncapped_state_1, control=None, contacts=None, dt=dt)
+
+    capped_arrays = _mpm_particle_state_arrays(capped_state_1)
+    uncapped_arrays = _mpm_particle_state_arrays(uncapped_state_1)
+    for name in capped_arrays:
+        capped_values = capped_arrays[name].numpy()
+        uncapped_values = uncapped_arrays[name].numpy()
+        test.assertTrue(np.isfinite(capped_values).all(), f"{name} is non-finite with capped Jacobi")
+        np.testing.assert_allclose(
+            capped_values,
+            uncapped_values,
+            rtol=1.0e-5,
+            atol=1.0e-6,
+            equal_nan=False,
+            err_msg=f"{name} differs between capped and uncapped Jacobi",
+        )
+
+    test.assertGreater(np.linalg.norm(capped_arrays["particle_qd_grad"].numpy()), 1.0e-5)
+    test.assertGreater(np.linalg.norm(capped_arrays["particle_elastic_strain"].numpy()), 1.0e-5)
+    test.assertGreater(np.linalg.norm(capped_arrays["particle_stress"].numpy()), 1.0e-5)
+
+    strain_field_arrays = _mpm_strain_field_arrays(capped_solver)
+    test.assertEqual(strain_field_arrays["stress"].shape[0], 16)
+    for name, array in strain_field_arrays.items():
+        test.assertTrue(np.isfinite(array.numpy()).all(), f"Padded {name} contains non-finite values")
+
+
+def test_multiworld_fixed_outer_cuda_graph_matches_eager(test, device):
+    if (
+        not device.is_cuda
+        or not device.is_mempool_supported
+        or not wp.is_mempool_enabled(device)
+        or not wp.is_conditional_graph_supported()
+    ):
+        test.skipTest("Implicit MPM outer capture requires CUDA memory pools and conditional graphs.")
+
+    eager_model, eager_solver, eager_state_0, eager_state_1, world_starts = (
+        _make_multiworld_fixed_outer_cuda_graph_case(device)
+    )
+    captured_model, captured_solver, captured_state_0, captured_state_1, captured_world_starts = (
+        _make_multiworld_fixed_outer_cuda_graph_case(device)
+    )
+
+    np.testing.assert_array_equal(captured_world_starts, world_starts)
+    initial_q = eager_state_0.particle_q.numpy().copy()
+    initial_qd_grad = eager_state_0.mpm.particle_qd_grad.numpy().copy()
+    initial_elastic_strain = eager_state_0.mpm.particle_elastic_strain.numpy().copy()
+    initial_stress = eager_state_0.mpm.particle_stress.numpy().copy()
+    for world in range(eager_model.world_count - 1):
+        world_q = initial_q[world_starts[world] : world_starts[world + 1]]
+        next_world_q = initial_q[world_starts[world + 1] : world_starts[world + 2]]
+        np.testing.assert_array_equal(world_q, next_world_q)
+
+    initial_offsets = captured_solver._scratchpad.strain_environment_offsets.numpy().copy()
+    dt = 0.02
+    with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+        captured_solver.step(captured_state_0, captured_state_1, control=None, contacts=None, dt=dt)
+        captured_solver.step(captured_state_1, captured_state_0, control=None, contacts=None, dt=dt)
+
+    captured_offset_history = []
+    for cycle in range(4):
+        eager_solver.step(eager_state_0, eager_state_1, control=None, contacts=None, dt=dt)
+        eager_solver.step(eager_state_1, eager_state_0, control=None, contacts=None, dt=dt)
+        wp.capture_launch(capture.graph)
+
+        captured_offset_history.append(captured_solver._scratchpad.strain_environment_offsets.numpy().copy())
+        eager_arrays = _mpm_particle_state_arrays(eager_state_0)
+        captured_arrays = _mpm_particle_state_arrays(captured_state_0)
+        for name in eager_arrays:
+            eager_values = eager_arrays[name].numpy()
+            captured_values = captured_arrays[name].numpy()
+            test.assertTrue(np.isfinite(eager_values).all(), f"{name} is non-finite after eager cycle {cycle}")
+            test.assertTrue(np.isfinite(captured_values).all(), f"{name} is non-finite after captured cycle {cycle}")
+            np.testing.assert_allclose(
+                captured_values,
+                eager_values,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+                equal_nan=False,
+                err_msg=f"{name} differs after capture replay cycle {cycle}",
+            )
+        for name, array in _mpm_strain_field_arrays(captured_solver).items():
+            test.assertTrue(
+                np.isfinite(array.numpy()).all(), f"Padded {name} is non-finite after captured cycle {cycle}"
+            )
+
+    final_q = captured_state_0.particle_q.numpy()
+    final_qd = captured_state_0.particle_qd.numpy()
+    final_qd_grad = captured_state_0.mpm.particle_qd_grad.numpy()
+    final_elastic_strain = captured_state_0.mpm.particle_elastic_strain.numpy()
+    final_stress = captured_state_0.mpm.particle_stress.numpy()
+    initial_voxels = np.floor(initial_q[:, 0] / captured_solver.voxel_size)
+    final_voxels = np.floor(final_q[:, 0] / captured_solver.voxel_size)
+    test.assertTrue(np.any(initial_voxels != final_voxels), "No particle crossed a voxel boundary")
+    test.assertTrue(
+        any(not np.array_equal(initial_offsets, offsets) for offsets in captured_offset_history),
+        "Environment offsets did not change as particles crossed cells",
+    )
+    test.assertGreater(np.linalg.norm(final_qd_grad - initial_qd_grad), 1.0e-5)
+    test.assertGreater(np.linalg.norm(final_elastic_strain - initial_elastic_strain), 1.0e-5)
+    test.assertGreater(np.linalg.norm(final_stress - initial_stress), 1.0e-5)
+
+    mean_displacements = []
+    mean_velocities = []
+    for world in range(captured_model.world_count):
+        world_slice = slice(world_starts[world], world_starts[world + 1])
+        mean_displacements.append(np.mean(final_q[world_slice, 0] - initial_q[world_slice, 0]))
+        mean_velocities.append(np.mean(final_qd[world_slice, 0]))
+
+    test.assertGreater(mean_displacements[0], 0.0)
+    test.assertLess(mean_displacements[1], 0.0)
+    test.assertGreater(mean_velocities[0], 0.0)
+    test.assertLess(mean_velocities[1], 0.0)
+
+
 def test_multiworld_sparse_pic_matches_independent(test, device):
     _run_multiworld_reference_case(device, grid_type="sparse", integration_scheme="pic")
 
@@ -1269,6 +1445,20 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_fixed_pic_matches_independent",
     test_multiworld_fixed_pic_matches_independent,
+    devices=basic_cuda_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_fixed_outer_cuda_graph_matches_eager",
+    test_multiworld_fixed_outer_cuda_graph_matches_eager,
+    devices=basic_cuda_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_fixed_capped_jacobi_matches_uncapped",
+    test_multiworld_fixed_capped_jacobi_matches_uncapped,
     devices=basic_cuda_devices,
 )
 

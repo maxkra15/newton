@@ -653,7 +653,8 @@ class SolverImplicitMPM(SolverBase):
     world and therefore require every MPM particle to belong to a local world.
     Global particles remain supported for single-world models. Set
     :attr:`Config.separate_worlds` to ``False`` to retain the legacy shared-grid
-    topology for a multi-world model.
+    topology for a multi-world model. See :ref:`implicit-mpm-worlds` for the
+    supported outer CUDA graph capture configuration.
 
     [1] https://doi.org/10.1145/2897824.2925877
 
@@ -664,7 +665,9 @@ class SolverImplicitMPM(SolverBase):
             allocations across steps.
         verbose: If True, enable verbose solver output. If False, suppress details. If None, enable verbose output when
             ``wp.config.log_level`` is configured for debug logging.
-        enable_timers: Enable per-section wall-clock timings.
+        enable_timers: Enable per-section wall-clock timings. This must be
+            ``False`` when :meth:`step` is recorded in an outer CUDA graph
+            because section timers synchronize the device.
 
     Raises:
         ValueError: If an isolated multi-world model contains global MPM
@@ -680,7 +683,8 @@ class SolverImplicitMPM(SolverBase):
 
         Multi-world models use independent FEM environments by default. This
         mode requires local particles, while single-world models and the legacy
-        shared-grid mode support global particles.
+        shared-grid mode support global particles. See
+        :ref:`implicit-mpm-worlds` for outer CUDA graph capture constraints.
         """
 
         # numerics
@@ -696,7 +700,10 @@ class SolverImplicitMPM(SolverBase):
         ``"gs-batched"`` (or ``"gauss-seidel-batched"``), ``"jacobi"``,
         ``"cg"``, ``"cr"``, ``"gmres"``.  Pass an ordered sequence to
         warmstart solvers left-to-right, e.g. ``("cr", "gs")`` or
-        ``("cg", "jacobi", "gs")``."""
+        ``("cg", "jacobi", "gs")``. Isolated multi-world outer CUDA graph
+        capture is currently validated with nonlinear ``"jacobi"``. The
+        ``"cg"``, ``"cr"``, and ``"gmres"`` paths perform host reads and are
+        excluded from outer capture."""
         warmstart_mode: Literal["none", "auto", "particles", "grid", "smoothed"] = "auto"
         """Warmstart mode to use for the rheology solver."""
         collider_velocity_mode: Literal["forward", "backward"] = "forward"
@@ -707,11 +714,21 @@ class SolverImplicitMPM(SolverBase):
         voxel_size: float = 0.1
         """Size of the grid voxels."""
         grid_type: Literal["sparse", "dense", "fixed"] = "sparse"
-        """Type of grid to use."""
+        """Type of grid to use.
+
+        Isolated multi-world outer CUDA graph capture requires ``"fixed"``.
+        Dense grids read dynamic bounds on the host, while sparse grids rebuild
+        NanoVDB topology outside capture.
+        """
         grid_padding: int = 0
         """Number of empty cells to add around particles when allocating the grid."""
         max_active_cell_count: int = -1
-        """Maximum number of active cells to use for active subsets of dense grids. -1 means unlimited."""
+        """Maximum active-cell capacity for dense and fixed grid subsets.
+
+        A nonnegative value fixes allocation and partition capacities and is
+        required for isolated multi-world outer CUDA graph capture. ``-1`` uses
+        an exact active count, which may require host synchronization.
+        """
         transfer_scheme: Literal["apic", "pic"] = "apic"
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
@@ -746,6 +763,7 @@ class SolverImplicitMPM(SolverBase):
 
         Set to ``False`` to retain the legacy shared-grid behavior. Isolated
         multi-world models require every MPM particle to belong to a local world.
+        See :ref:`implicit-mpm-worlds` for outer CUDA graph capture constraints.
         """
 
     @classmethod
@@ -1142,7 +1160,8 @@ class SolverImplicitMPM(SolverBase):
 
         Transfers particle data to the grid, solves the implicit rheology
         system, and transfers the result back to update particle positions,
-        velocities, and stress.
+        velocities, and stress. See :ref:`implicit-mpm-worlds` for supported
+        outer CUDA graph capture configurations and replay invariants.
 
         Args:
             state_in: Input state at the start of the step.

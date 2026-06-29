@@ -266,6 +266,8 @@ While :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.e
    world_count: 4
 
 
+.. _implicit-mpm-worlds:
+
 Implicit MPM worlds
 ~~~~~~~~~~~~~~~~~~~
 
@@ -289,15 +291,40 @@ Dense and fixed grids use common physical bounds for all environments. Prefer
 a sparse grid for heterogeneous or physically separated particle bounds so
 each environment allocates only its active voxels.
 
-CUDA graph capture currently has two limitations. In isolated multi-world
-mode, Warp FEM rebuilds environment partitions using host synchronization, so
-an implicit MPM step cannot be captured in an outer CUDA graph, regardless of
-grid type. Sparse grids additionally rebuild NanoVDB topology outside capture.
-The environment-partition limitation does not apply when
-``SolverImplicitMPM.Config.separate_worlds = False`` because that mode retains
-the legacy shared FEM topology. It also gives up MPM grid isolation and remains
-subject to the solver's existing grid-specific capture constraints.
+An isolated multi-world step can be captured in an outer CUDA graph when all of
+the following conditions hold:
 
+- The CUDA device supports conditional graph nodes, and its memory pool is
+  supported and enabled.
+- Construct :class:`~newton.solvers.SolverImplicitMPM` with
+  ``enable_timers=False``. Section timers synchronize the device and therefore
+  cannot run during outer capture.
+- ``SolverImplicitMPM.Config.separate_worlds`` is ``True``.
+- ``SolverImplicitMPM.Config.grid_type`` is ``"fixed"``. The grid bounds are
+  created before capture and remain fixed across replays.
+- ``SolverImplicitMPM.Config.max_active_cell_count`` is nonnegative and large
+  enough for every replay. This gives the active grid and FEM partitions fixed
+  capacities while allowing their active subsets to change.
+- ``SolverImplicitMPM.Config.solver`` is ``"jacobi"``, the nonlinear path
+  validated for isolated multi-world outer capture.
+- The installed Warp artifact contains capture-safe fixed-capacity environment
+  partitions, as tracked by `NVIDIA/warp#1407
+  <https://github.com/NVIDIA/warp/issues/1407>`__.
+
+Model topology, world and particle assignments, array shapes, fixed-grid
+bounds, active-cell capacity, solver configuration, and captured step arguments
+must remain unchanged across replays. Particle state, active cells, and
+per-environment partition offsets may change within those fixed structures. If
+the application alternates two state buffers, capture the complete alternation
+and replay it as one graph; otherwise, recapture after changing a structural
+input, capacity, state-buffer sequence, or time step.
+
+Dense grids are excluded because their bounds are recomputed through a host
+read on every step. Sparse grids are excluded because they rebuild NanoVDB
+topology outside capture. The ``"cg"``, ``"cr"``, and ``"gmres"`` Krylov paths
+are also excluded because they read per-environment counts and solve results on
+the host. Other nonlinear solver choices are not part of the currently
+validated outer-capture configuration.
 
 .. _Per-world gravity:
 
