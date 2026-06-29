@@ -999,6 +999,25 @@ def mark_active_cells(
         active_cells[s_grid.element_index] = 1
 
 
+@fem.integrand
+def mark_active_cells_by_environment(
+    s: fem.Sample,
+    domain: fem.Domain,
+    positions: wp.array[wp.vec3],
+    particle_flags: wp.array[int],
+    particle_environment: wp.array[int],
+    active_cells: wp.array[int],
+):
+    if ~particle_flags[s.qp_index] & newton.ParticleFlags.ACTIVE:
+        return
+
+    x = positions[s.qp_index]
+    s_grid = fem.lookup(domain, x, int(particle_environment[s.qp_index]))
+
+    if s_grid.element_index != fem.NULL_ELEMENT_INDEX:
+        active_cells[s_grid.element_index] = 1
+
+
 @wp.kernel(module="unique")
 def scatter_field_dof_values(
     space_node_indices: wp.array[int],

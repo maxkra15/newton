@@ -8,7 +8,7 @@ import warp as wp
 
 import newton
 from newton.solvers import SolverImplicitMPM
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
 def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0)):
@@ -26,6 +26,7 @@ def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0)):
         cell_z=0.05,
         mass=0.01,
         jitter=0.0,
+        radius_mean=0.025,
         custom_attributes={"mpm:young_modulus": 1.0e4, "mpm:poisson_ratio": 0.2},
     )
     return builder
@@ -51,6 +52,63 @@ def _step_mpm(model, config, step_count=3, dt=0.01):
         solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
         state_0, state_1 = state_1, state_0
     return solver, state_0
+
+
+def _run_multiworld_reference_case(device, grid_type="dense", integration_scheme="pic", solver="jacobi"):
+    world_gravities = ((3.0, -2.0, 0.0), (-5.0, 1.0, 0.0))
+    reference_states = []
+
+    for world_gravity in world_gravities:
+        reference_model = _make_mpm_particle_builder().finalize(device=device)
+        reference_model.set_gravity(world_gravity)
+        _, reference_state = _step_mpm(
+            reference_model,
+            _make_mpm_config(grid_type=grid_type, integration_scheme=integration_scheme, solver=solver),
+        )
+        reference_states.append((reference_state.particle_q.numpy(), reference_state.particle_qd.numpy()))
+
+    local_builder = _make_mpm_particle_builder()
+    multiworld_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(multiworld_builder)
+    multiworld_builder.add_world(local_builder)
+    multiworld_builder.add_world(local_builder)
+    multiworld_model = multiworld_builder.finalize(device=device)
+    for world, world_gravity in enumerate(world_gravities):
+        multiworld_model.set_gravity(world_gravity, world=world)
+
+    _, multiworld_state = _step_mpm(
+        multiworld_model,
+        _make_mpm_config(grid_type=grid_type, integration_scheme=integration_scheme, solver=solver),
+    )
+    starts = multiworld_model.particle_world_start.numpy()
+    multiworld_q = multiworld_state.particle_q.numpy()
+    multiworld_qd = multiworld_state.particle_qd.numpy()
+
+    mean_velocities = []
+    for world, (reference_q, reference_qd) in enumerate(reference_states):
+        world_slice = slice(starts[world], starts[world + 1])
+        world_q = multiworld_q[world_slice]
+        world_qd = multiworld_qd[world_slice]
+        np.testing.assert_allclose(world_q, reference_q, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        np.testing.assert_allclose(world_qd, reference_qd, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        mean_velocities.append(np.mean(world_qd, axis=0))
+
+    mean_velocities = np.asarray(mean_velocities)
+    np.testing.assert_array_equal(np.isfinite(mean_velocities), np.ones_like(mean_velocities, dtype=bool))
+    np.testing.assert_array_less(np.full(2, 1.0e-3), np.abs(mean_velocities[:, 0]))
+    np.testing.assert_array_equal(np.sign(mean_velocities[:, 0]), np.array((1.0, -1.0)))
+
+
+def test_multiworld_dense_pic_matches_independent(test, device):
+    _run_multiworld_reference_case(device, grid_type="dense", integration_scheme="pic")
+
+
+def test_multiworld_dense_gimp_matches_independent(test, device):
+    _run_multiworld_reference_case(device, grid_type="dense", integration_scheme="gimp")
+
+
+def test_multiworld_fixed_pic_matches_independent(test, device):
+    _run_multiworld_reference_case(device, grid_type="fixed", integration_scheme="pic")
 
 
 def test_multiworld_isolation_config(test, device):
@@ -351,11 +409,33 @@ def test_finite_difference_collider_velocity(test, device):
 
 devices = get_test_devices()
 basic_devices = get_test_devices(mode="basic")
+basic_cuda_devices = get_cuda_test_devices(mode="basic")
 
 
 class TestImplicitMPM(unittest.TestCase):
     pass
 
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_dense_pic_matches_independent",
+    test_multiworld_dense_pic_matches_independent,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_dense_gimp_matches_independent",
+    test_multiworld_dense_gimp_matches_independent,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_fixed_pic_matches_independent",
+    test_multiworld_fixed_pic_matches_independent,
+    devices=basic_cuda_devices,
+)
 
 add_function_test(
     TestImplicitMPM,
