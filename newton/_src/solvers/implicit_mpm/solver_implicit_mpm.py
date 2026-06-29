@@ -1091,7 +1091,9 @@ class SolverImplicitMPM(SolverBase):
             collider_projection_threshold: Per-mesh projection threshold (m).
             model: The model to read collider properties from. Default to solver's model.
             body_com: For dynamic colliders, per-body center of mass.
-            body_mass: For dynamic colliders, per-body mass. Pass zeros for kinematic bodies.
+            body_mass: For dynamic colliders, per-body effective mass. When omitted, bodies flagged
+                with :attr:`newton.BodyFlags.KINEMATIC` have zero effective mass. An explicit array
+                is authoritative.
             body_inv_inertia: For dynamic colliders, per-body inverse inertia.
             body_q: For dynamic colliders, per-body initial transform.
             collider_world_ids: Per-collider Newton world IDs. Custom meshes default to global
