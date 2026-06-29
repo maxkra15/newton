@@ -287,8 +287,16 @@ use ``collider_world_ids`` to assign them to specific worlds.
 
 Dense and fixed grids use common physical bounds for all environments. Prefer
 a sparse grid for heterogeneous or physically separated particle bounds so
-each environment allocates only its active voxels. Sparse NanoVDB
-reconstruction remains outside CUDA graph capture.
+each environment allocates only its active voxels.
+
+CUDA graph capture currently has two limitations. In isolated multi-world
+mode, Warp FEM rebuilds environment partitions using host synchronization, so
+an implicit MPM step cannot be captured in an outer CUDA graph, regardless of
+grid type. Sparse grids additionally rebuild NanoVDB topology outside capture.
+The environment-partition limitation does not apply when
+``SolverImplicitMPM.Config.separate_worlds = False`` because that mode retains
+the legacy shared FEM topology. It also gives up MPM grid isolation and remains
+subject to the solver's existing grid-specific capture constraints.
 
 
 .. _Per-world gravity:

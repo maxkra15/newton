@@ -1296,15 +1296,16 @@ class SolverImplicitMPM(SolverBase):
             dt: Time step duration.
         """
 
-        return update_render_grains(
-            state_prev,
-            state,
-            grains,
-            self._mpm_model.particle_radius,
-            dt,
-            particle_environment=self._particle_environment,
-            temporary_store=self.temporary_store,
-        )
+        with wp.ScopedDevice(grains.device):
+            return update_render_grains(
+                state_prev,
+                state,
+                grains,
+                self._mpm_model.particle_radius,
+                dt,
+                particle_environment=self._particle_environment,
+                temporary_store=self.temporary_store,
+            )
 
     def _allocate_grid(
         self,
