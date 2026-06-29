@@ -7,7 +7,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.implicit_mpm.solve_rheology import ArraySquaredNorm
+from newton._src.solvers.implicit_mpm.solve_rheology import ArraySquaredNorm, _linear_solver_result_norms
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
@@ -67,17 +67,43 @@ def _compressive_shear_velocity(positions, amplitude):
 
 
 def test_array_squared_norm_batches(test, device):
-    data = wp.array((1.0, 4.0, 9.0, 16.0, 25.0), dtype=float, device=device)
-    offsets = wp.array((0, 2, 2, 5), dtype=int, device=device)
-    norm = ArraySquaredNorm(max_length=5, batch_offsets=offsets, device=device)
+    values = np.arange(1, 524, dtype=np.float32)
+    data = wp.array(values, dtype=float, device=device)
+    offsets = wp.array((0, 2, 2, 523), dtype=int, device=device)
+    norm = ArraySquaredNorm(max_length=523, batch_offsets=offsets, device=device)
 
     try:
         result = norm.compute_squared_norm(data)
         test.assertEqual(result.shape, (2, 3))
-        np.testing.assert_array_equal(result.numpy()[0], np.array((5.0, 0.0, 50.0)))
-        np.testing.assert_array_equal(result.numpy()[1], np.array((4.0, 0.0, 25.0)))
+        result_snapshot = result.numpy().copy()
+        np.testing.assert_array_equal(result_snapshot[0], np.array((3.0, 0.0, 137023.0)))
+        np.testing.assert_array_equal(result_snapshot[1], np.array((2.0, 0.0, 523.0)))
+
+        result_ptr = result.ptr
+        sum_values = np.ones(523, dtype=np.float32)
+        max_values = np.full(523, 25.0, dtype=np.float32)
+        max_values[:2] = (4.0, 7.0)
+        two_row_data = wp.array(np.stack((sum_values, max_values)), dtype=float, device=device)
+        result = norm.compute_squared_norm(two_row_data)
+
+        test.assertEqual(result.ptr, result_ptr)
+        result_snapshot = result.numpy().copy()
+        np.testing.assert_array_equal(result_snapshot[0], np.array((2.0, 0.0, 521.0)))
+        np.testing.assert_array_equal(result_snapshot[1], np.array((7.0, 0.0, 25.0)))
     finally:
         norm.release()
+
+
+def test_linear_solver_result_norms(test, device):
+    residual, atol = _linear_solver_result_norms(4.0, 2.0, use_graph=False)
+    test.assertEqual(residual, 4.0)
+    test.assertEqual(atol, 2.0)
+
+    residual_sq = wp.array((9.0, 25.0), dtype=float, device=device)
+    atol_sq = wp.array((4.0, 16.0), dtype=float, device=device)
+    residual, atol = _linear_solver_result_norms(residual_sq, atol_sq, use_graph=True)
+    test.assertEqual(residual, 5.0)
+    test.assertEqual(atol, 4.0)
 
 
 def test_multiworld_cr_matches_independent(test, device):
@@ -105,31 +131,42 @@ def test_multiworld_cr_matches_independent(test, device):
         reference_initial_q.append(initial_q)
         reference_initial_qd.append(initial_qd)
 
+    populated_worlds = (0, 2)
+    empty_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    empty_builder.add_body(is_kinematic=True, label="empty_world_marker")
     multiworld_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
     SolverImplicitMPM.register_custom_attributes(multiworld_builder)
-    for young_modulus in young_moduli:
-        multiworld_builder.add_world(
-            _make_mpm_particle_builder(
-                gravity=0.0,
-                young_modulus=young_modulus,
-            )
-        )
+    for world_builder in (
+        _make_mpm_particle_builder(gravity=0.0, young_modulus=young_moduli[0]),
+        empty_builder,
+        _make_mpm_particle_builder(gravity=0.0, young_modulus=young_moduli[1]),
+    ):
+        multiworld_builder.add_world(world_builder)
     multiworld_model = multiworld_builder.finalize(device=device)
     starts = multiworld_model.particle_world_start.numpy()
+    test.assertEqual(starts[1], starts[2])
     multiworld_initial_q = multiworld_model.particle_q.numpy()
     multiworld_initial_qd = np.empty_like(multiworld_initial_q)
-    for world, velocity_amplitude in enumerate(velocity_amplitudes):
+    for world, velocity_amplitude in zip(populated_worlds, velocity_amplitudes, strict=True):
         world_slice = slice(starts[world], starts[world + 1])
         multiworld_initial_qd[world_slice] = _compressive_shear_velocity(
             multiworld_initial_q[world_slice], velocity_amplitude
         )
     multiworld_model.particle_qd.assign(multiworld_initial_qd)
 
-    _, multiworld_state = _step_mpm(multiworld_model, config, step_count=2)
+    multiworld_solver, multiworld_state = _step_mpm(multiworld_model, config, step_count=2)
+    strain_offsets = multiworld_solver._scratchpad.strain_environment_offsets.numpy()
+    test.assertEqual(strain_offsets[1], strain_offsets[2])
     multiworld_q = multiworld_state.particle_q.numpy()
     multiworld_qd = multiworld_state.particle_qd.numpy()
 
-    for world, (reference_q, reference_qd) in enumerate(reference_states):
+    for world, (reference_q, reference_qd), initial_q, initial_qd in zip(
+        populated_worlds,
+        reference_states,
+        reference_initial_q,
+        reference_initial_qd,
+        strict=True,
+    ):
         world_slice = slice(starts[world], starts[world + 1])
         world_q = multiworld_q[world_slice]
         world_qd = multiworld_qd[world_slice]
@@ -137,8 +174,8 @@ def test_multiworld_cr_matches_independent(test, device):
         np.testing.assert_allclose(world_qd, reference_qd, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
         test.assertTrue(np.isfinite(world_q).all())
         test.assertTrue(np.isfinite(world_qd).all())
-        test.assertGreater(np.linalg.norm(reference_q - reference_initial_q[world]), 1.0e-4)
-        test.assertGreater(np.linalg.norm(reference_qd - reference_initial_qd[world]), 1.0e-4)
+        test.assertGreater(np.linalg.norm(reference_q - initial_q), 1.0e-4)
+        test.assertGreater(np.linalg.norm(reference_qd - initial_qd), 1.0e-4)
 
 
 def _run_multiworld_reference_case(device, grid_type="dense", integration_scheme="pic", solver="jacobi"):
@@ -580,6 +617,13 @@ add_function_test(
     TestImplicitMPM,
     "test_array_squared_norm_batches",
     test_array_squared_norm_batches,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_linear_solver_result_norms",
+    test_linear_solver_result_norms,
     devices=basic_devices,
 )
 
