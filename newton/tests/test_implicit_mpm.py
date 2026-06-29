@@ -45,6 +45,32 @@ def _make_mpm_config(grid_type="dense", integration_scheme="pic", solver="jacobi
     return config
 
 
+def _make_two_world_particle_model(device, builder=None, local_builder=None):
+    if builder is None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    if local_builder is None:
+        local_builder = _make_mpm_particle_builder(gravity=0.0)
+    builder.add_world(local_builder)
+    builder.add_world(local_builder)
+    return builder.finalize(device=device)
+
+
+def _make_box_collider_mesh(device, half_extent=0.5):
+    box = newton.Mesh.create_box(
+        half_extent,
+        half_extent,
+        half_extent,
+        duplicate_vertices=False,
+        compute_normals=False,
+        compute_uvs=False,
+        compute_inertia=False,
+    )
+    points = wp.array(box.vertices, dtype=wp.vec3, device=device)
+    indices = wp.array(box.indices, dtype=int, device=device)
+    return wp.Mesh(points, indices, wp.zeros_like(points))
+
+
 def _step_mpm(model, config, step_count=3, dt=0.01):
     solver = SolverImplicitMPM(model, config=config)
     state_0 = model.state()
@@ -402,6 +428,96 @@ def test_multiworld_effective_isolation_mode(test, device):
     test.assertFalse(shared_solver._separate_worlds)
     test.assertEqual(shared_solver._environment_count, 1)
     test.assertIsNone(shared_solver._particle_environment)
+
+
+def test_multiworld_collider_world_validation(test, device):
+    model = _make_two_world_particle_model(device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    mesh = _make_box_collider_mesh(device)
+    collider = solver._mpm_model.collider
+
+    test.assertEqual(collider.collider_world.shape[0], 0)
+    test.assertEqual(collider.collider_face_offset.shape[0], 0)
+    test.assertEqual(collider.query_collider_ids.shape[0], 0)
+    np.testing.assert_array_equal(collider.query_world_offsets.numpy(), np.zeros(model.world_count + 2))
+
+    solver.setup_collider(collider_meshes=[mesh])
+    np.testing.assert_array_equal(collider.collider_world.numpy(), np.array((-1,)))
+
+    with test.assertRaisesRegex(ValueError, "collider world ID"):
+        solver.setup_collider(collider_meshes=[mesh], collider_world_ids=[model.world_count])
+
+    with test.assertRaisesRegex(ValueError, "collider_world_ids"):
+        solver.setup_collider(collider_meshes=[mesh], collider_world_ids=[])
+
+    meshes = [_make_box_collider_mesh(device, half_extent=scale) for scale in (0.25, 0.5, 0.75)]
+    solver.setup_collider(collider_meshes=meshes, collider_world_ids=[1, -1, 0])
+
+    np.testing.assert_array_equal(collider.collider_world.numpy(), np.array((1, -1, 0)))
+    np.testing.assert_array_equal(collider.query_collider_ids.numpy(), np.array((1, 2, 0)))
+    np.testing.assert_array_equal(collider.query_world_offsets.numpy(), np.array((0, 1, 2, 3)))
+    np.testing.assert_array_equal(collider.collider_body_index.numpy(), np.array((-1, -1, -1)))
+
+    face_counts = [mesh.indices.shape[0] // 3 for mesh in meshes]
+    expected_face_offsets = np.cumsum((0, *face_counts[:-1]))
+    np.testing.assert_array_equal(collider.collider_face_offset.numpy(), expected_face_offsets)
+
+
+def test_multiworld_global_dynamic_collider_rejected(test, device):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    inertia = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    body = builder.add_body(mass=1.0, inertia=inertia, lock_inertia=True)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+    builder.add_shape_box(body, cfg=shape_cfg)
+    model = _make_two_world_particle_model(device, builder=builder)
+
+    with test.assertRaisesRegex(ValueError, "global dynamic collider"):
+        SolverImplicitMPM(model, _make_mpm_config())
+
+
+def test_multiworld_global_kinematic_collider_supported(test, device):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    body = builder.add_body(is_kinematic=True)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+    builder.add_shape_box(body, cfg=shape_cfg)
+    model = _make_two_world_particle_model(device, builder=builder)
+
+    collider = SolverImplicitMPM(model, _make_mpm_config())._mpm_model.collider
+    np.testing.assert_array_equal(collider.collider_world.numpy(), np.array((-1,)))
+
+
+def test_multiworld_default_static_colliders_grouped_by_world(test, device):
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    builder.add_shape_box(-1, cfg=shape_cfg)
+    local_builder = _make_mpm_particle_builder(gravity=0.0)
+    local_builder.add_shape_box(-1, cfg=shape_cfg)
+    model = _make_two_world_particle_model(device, builder=builder, local_builder=local_builder)
+
+    collider = SolverImplicitMPM(model, _make_mpm_config())._mpm_model.collider
+    np.testing.assert_array_equal(collider.collider_world.numpy(), np.array((-1, 0, 1)))
+    np.testing.assert_array_equal(collider.collider_body_index.numpy(), np.array((-1, -1, -1)))
+    np.testing.assert_array_equal(collider.query_collider_ids.numpy(), np.array((0, 1, 2)))
+    np.testing.assert_array_equal(collider.query_world_offsets.numpy(), np.array((0, 1, 2, 3)))
+
+    face_offsets = collider.collider_face_offset.numpy()
+    face_count = _make_box_collider_mesh(device).indices.shape[0] // 3
+    np.testing.assert_array_equal(face_offsets, np.array((0, face_count, 2 * face_count)))
+    test.assertEqual(collider.face_material_index.shape[0], 3 * face_count)
+
+
+def test_multiworld_external_collider_world_count_mismatch(test, device):
+    model = _make_two_world_particle_model(device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+
+    external_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    local_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    local_builder.add_shape_box(-1, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    external_builder.add_world(local_builder)
+    external_model = external_builder.finalize(device=device)
+
+    with test.assertRaisesRegex(ValueError, "world_count"):
+        solver.setup_collider(model=external_model)
 
 
 def test_sand_cube_on_plane(test, device):
@@ -789,6 +905,41 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_effective_isolation_mode",
     test_multiworld_effective_isolation_mode,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_collider_world_validation",
+    test_multiworld_collider_world_validation,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_global_dynamic_collider_rejected",
+    test_multiworld_global_dynamic_collider_rejected,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_global_kinematic_collider_supported",
+    test_multiworld_global_kinematic_collider_supported,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_default_static_colliders_grouped_by_world",
+    test_multiworld_default_static_colliders_grouped_by_world,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_external_collider_world_count_mismatch",
+    test_multiworld_external_collider_world_count_mismatch,
     devices=basic_devices,
 )
 
