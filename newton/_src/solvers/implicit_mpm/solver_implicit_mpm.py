@@ -37,6 +37,7 @@ from .implicit_mpm_solver_kernels import (
     advect_particles,
     allocate_by_voxels,
     average_elastic_parameters,
+    build_active_particle_mask,
     collision_weight_field,
     compliance_form,
     compute_bounds,
@@ -67,11 +68,13 @@ from .implicit_mpm_solver_kernels import (
     mat31,
     mat66,
     node_color,
+    record_volume_rebuild_status,
     rotate_matrix_columns,
     rotate_matrix_rows,
     scatter_field_dof_values,
     strain_delta_form,
     strain_rhs,
+    supports_rebuildable_nanogrid,
     update_particle_frames,
     update_particle_strains,
 )
@@ -87,6 +90,29 @@ def _as_2d_array(array, shape, dtype):
         dtype=dtype,
         grad=None if array.grad is None else _as_2d_array(array.grad, shape, dtype),
     )
+
+
+def _sparse_grid_rebuild_error(status: int) -> RuntimeError:
+    capacity_flags = (
+        (wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED, "active voxels"),
+        (wp.Volume.REBUILD_LEAF_CAPACITY_EXCEEDED, "leaf nodes"),
+        (wp.Volume.REBUILD_LOWER_CAPACITY_EXCEEDED, "lower internal nodes"),
+        (wp.Volume.REBUILD_UPPER_CAPACITY_EXCEEDED, "upper internal nodes"),
+    )
+    exceeded = [name for flag, name in capacity_flags if status & flag]
+    if exceeded:
+        details = ", ".join(exceeded)
+        suggestions = []
+        if status & (wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED | wp.Volume.REBUILD_LEAF_CAPACITY_EXCEEDED):
+            suggestions.append("increase Config.max_active_cell_count")
+        if status & (wp.Volume.REBUILD_LOWER_CAPACITY_EXCEEDED | wp.Volume.REBUILD_UPPER_CAPACITY_EXCEEDED):
+            suggestions.append("reduce the active grid's spatial spread")
+        suggestion = " or ".join(suggestions)
+        return RuntimeError(
+            f"Implicit MPM sparse grid rebuild capacity was exceeded for {details} (status {status}). "
+            f"To avoid overflow, {suggestion}."
+        )
+    return RuntimeError(f"Implicit MPM sparse grid rebuild failed with status {status}.")
 
 
 def _make_grid_basis_space(grid: fem.Geometry, basis_str: str, family: fem.Polynomial | None = None):
@@ -223,6 +249,9 @@ class ImplicitMPMScratchpad:
         use_pic_collider_basis = collider_basis_str[:3] == "pic"
         use_pic_strain_basis = strain_basis_str[:3] == "pic"
 
+        # The rebuildable sparse grid (like the fixed grid) reuses the same geometry object
+        # across steps, so the bases are reused too -- a Nanogrid rebuilt in place refreshes
+        # the topology its bases reference. Only a freshly allocated grid rebuilds the bases.
         if self.domain.geometry is not self.grid:
             self.grid = self.domain.geometry
 
@@ -676,7 +705,10 @@ class SolverImplicitMPM(SolverBase):
         grid_padding: int = 0
         """Number of empty cells to add around particles when allocating the grid."""
         max_active_cell_count: int = -1
-        """Maximum number of active cells to use for active subsets of dense grids. -1 means unlimited."""
+        """Maximum number of active grid cells. A positive value reserves persistent
+        sparse-grid capacity when supported by Warp and bounds active subsets of dense grids.
+        ``-1`` means unlimited and retains per-step sparse-grid allocation. Call
+        :meth:`check_sparse_grid_rebuild_status` after CUDA graph replay to detect overflow."""
         transfer_scheme: Literal["apic", "pic"] = "apic"
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
@@ -936,6 +968,32 @@ class SolverImplicitMPM(SolverBase):
 
         self.grid_padding = config.grid_padding
         self.grid_type = config.grid_type
+        # Reuse requires every grid-backed space to retain valid Nanogrid topology.
+        edge_topology_supported = getattr(fem.Nanogrid, "REBUILDABLE_EDGE_TOPOLOGY", False)
+        strain_basis = config.strain_basis
+        collider_basis = config.collider_basis
+        strain_rebuild_safe = (
+            strain_basis[:3] == "pic"
+            or strain_basis in ("P0", "P1d", "Q1d", "Q1")
+            or (edge_topology_supported and strain_basis in ("S2", "S3"))
+        )
+        collider_rebuild_safe = (
+            collider_basis[:3] == "pic"
+            or collider_basis == "Q1"
+            or (edge_topology_supported and collider_basis in ("S2", "S3"))
+        )
+        self._sparse_rebuildable = (
+            self.grid_type == "sparse"
+            and config.max_active_cell_count > 0
+            and self.grid_padding == 0
+            and self.velocity_basis == "Q1"
+            and strain_rebuild_safe
+            and collider_rebuild_safe
+            and supports_rebuildable_nanogrid()
+        )
+        self._grid_status = None
+        self._grid_accumulated_status = None
+        self._grid_point_mask = None
         self.solver = _resolve_solver_spec(config.solver, self.velocity_basis)
         self.coloring = any("gauss-seidel" in solver or "gs" in solver for solver in self.solver)
         self.apic = config.transfer_scheme == "apic"
@@ -1034,6 +1092,24 @@ class SolverImplicitMPM(SolverBase):
     def voxel_size(self) -> float:
         """Grid voxel size used by the solver."""
         return self._mpm_model.voxel_size
+
+    def check_sparse_grid_rebuild_status(self) -> None:
+        """Raise if a rebuildable sparse grid exceeded its reserved capacity.
+
+        The check synchronizes the solver device and is therefore intended for
+        initialization diagnostics or calls made after CUDA graph replay, not
+        from inside graph capture.
+        """
+        if self._grid_status is None:
+            return
+        if self.model.device.is_capturing:
+            raise RuntimeError("Cannot inspect sparse grid rebuild status during CUDA graph capture")
+
+        status = int(self._grid_status.numpy()[0])
+        if self._grid_accumulated_status is not None:
+            status |= int(self._grid_accumulated_status.numpy()[0])
+        if status != wp.Volume.REBUILD_SUCCESS:
+            raise _sparse_grid_rebuild_error(status)
 
     @override
     def step(
@@ -1229,8 +1305,26 @@ class SolverImplicitMPM(SolverBase):
         """
         with self._timer("Allocate grid"):
             if self.grid_type == "sparse":
-                volume = allocate_by_voxels(positions, voxel_size, padding_voxels=padding_voxels)
-                grid = fem.Nanogrid(volume, temporary_store=temporary_store)
+                point_mask = None
+                if self._sparse_rebuildable:
+                    if self._grid_status is None:
+                        self._grid_status = wp.zeros(1, dtype=wp.uint32, device=positions.device)
+                        self._grid_accumulated_status = wp.zeros(1, dtype=wp.uint32, device=positions.device)
+                    point_mask = self._update_grid_point_mask(particle_flags)
+                volume = allocate_by_voxels(
+                    positions,
+                    voxel_size,
+                    padding_voxels=padding_voxels,
+                    rebuildable=self._sparse_rebuildable,
+                    max_active_voxels=self.max_active_cell_count if self._sparse_rebuildable else None,
+                    status=self._grid_status,
+                    point_mask=point_mask,
+                )
+                if self._sparse_rebuildable:
+                    self.check_sparse_grid_rebuild_status()
+                    grid = fem.Nanogrid(volume, temporary_store=temporary_store, rebuildable=True)
+                else:
+                    grid = fem.Nanogrid(volume, temporary_store=temporary_store)
             else:
                 # Compute bounds and transfer to host
                 device = positions.device
@@ -1274,6 +1368,24 @@ class SolverImplicitMPM(SolverBase):
                 )
 
         return grid
+
+    def _update_grid_point_mask(self, particle_flags: wp.array) -> wp.array:
+        if self._grid_point_mask is None:
+            self._grid_point_mask = wp.empty(
+                shape=particle_flags.shape,
+                dtype=wp.int32,
+                device=particle_flags.device,
+            )
+        elif self._grid_point_mask.shape != particle_flags.shape:
+            raise RuntimeError("Implicit MPM particle count changed after sparse grid initialization")
+
+        wp.launch(
+            build_active_particle_mask,
+            dim=particle_flags.shape[0],
+            inputs=[particle_flags, self._grid_point_mask],
+            device=particle_flags.device,
+        )
+        return self._grid_point_mask
 
     def _create_geometry_partition(
         self, grid: fem.Geometry, positions: wp.array, particle_flags: wp.array, max_cell_count: int
@@ -1346,8 +1458,20 @@ class SolverImplicitMPM(SolverBase):
 
         # Rebuild grid
 
-        if self._scratchpad is not None and self.grid_type == "fixed":
+        # The fixed grid and the rebuildable sparse grid both persist across steps: the
+        # fixed grid is static, the sparse grid is refreshed in place from the current
+        # particles. Plain sparse (no rebuild support) reallocates the grid each step.
+        if self._scratchpad is not None and (self.grid_type == "fixed" or self._sparse_rebuildable):
             grid = self._scratchpad.grid
+            if self._sparse_rebuildable:
+                point_mask = self._update_grid_point_mask(self.model.particle_flags)
+                grid.rebuild(positions, status=self._grid_status, point_mask=point_mask)
+                wp.launch(
+                    record_volume_rebuild_status,
+                    dim=1,
+                    inputs=[self._grid_status, self._grid_accumulated_status],
+                    device=positions.device,
+                )
         else:
             grid = self._allocate_grid(
                 positions,
@@ -1357,9 +1481,11 @@ class SolverImplicitMPM(SolverBase):
                 padding_voxels=self.grid_padding,
             )
 
-        # Build active partition
+        # Build active partition. Plain sparse uses the whole grid; fixed and rebuildable
+        # sparse use a capacity-bounded partition that masks to the active cells (the
+        # rebuildable grid's cell buffers are capacity-sized and include unused slots).
         with self._timer("Build active partition"):
-            if self.grid_type == "sparse":
+            if self.grid_type == "sparse" and not self._sparse_rebuildable:
                 max_cell_count = -1
                 geo_partition = grid
             else:
@@ -2336,10 +2462,16 @@ class SolverImplicitMPM(SolverBase):
 
         domain = scratch.velocity_test.domain
 
+        # The rebuildable sparse grid is refreshed in place, so the previous step's grid
+        # topology no longer exists: a grid-to-grid (nonconforming) warmstart would read
+        # stale cells. Skip those transfers (they only accelerate convergence); the
+        # particle/point paths below still apply since they go through the PIC quadrature.
+        grid_to_grid_warmstart = not self._sparse_rebuildable
+
         if isinstance(prev_impulse_field.space.basis, fem.PointBasisSpace):
             # point-based collisions, simply copy the previous impulses
             scratch.impulse_field.dof_values.assign(prev_impulse_field.dof_values[pic.cell_particle_indices])
-        else:
+        elif grid_to_grid_warmstart:
             # Interpolate previous impulse
             prev_impulse_field = fem.NonconformingField(
                 domain, prev_impulse_field, background=scratch.background_impulse_field
@@ -2351,11 +2483,13 @@ class SolverImplicitMPM(SolverBase):
                 reduction="first",
                 temporary_store=self.temporary_store,
             )
+        else:
+            scratch.impulse_field.dof_values.zero_()
 
         # Interpolate previous stress
         if isinstance(prev_stress_field.space.basis, fem.PointBasisSpace):
             scratch.stress_field.dof_values.assign(prev_stress_field.dof_values[pic.cell_particle_indices])
-        elif self._stress_warmstart in ("grid", "smoothed"):
+        elif self._stress_warmstart in ("grid", "smoothed") and grid_to_grid_warmstart:
             prev_stress_field = fem.NonconformingField(
                 domain, prev_stress_field, background=scratch.background_stress_field
             )
@@ -2366,6 +2500,11 @@ class SolverImplicitMPM(SolverBase):
                 reduction="first",
                 temporary_store=self.temporary_store,
             )
+        elif not self._sparse_rebuildable:
+            pass
+        else:
+            # No grid-to-grid stress warmstart available for the rebuilt grid; start cold.
+            scratch.stress_field.dof_values.zero_()
 
     def _save_for_next_warmstart(
         self, scratch: ImplicitMPMScratchpad, pic: fem.PicQuadrature, last_step_data: LastStepData
