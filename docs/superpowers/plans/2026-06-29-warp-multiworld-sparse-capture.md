@@ -131,7 +131,7 @@ git commit -m "Keep rebuilt FEM environments isolated"
 Add `test_nanogrid_multi_env_rebuild_partition_capture` using four points and environment IDs:
 
 ```python
-points = wp.array([[0, 0, 0], [0, 0, 0], [2, 0, 0], [2, 0, 0]], dtype=wp.vec3i, device=device)
+points = wp.array([[0, 0, 0], [0, 0, 0], [4, 0, 0], [4, 0, 0]], dtype=wp.vec3i, device=device)
 point_envs = wp.array([0, 1, 0, 1], dtype=int, device=device)
 point_mask = wp.array([1, 1, 0, 0], dtype=int, device=device)
 status = wp.zeros(1, dtype=wp.uint32, device=device)
@@ -160,7 +160,7 @@ space_partition = fem.make_space_partition(
 )
 ```
 
-Warm the same rebuild sequence, record it with `wp.ScopedCapture`, change both masks to all ones, replay, and assert success, stable cell/edge grid IDs, stable partition pointers, 4 active cells, 32 vertices, 48 S2 edges, offsets changing from `[0,20,80]` to `[0,40,80]`, and balanced graph allocations through `_assert_graph_allocations_balanced`.
+Warm the same rebuild sequence, record it with `wp.ScopedCapture`, change both masks to all ones, replay, and assert success, stable cell/edge grid IDs, stable partition pointers, 4 active cells, 32 vertices, 48 S2 edges, geometry environment offsets moving far enough to keep the new `x=4` cells disjoint, space-partition offsets changing from `[0,20,80]` to `[0,40,80]`, and balanced graph allocations through `_assert_graph_allocations_balanced`.
 
 - [ ] **Step 2: Run RED on the NanoVDB-only checkpoint**
 
