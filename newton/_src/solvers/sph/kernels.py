@@ -894,6 +894,7 @@ def compute_sph_render_particles(
     particle_q: wp.array[wp.vec3],
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     smoothing_length: float,
     render_smoothing: float,
     anisotropy_scale: float,
@@ -910,6 +911,7 @@ def compute_sph_render_particles(
         return
 
     xi = particle_q[i]
+    world_i = particle_world[i]
     if not _is_active_particle(particle_flags[i]):
         out_render_q[i] = xi
         out_anisotropy[i] = wp.vec4(1.0, 0.0, 0.0, 0.0)
@@ -927,6 +929,8 @@ def compute_sph_render_particles(
     query = wp.hash_grid_query(grid, xi, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if not _is_active_particle(particle_flags[j]):
             continue
 
@@ -969,6 +973,8 @@ def compute_sph_render_particles(
         query_cov = wp.hash_grid_query(grid, xi, h)
         k = int(0)
         while wp.hash_grid_query_next(query_cov, k):
+            if not test_world_pair(world_i, particle_world[k]):
+                continue
             if not _is_active_particle(particle_flags[k]):
                 continue
 
@@ -1278,6 +1284,7 @@ def update_sph_diffuse_particles(
     fluid_q: wp.array[wp.vec3],
     fluid_qd: wp.array[wp.vec3],
     fluid_flags: wp.array[wp.int32],
+    fluid_world: wp.array[wp.int32],
     gravity: wp.array[wp.vec3],
     smoothing_length: float,
     bounds_lower: wp.vec3,
@@ -1312,6 +1319,8 @@ def update_sph_diffuse_particles(
     query = wp.hash_grid_query(grid, x, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_idx, fluid_world[j]):
+            continue
         if not _is_active_particle(fluid_flags[j]):
             continue
 
@@ -1385,6 +1394,7 @@ def spawn_sph_diffuse_particles(
     if i == -1 or not _is_active_particle(fluid_flags[i]):
         return
 
+    source_world = fluid_world[i]
     xi = fluid_q[i]
     vi = fluid_qd[i]
     speed_sq = wp.dot(vi, vi)
@@ -1395,6 +1405,8 @@ def spawn_sph_diffuse_particles(
     query = wp.hash_grid_query(grid, xi, smoothing_length)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(source_world, fluid_world[j]):
+            continue
         if j == i or not _is_active_particle(fluid_flags[j]):
             continue
 

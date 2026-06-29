@@ -247,6 +247,110 @@ def test_particle_global_world_keeps_fallback_interactions(test, device):
     np.testing.assert_allclose(local_density, global_density[0] * (2.0 / 3.0), rtol=1.0e-5, atol=1.0e-5)
 
 
+def test_xpbd_render_neighbors_are_isolated(test, device):
+    offsets = (-0.04, -0.02, 0.0, 0.02, 0.04)
+    velocities = [(0.0, 0.0, 0.0)] * len(offsets)
+    templates = [
+        _make_particle_builder([(offset, 0.0, 0.0) for offset in offsets], velocities),
+        _make_particle_builder([(0.0, offset, 0.0) for offset in offsets], velocities),
+    ]
+    multi_model = _make_colocated_model(device, *templates)
+    baseline_models = [template.finalize(device=device) for template in templates]
+    render_kwargs = {
+        "smoothing": 1.0,
+        "anisotropy_scale": 1.0,
+        "anisotropy_min": 0.2,
+        "anisotropy_max": 2.0,
+    }
+
+    def render(model):
+        state = model.state()
+        solver = SolverXPBD(model, iterations=1, fluid_rest_distance=SPACING)
+        solver.update_render_particles(state, **render_kwargs)
+        outputs = tuple(
+            array.numpy()
+            for array in (
+                solver.render_positions,
+                solver.render_anisotropy,
+                solver.render_anisotropy_secondary,
+                solver.render_anisotropy_tertiary,
+            )
+        )
+        for values in outputs:
+            test.assertTrue(np.isfinite(values).all())
+        return outputs
+
+    multi_outputs = render(multi_model)
+    baseline_outputs = [render(model) for model in baseline_models]
+    worlds = multi_model.particle_world.numpy()
+
+    for world_id, expected_outputs in enumerate(baseline_outputs):
+        mask = worlds == world_id
+        test.assertTrue(np.all(expected_outputs[1][:, 3] > 1.0))
+        for actual, expected in zip(multi_outputs, expected_outputs, strict=True):
+            np.testing.assert_allclose(actual[mask], expected, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_sph_diffuse_neighbors_are_isolated(test, device):
+    dt = 1.0 / 120.0
+    world_zero = _make_particle_builder([(0.0, 0.0, 0.0)], [(1.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    world_one = _make_particle_builder([(-2.0 * dt, 0.0, 0.0)], [(3.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    model = _make_colocated_model(device, world_zero, world_one)
+    solver = SolverSPH(
+        model,
+        smoothing_length=0.1,
+        rest_density=1.0,
+        gas_constant=0.0,
+        viscosity=0.0,
+        max_diffuse_particles=2,
+        diffuse_threshold=1.0e9,
+        diffuse_spawn_probability=0.0,
+        diffuse_drag=120.0,
+        diffuse_buoyancy=1.0,
+        diffuse_ballistic=1,
+        shape_collision=False,
+        render_smoothing=0.0,
+        render_anisotropy_scale=0.0,
+    )
+    solver.diffuse_positions.assign(np.array([[dt, 0.0, 0.0, 1.0], [dt, 0.0, 0.0, 1.0]], dtype=np.float32))
+    solver.diffuse_velocities.assign(np.zeros((2, 4), dtype=np.float32))
+    solver.diffuse_worlds.assign(np.array([0, -1], dtype=np.int32))
+    solver.diffuse_slot_states.assign(np.ones(2, dtype=np.int32))
+    state_in, state_out = model.state(), model.state()
+
+    solver.step(state_in, state_out, control=None, contacts=None, dt=dt)
+
+    diffuse_v = solver.diffuse_velocities.numpy()[:, :3]
+    test.assertTrue(np.isfinite(diffuse_v).all())
+    np.testing.assert_allclose(diffuse_v[0], [1.0, 0.0, 0.0], rtol=1.0e-5, atol=1.0e-5)
+    np.testing.assert_allclose(diffuse_v[1], [2.0, 0.0, 0.0], rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_sph_diffuse_spawning_ignores_other_worlds(test, device):
+    left = _make_particle_builder([(-0.01, 0.0, 0.0)], [(-1.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    right = _make_particle_builder([(0.01, 0.0, 0.0)], [(1.0, 0.0, 0.0)], ACTIVE_FLAGS)
+    model = _make_colocated_model(device, left, right)
+    _state, solver = _step_sph(
+        model,
+        smoothing_length=0.1,
+        rest_density=1.0,
+        gas_constant=0.0,
+        viscosity=0.0,
+        max_diffuse_particles=8,
+        diffuse_threshold=0.01,
+        diffuse_spawn_probability=1.0,
+        diffuse_jitter=0.0,
+        shape_collision=False,
+        render_smoothing=0.0,
+        render_anisotropy_scale=0.0,
+    )
+
+    diffuse_positions = solver.diffuse_positions.numpy()
+    test.assertTrue(np.isfinite(diffuse_positions).all())
+    test.assertEqual(int(solver.diffuse_spawn_counter.numpy()[0]), 0)
+    test.assertEqual(int(np.count_nonzero(diffuse_positions[:, 3] > 0.0)), 0)
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -261,6 +365,9 @@ for _name in (
     "test_xpbd_multiworld_reorder_is_noop",
     "test_sph_multiworld_matches_independent_baselines",
     "test_particle_global_world_keeps_fallback_interactions",
+    "test_xpbd_render_neighbors_are_isolated",
+    "test_sph_diffuse_neighbors_are_isolated",
+    "test_sph_diffuse_spawning_ignores_other_worlds",
 ):
     add_function_test(
         TestParticleWorldFiltering,
