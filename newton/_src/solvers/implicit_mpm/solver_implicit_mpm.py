@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -66,6 +67,7 @@ from .implicit_mpm_solver_kernels import (
     make_inverse_rotate_vectors,
     make_rotate_vectors,
     mark_active_cells,
+    mark_active_cells_by_environment,
     mass_form,
     mat11,
     mat13,
@@ -79,6 +81,7 @@ from .implicit_mpm_solver_kernels import (
     strain_rhs,
     update_particle_frames,
     update_particle_strains,
+    voxel_coordinates,
 )
 
 
@@ -212,6 +215,10 @@ class ImplicitMPMScratchpad:
         self.collider_total_volumes = None
         self.collider_node_volume = None
 
+        self.velocity_environment_offsets = None
+        self.collider_environment_offsets = None
+        self.strain_environment_offsets = None
+
     def rebuild_function_spaces(
         self,
         pic: fem.PicQuadrature,
@@ -219,6 +226,7 @@ class ImplicitMPMScratchpad:
         strain_basis_str: str,
         collider_basis_str: str,
         max_cell_count: int,
+        environment_first: bool,
         temporary_store: fem.TemporaryStore,
     ):
         """Define velocity and strain function spaces over the given geometry."""
@@ -249,11 +257,13 @@ class ImplicitMPMScratchpad:
         if use_pic_collider_basis:
             self._collision_basis = _make_pic_basis_space(pic, collider_basis_str)
 
-        self._create_velocity_function_space(temporary_store, max_cell_count)
-        self._create_collider_function_space(temporary_store, max_cell_count)
-        self._create_strain_function_space(temporary_store, max_cell_count)
+        self._create_velocity_function_space(temporary_store, max_cell_count, environment_first)
+        self._create_collider_function_space(temporary_store, max_cell_count, environment_first)
+        self._create_strain_function_space(temporary_store, max_cell_count, environment_first)
 
-    def _create_velocity_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_velocity_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create velocity and fraction spaces and their partition/restriction."""
         domain = self.domain
 
@@ -269,6 +279,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_vel_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
         vel_space_restriction = fem.make_space_restriction(
@@ -277,13 +288,17 @@ class ImplicitMPMScratchpad:
 
         self._velocity_space = velocity_space
         self._vel_space_restriction = vel_space_restriction
+        self.velocity_environment_offsets = vel_space_partition.env_offsets if environment_first else None
 
-    def _create_collider_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_collider_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create collider function space and its partition/restriction."""
 
         if self._velocity_basis == self._collision_basis:
             self._collision_space = self._velocity_space
             self._collision_space_restriction = self._vel_space_restriction
+            self.collider_environment_offsets = self.velocity_environment_offsets
             return
 
         domain = self.domain
@@ -303,6 +318,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_collision_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
         collision_space_restriction = fem.make_space_restriction(
@@ -311,8 +327,11 @@ class ImplicitMPMScratchpad:
 
         self._collision_space = collision_space
         self._collision_space_restriction = collision_space_restriction
+        self.collider_environment_offsets = collision_space_partition.env_offsets if environment_first else None
 
-    def _create_strain_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_strain_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create symmetric strain space (P0 or Q1) and its partition/restriction."""
         domain = self.domain
 
@@ -330,6 +349,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_strain_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
 
@@ -339,6 +359,7 @@ class ImplicitMPMScratchpad:
 
         self._sym_strain_space = sym_strain_space
         self._strain_space_restriction = strain_space_restriction
+        self.strain_environment_offsets = strain_space_partition.env_offsets if environment_first else None
 
     def require_velocity_space_fields(self, has_compliant_particles: bool):
         velocity_basis = self._velocity_basis
@@ -633,6 +654,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     parameters and state variables (e.g. ``mpm:young_modulus``,
     ``mpm:friction``, ``mpm:particle_elastic_strain``).
 
+    By default, multi-world models use an independent FEM environment for each
+    world and therefore require every MPM particle to belong to a local world.
+    Global particles remain supported for single-world models. Set
+    :attr:`Config.separate_worlds` to ``False`` to retain the legacy shared-grid
+    topology for a multi-world model. See :ref:`implicit-mpm-worlds` for the
+    supported outer CUDA graph capture configuration.
+
     [1] https://doi.org/10.1145/2897824.2925877
 
     Args:
@@ -642,7 +670,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             allocations across steps.
         verbose: If True, enable verbose solver output. If False, suppress details. If None, enable verbose output when
             ``wp.config.log_level`` is configured for debug logging.
-        enable_timers: Enable per-section wall-clock timings.
+        enable_timers: Enable per-section wall-clock timings. This must be
+            ``False`` when :meth:`step` is recorded in an outer CUDA graph
+            because section timers synchronize the device.
+
+    Raises:
+        ValueError: If an isolated multi-world model contains global MPM
+            particles or particle world IDs outside ``[-1, model.world_count)``.
     """
 
     @dataclass
@@ -651,6 +685,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         Per-particle properties can be configured using custom attributes on the Model.
         See :meth:`SolverImplicitMPM.register_custom_attributes` for details.
+
+        Multi-world models use independent FEM environments by default. This
+        mode requires local particles, while single-world models and the legacy
+        shared-grid mode support global particles. See
+        :ref:`implicit-mpm-worlds` for outer CUDA graph capture constraints.
         """
 
         # numerics
@@ -666,7 +705,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         ``"gs-batched"`` (or ``"gauss-seidel-batched"``), ``"jacobi"``,
         ``"cg"``, ``"cr"``, ``"gmres"``.  Pass an ordered sequence to
         warmstart solvers left-to-right, e.g. ``("cr", "gs")`` or
-        ``("cg", "jacobi", "gs")``."""
+        ``("cg", "jacobi", "gs")``. Isolated multi-world outer CUDA graph
+        capture is currently validated with nonlinear ``"jacobi"``. The
+        ``"cg"``, ``"cr"``, and ``"gmres"`` paths read per-environment node
+        counts on the host and are excluded from this multi-world capture
+        configuration."""
         warmstart_mode: Literal["none", "auto", "particles", "grid", "smoothed"] = "auto"
         """Warmstart mode to use for the rheology solver."""
         collider_velocity_mode: Literal["forward", "backward"] = "forward"
@@ -677,11 +720,21 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         voxel_size: float = 0.1
         """Size of the grid voxels."""
         grid_type: Literal["sparse", "dense", "fixed"] = "sparse"
-        """Type of grid to use."""
+        """Type of grid to use.
+
+        Isolated multi-world outer CUDA graph capture requires ``"fixed"``.
+        Dense grids read dynamic bounds on the host, while sparse grids rebuild
+        NanoVDB topology outside capture.
+        """
         grid_padding: int = 0
         """Number of empty cells to add around particles when allocating the grid."""
         max_active_cell_count: int = -1
-        """Maximum number of active cells to use for active subsets of dense grids. -1 means unlimited."""
+        """Maximum active-cell capacity for dense and fixed grid subsets.
+
+        A nonnegative value fixes allocation and partition capacities and is
+        required for isolated multi-world outer CUDA graph capture. ``-1`` uses
+        an exact active count, which may require host synchronization.
+        """
         transfer_scheme: Literal["apic", "pic"] = "apic"
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
@@ -710,6 +763,14 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         velocity_basis: _MPMVelocityBasisName = "Q1"
         """Velocity basis function. Common values are ``"Q1"``, ``"B2"``,
         or ``"B3"``."""
+
+        separate_worlds: bool = True
+        """Use independent FEM environments for each world in a multi-world model.
+
+        Set to ``False`` to retain the legacy shared-grid behavior. Isolated
+        multi-world models require every MPM particle to belong to a local world.
+        See :ref:`implicit-mpm-worlds` for outer CUDA graph capture constraints.
+        """
 
     @classmethod
     def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
@@ -926,6 +987,43 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     ):
         super().__init__(model)
 
+        if model.particle_count == 0:
+            raise ValueError("SolverImplicitMPM requires at least one particle.")
+
+        self._separate_worlds = bool(config.separate_worlds and model.world_count > 1)
+        self._environment_count = model.world_count if self._separate_worlds else 1
+        self._particle_environment = model.particle_world if self._separate_worlds else None
+        self._particle_world_ranges = None
+
+        if self._separate_worlds:
+            particle_world = model.particle_world.numpy()
+            invalid_world_ids = np.unique(particle_world[(particle_world < -1) | (particle_world >= model.world_count)])
+            if invalid_world_ids.size:
+                raise ValueError(
+                    "SolverImplicitMPM cannot isolate a multi-world model containing invalid MPM particle world IDs; "
+                    f"found {invalid_world_ids.tolist()}, but IDs must be -1 (global) or in "
+                    f"[0, {model.world_count}) for model.world_count={model.world_count}."
+                )
+            if np.any(particle_world == -1):
+                raise ValueError(
+                    "SolverImplicitMPM cannot isolate a multi-world model containing global MPM particles; "
+                    "replicate the particles into each world or set Config.separate_worlds=False for legacy "
+                    "coupled behavior."
+                )
+
+            world_boundaries = np.searchsorted(particle_world, np.arange(model.world_count + 1))
+            particle_world_ranges = tuple((int(begin), int(end)) for begin, end in pairwise(world_boundaries))
+            ranges_cover_particles = world_boundaries[0] == 0 and world_boundaries[-1] == particle_world.shape[0]
+            ranges_match_worlds = all(
+                np.all(particle_world[begin:end] == world) for world, (begin, end) in enumerate(particle_world_ranges)
+            )
+            if not ranges_cover_particles or not ranges_match_worlds:
+                raise ValueError(
+                    "SolverImplicitMPM requires MPM particles to be stored contiguously by world when "
+                    "Config.separate_worlds=True."
+                )
+            self._particle_world_ranges = particle_world_ranges
+
         self._mpm_model = ImplicitMPMModel(model, config)
 
         self.max_iterations = config.max_iterations
@@ -1000,6 +1098,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         body_mass: wp.array | None = None,
         body_inv_inertia: wp.array | None = None,
         body_q: wp.array | None = None,
+        *,
+        collider_world_ids: list[int] | None = None,
     ) -> None:
         """Configure collider geometry and material properties.
 
@@ -1014,12 +1114,27 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             collider_friction: Per-mesh Coulomb friction coefficients.
             collider_adhesion: Per-mesh adhesion (Pa).
             collider_projection_threshold: Per-mesh projection threshold (m).
-            collider_particle_ids: For deformable mesh colliders, model particle ids corresponding to each mesh vertex.
+            collider_particle_ids: For deformable mesh colliders, solver-model particle IDs corresponding to each
+                mesh vertex. These IDs cannot be combined with an external ``model``. In isolated multi-world mode,
+                every ID must belong to the collider's local world; global deformable colliders are rejected.
             model: The model to read collider properties from. Default to solver's model.
             body_com: For dynamic colliders, per-body center of mass.
-            body_mass: For dynamic colliders, per-body mass. Pass zeros for kinematic bodies.
+            body_mass: For dynamic colliders, per-body effective mass. When omitted, bodies flagged
+                with :attr:`newton.BodyFlags.KINEMATIC` have zero effective mass. An explicit array
+                is authoritative.
             body_inv_inertia: For dynamic colliders, per-body inverse inertia.
             body_q: For dynamic colliders, per-body initial transform.
+            collider_world_ids: Per-collider Newton world IDs. Custom meshes default to global
+                (``-1``). In isolated mode, body-backed colliders infer their body's world and
+                require any supplied ID to match. Shared-mode default discovery globalizes
+                colliders. IDs must be ``-1`` or in ``[0, model.world_count)``.
+
+        Raises:
+            ValueError: If collider-aligned inputs have different lengths, a world ID is invalid, an isolated external
+                collider model has a different ``world_count``, an isolated global body-backed collider is dynamic,
+                or deformable collider particle ownership cannot be mapped safely to the solver model and world.
+                Replicate a global dynamic collider per world, make it static or kinematic, or disable
+                ``Config.separate_worlds``.
         """
         self._mpm_model.setup_collider(
             collider_meshes=collider_meshes,
@@ -1034,6 +1149,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             body_mass=body_mass,
             body_inv_inertia=body_inv_inertia,
             body_q=body_q,
+            collider_world_ids=collider_world_ids,
         )
 
         self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
@@ -1062,7 +1178,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         Transfers particle data to the grid, solves the implicit rheology
         system, and transfers the result back to update particle positions,
-        velocities, and stress.
+        velocities, and stress. See :ref:`implicit-mpm-worlds` for supported
+        outer CUDA graph capture configurations and replay invariants.
 
         Args:
             state_in: Input state at the start of the step.
@@ -1378,6 +1495,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 state_in.mpm.particle_qd_grad,
                 self._mpm_model.particle_flags,
                 self.model.particle_mass,
+                self._particle_environment,
                 self._mpm_model.collider,
                 state_in.body_q,
                 state_in.body_qd if self.collider_velocity_mode == "forward" else None,
@@ -1455,7 +1573,16 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             dt: Time step duration.
         """
 
-        return update_render_grains(state_prev, state, grains, self._mpm_model.particle_radius, dt)
+        with wp.ScopedDevice(grains.device):
+            return update_render_grains(
+                state_prev,
+                state,
+                grains,
+                self._mpm_model.particle_radius,
+                dt,
+                particle_environment=self._particle_environment,
+                temporary_store=self.temporary_store,
+            )
 
     def _allocate_grid(
         self,
@@ -1483,8 +1610,22 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """
         with self._timer("Allocate grid"):
             if self.grid_type == "sparse":
-                volume = allocate_by_voxels(positions, voxel_size, padding_voxels=padding_voxels)
-                grid = fem.Nanogrid(volume, temporary_store=temporary_store)
+                if self._separate_worlds:
+                    cell_ijks = [
+                        voxel_coordinates(positions[begin:end], voxel_size, padding_voxels=padding_voxels)
+                        if begin != end
+                        else wp.empty(0, dtype=wp.vec3i, device=positions.device)
+                        for begin, end in self._particle_world_ranges
+                    ]
+                    grid = fem.Nanogrid.from_environment_voxels(
+                        cell_ijks,
+                        voxel_size=voxel_size,
+                        temporary_store=temporary_store,
+                        device=positions.device,
+                    )
+                else:
+                    volume = allocate_by_voxels(positions, voxel_size, padding_voxels=padding_voxels)
+                    grid = fem.Nanogrid(volume, temporary_store=temporary_store)
             else:
                 # Compute bounds and transfer to host
                 device = positions.device
@@ -1525,6 +1666,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     bounds_lo=wp.vec3(grid_min * voxel_size),
                     bounds_hi=wp.vec3(grid_max * voxel_size),
                     res=wp.vec3i((grid_max - grid_min).astype(int)),
+                    env_count=self._environment_count,
                 )
 
         return grid
@@ -1536,15 +1678,26 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         active_cells = fem.borrow_temporary(self.temporary_store, shape=grid.cell_count(), dtype=int)
         active_cells.zero_()
-        fem.interpolate(
-            mark_active_cells,
-            dim=positions.shape[0],
-            at=fem.Cells(grid),
-            values={
+        if self._separate_worlds:
+            active_cell_integrand = mark_active_cells_by_environment
+            active_cell_values = {
+                "positions": positions,
+                "particle_flags": particle_flags,
+                "particle_environment": self._particle_environment,
+                "active_cells": active_cells,
+            }
+        else:
+            active_cell_integrand = mark_active_cells
+            active_cell_values = {
                 "positions": positions,
                 "particle_flags": particle_flags,
                 "active_cells": active_cells,
-            },
+            }
+        fem.interpolate(
+            active_cell_integrand,
+            dim=positions.shape[0],
+            at=fem.Cells(grid),
+            values=active_cell_values,
             temporary_store=self.temporary_store,
         )
 
@@ -1579,6 +1732,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 velocity_basis_str=self.velocity_basis,
                 collider_basis_str=self.collider_basis,
                 max_cell_count=self.max_active_cell_count,
+                environment_first=self._separate_worlds,
                 temporary_store=self.temporary_store,
             )
 
@@ -1628,63 +1782,33 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
             if self.gimp:
                 particle_locations = self._particle_grid_locations_gimp(
-                    domain, positions, self._mpm_model.particle_radius
+                    domain, positions, self._mpm_model.particle_radius, self._particle_environment
+                )
+                pic = fem.PicQuadrature(
+                    domain=domain,
+                    positions=particle_locations,
+                    measures=self._mpm_model.particle_volume,
+                    temporary_store=self.temporary_store,
+                    use_domain_element_indices=True,
                 )
             else:
-                particle_locations = self._particle_grid_locations(domain, positions)
-
-            pic = fem.PicQuadrature(
-                domain=domain,
-                positions=particle_locations,
-                measures=self._mpm_model.particle_volume,
-                temporary_store=self.temporary_store,
-                use_domain_element_indices=True,
-            )
+                pic = fem.PicQuadrature(
+                    domain=domain,
+                    positions=positions,
+                    env_indices=self._particle_environment,
+                    measures=self._mpm_model.particle_volume,
+                    temporary_store=self.temporary_store,
+                    use_domain_element_indices=True,
+                )
 
         return pic
 
-    def _particle_grid_locations(self, domain: fem.GeometryDomain, positions: wp.array) -> wp.array:
-        """Convert particle positions to grid locations."""
-
-        cell_lookup = domain.element_partition_lookup
-
-        @fem.cache.dynamic_kernel(suffix=domain.name)
-        def particle_locations(
-            cell_arg_value: domain.ElementArg,
-            domain_index_arg_value: domain.ElementIndexArg,
-            positions: wp.array[wp.vec3],
-            cell_index: wp.array[fem.ElementIndex],
-            cell_coords: wp.array[fem.Coords],
-        ):
-            p = wp.tid()
-            domain_arg = domain.DomainArg(cell_arg_value, domain_index_arg_value)
-
-            sample = cell_lookup(domain_arg, positions[p])
-
-            cell_index[p] = domain.element_partition_index(domain_index_arg_value, sample.element_index)
-            cell_coords[p] = sample.element_coords
-
-        device = positions.device
-
-        cell_indices = fem.borrow_temporary(self.temporary_store, shape=positions.shape[0], dtype=fem.ElementIndex)
-        cell_coords = fem.borrow_temporary(self.temporary_store, shape=positions.shape[0], dtype=fem.Coords)
-        wp.launch(
-            particle_locations,
-            dim=positions.shape[0],
-            inputs=[
-                domain.element_arg_value(device=device),
-                domain.element_index_arg_value(device=device),
-                positions,
-                cell_indices,
-                cell_coords,
-            ],
-            device=device,
-        )
-
-        return cell_indices, cell_coords
-
     def _particle_grid_locations_gimp(
-        self, domain: fem.GeometryDomain, positions: wp.array, radii: wp.array
+        self,
+        domain: fem.GeometryDomain,
+        positions: wp.array,
+        radii: wp.array,
+        particle_environment: wp.array | None,
     ) -> wp.array:
         """Convert particle positions to grid locations."""
 
@@ -1711,12 +1835,15 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     particle_cell_fractions[i] += cell_weight
                     return
 
-        @fem.cache.dynamic_kernel(suffix=domain.name)
+        separate_worlds = self._separate_worlds
+
+        @fem.cache.dynamic_kernel(suffix=f"{domain.name}_{'isolated' if separate_worlds else 'shared'}")
         def particle_locations_gimp(
             cell_arg_value: domain.ElementArg,
             domain_index_arg_value: domain.ElementIndexArg,
             positions: wp.array[wp.vec3],
             radii: wp.array[float],
+            particle_environment: wp.array[int],
             cell_index: wp.array2d[fem.ElementIndex],
             cell_coords: wp.array2d[fem.Coords],
             cell_fractions: wp.array2d[float],
@@ -1737,7 +1864,10 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 k = vtx & 1
 
                 pos = center - wp.vec3(radius) + 2.0 * radius * wp.vec3(float(i), float(j), float(k))
-                sample = cell_lookup(domain_arg, pos)
+                if wp.static(separate_worlds):
+                    sample = cell_lookup(domain_arg, pos, int(particle_environment[p]))
+                else:
+                    sample = cell_lookup(domain_arg, pos)
 
                 if sample.element_index == fem.NULL_ELEMENT_INDEX:
                     continue
@@ -1778,6 +1908,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 domain.element_index_arg_value(device=device),
                 positions,
                 radii,
+                particle_environment,
                 cell_indices,
                 cell_coords,
                 cell_fractions,
@@ -1968,6 +2099,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 scratch.collider_adhesion,
                 scratch.collider_ids,
                 temporary_store=self.temporary_store,
+                node_environment_offsets=scratch.collider_environment_offsets,
             )
 
             # normal interpolation
@@ -2416,6 +2548,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 elastic_strain_delta=scratch.elastic_strain_delta_field.dof_values,
                 plastic_strain_delta=scratch.plastic_strain_delta_field.dof_values,
                 stress=scratch.stress_field.dof_values,
+                strain_environment_offsets=scratch.strain_environment_offsets,
                 has_viscosity=self._mpm_model.has_viscosity,
                 has_dilatancy=self._mpm_model.has_dilatancy,
                 strain_velocity_node_count=self._velocity_nodes_per_strain_sample,

@@ -266,6 +266,68 @@ While :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.e
    world_count: 4
 
 
+.. _implicit-mpm-worlds:
+
+Implicit MPM worlds
+~~~~~~~~~~~~~~~~~~~
+
+For models with more than one world, :class:`~newton.solvers.SolverImplicitMPM`
+uses independent Warp FEM environments by default. Worlds can occupy identical
+physics-space coordinates without sharing grid mass, momentum, stress, or
+collider response. Set ``SolverImplicitMPM.Config.separate_worlds = False`` to
+restore the legacy shared FEM topology.
+
+Every MPM particle in an isolated multi-world model must belong to a local
+world; global MPM particles are rejected. In this mode, world-local colliders
+affect only their assigned world, and body-backed colliders inherit their
+body's world. Global static colliders and global colliders backed by bodies
+marked :attr:`~newton.BodyFlags.KINEMATIC` affect every world. A global
+collider backed by a dynamic body is rejected and must instead use replicated
+or otherwise world-local bodies. Custom meshes passed to
+:meth:`~newton.solvers.SolverImplicitMPM.setup_collider` are global by default;
+use ``collider_world_ids`` to assign them to specific worlds.
+
+Dense and fixed grids use common physical bounds for all environments. Prefer
+a sparse grid for heterogeneous or physically separated particle bounds so
+each environment allocates only its active voxels.
+
+An isolated multi-world step can be captured in an outer CUDA graph when all of
+the following conditions hold:
+
+- The CUDA device supports conditional graph nodes, and its memory pool is
+  supported and enabled.
+- Construct :class:`~newton.solvers.SolverImplicitMPM` with
+  ``enable_timers=False``. Section timers synchronize the device and therefore
+  cannot run during outer capture.
+- ``SolverImplicitMPM.Config.separate_worlds`` is ``True``.
+- ``SolverImplicitMPM.Config.grid_type`` is ``"fixed"``. The grid bounds are
+  created before capture and remain fixed across replays.
+- ``SolverImplicitMPM.Config.max_active_cell_count`` is nonnegative and large
+  enough for every replay. This gives the active grid and FEM partitions fixed
+  capacities while allowing their active subsets to change.
+- ``SolverImplicitMPM.Config.solver`` is ``"jacobi"``, the nonlinear path
+  validated for isolated multi-world outer capture.
+- The installed Warp artifact contains capture-safe fixed-capacity environment
+  partitions, as tracked by `NVIDIA/warp#1407
+  <https://github.com/NVIDIA/warp/issues/1407>`__.
+
+Model topology, world and particle assignments, array shapes, fixed-grid
+bounds, active-cell capacity, solver configuration, and captured step arguments
+must remain unchanged across replays. Particle state, active cells, and
+per-environment partition offsets may change within those fixed structures. If
+the application alternates two state buffers, capture the complete alternation
+and replay it as one graph; otherwise, recapture after changing a structural
+input, capacity, state-buffer sequence, or time step.
+
+Dense grids are excluded because their bounds are recomputed through a host
+read on every step. Sparse grids are excluded because they rebuild NanoVDB
+topology outside capture. The ``"cg"``, ``"cr"``, and ``"gmres"`` Krylov paths
+are also excluded from isolated multi-world capture because their batched
+tolerance scaling reads per-environment node counts on the host. Their
+single-world result-reporting path does not have this limitation. Other
+nonlinear solver choices are not part of the currently validated outer-capture
+configuration.
+
 .. _Per-world gravity:
 
 Per-World Gravity
