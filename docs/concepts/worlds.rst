@@ -266,6 +266,31 @@ While :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.e
    world_count: 4
 
 
+Implicit MPM worlds
+~~~~~~~~~~~~~~~~~~~
+
+For models with more than one world, :class:`~newton.solvers.SolverImplicitMPM`
+uses independent Warp FEM environments by default. Worlds can occupy identical
+physics-space coordinates without sharing grid mass, momentum, stress, or
+collider response. Set ``SolverImplicitMPM.Config.separate_worlds = False`` to
+restore the legacy shared FEM topology.
+
+Every MPM particle in an isolated multi-world model must belong to a local
+world; global MPM particles are rejected. In this mode, world-local colliders
+affect only their assigned world, and body-backed colliders inherit their
+body's world. Global static colliders and global colliders backed by bodies
+marked :attr:`~newton.BodyFlags.KINEMATIC` affect every world. A global
+collider backed by a dynamic body is rejected and must instead use replicated
+or otherwise world-local bodies. Custom meshes passed to
+:meth:`~newton.solvers.SolverImplicitMPM.setup_collider` are global by default;
+use ``collider_world_ids`` to assign them to specific worlds.
+
+Dense and fixed grids use common physical bounds for all environments. Prefer
+a sparse grid for heterogeneous or physically separated particle bounds so
+each environment allocates only its active voxels. Sparse NanoVDB
+reconstruction remains outside CUDA graph capture.
+
+
 .. _Per-world gravity:
 
 Per-World Gravity
