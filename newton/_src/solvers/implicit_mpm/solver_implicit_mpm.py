@@ -61,6 +61,7 @@ from .implicit_mpm_solver_kernels import (
     make_inverse_rotate_vectors,
     make_rotate_vectors,
     mark_active_cells,
+    mark_active_cells_by_environment,
     mass_form,
     mat11,
     mat13,
@@ -207,6 +208,10 @@ class ImplicitMPMScratchpad:
         self.collider_total_volumes = None
         self.collider_node_volume = None
 
+        self.velocity_environment_offsets = None
+        self.collider_environment_offsets = None
+        self.strain_environment_offsets = None
+
     def rebuild_function_spaces(
         self,
         pic: fem.PicQuadrature,
@@ -214,6 +219,7 @@ class ImplicitMPMScratchpad:
         strain_basis_str: str,
         collider_basis_str: str,
         max_cell_count: int,
+        environment_first: bool,
         temporary_store: fem.TemporaryStore,
     ):
         """Define velocity and strain function spaces over the given geometry."""
@@ -244,11 +250,13 @@ class ImplicitMPMScratchpad:
         if use_pic_collider_basis:
             self._collision_basis = _make_pic_basis_space(pic, collider_basis_str)
 
-        self._create_velocity_function_space(temporary_store, max_cell_count)
-        self._create_collider_function_space(temporary_store, max_cell_count)
-        self._create_strain_function_space(temporary_store, max_cell_count)
+        self._create_velocity_function_space(temporary_store, max_cell_count, environment_first)
+        self._create_collider_function_space(temporary_store, max_cell_count, environment_first)
+        self._create_strain_function_space(temporary_store, max_cell_count, environment_first)
 
-    def _create_velocity_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_velocity_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create velocity and fraction spaces and their partition/restriction."""
         domain = self.domain
 
@@ -264,6 +272,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_vel_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
         vel_space_restriction = fem.make_space_restriction(
@@ -272,13 +281,17 @@ class ImplicitMPMScratchpad:
 
         self._velocity_space = velocity_space
         self._vel_space_restriction = vel_space_restriction
+        self.velocity_environment_offsets = vel_space_partition.env_offsets if environment_first else None
 
-    def _create_collider_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_collider_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create collider function space and its partition/restriction."""
 
         if self._velocity_basis == self._collision_basis:
             self._collision_space = self._velocity_space
             self._collision_space_restriction = self._vel_space_restriction
+            self.collider_environment_offsets = self.velocity_environment_offsets
             return
 
         domain = self.domain
@@ -298,6 +311,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_collision_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
         collision_space_restriction = fem.make_space_restriction(
@@ -306,8 +320,11 @@ class ImplicitMPMScratchpad:
 
         self._collision_space = collision_space
         self._collision_space_restriction = collision_space_restriction
+        self.collider_environment_offsets = collision_space_partition.env_offsets if environment_first else None
 
-    def _create_strain_function_space(self, temporary_store: fem.TemporaryStore, max_cell_count: int = -1):
+    def _create_strain_function_space(
+        self, temporary_store: fem.TemporaryStore, max_cell_count: int, environment_first: bool
+    ):
         """Create symmetric strain space (P0 or Q1) and its partition/restriction."""
         domain = self.domain
 
@@ -325,6 +342,7 @@ class ImplicitMPMScratchpad:
             geometry_partition=domain.geometry_partition,
             with_halo=False,
             max_node_count=max_strain_node_count,
+            environment_first=environment_first,
             temporary_store=temporary_store,
         )
 
@@ -334,6 +352,7 @@ class ImplicitMPMScratchpad:
 
         self._sym_strain_space = sym_strain_space
         self._strain_space_restriction = strain_space_restriction
+        self.strain_environment_offsets = strain_space_partition.env_offsets if environment_first else None
 
     def require_velocity_space_fields(self, has_compliant_particles: bool):
         velocity_basis = self._velocity_basis
@@ -1312,6 +1331,7 @@ class SolverImplicitMPM(SolverBase):
                     bounds_lo=wp.vec3(grid_min * voxel_size),
                     bounds_hi=wp.vec3(grid_max * voxel_size),
                     res=wp.vec3i((grid_max - grid_min).astype(int)),
+                    env_count=self._environment_count,
                 )
 
         return grid
@@ -1323,15 +1343,26 @@ class SolverImplicitMPM(SolverBase):
 
         active_cells = fem.borrow_temporary(self.temporary_store, shape=grid.cell_count(), dtype=int)
         active_cells.zero_()
-        fem.interpolate(
-            mark_active_cells,
-            dim=positions.shape[0],
-            at=fem.Cells(grid),
-            values={
+        if self._separate_worlds:
+            active_cell_integrand = mark_active_cells_by_environment
+            active_cell_values = {
+                "positions": positions,
+                "particle_flags": particle_flags,
+                "particle_environment": self._particle_environment,
+                "active_cells": active_cells,
+            }
+        else:
+            active_cell_integrand = mark_active_cells
+            active_cell_values = {
                 "positions": positions,
                 "particle_flags": particle_flags,
                 "active_cells": active_cells,
-            },
+            }
+        fem.interpolate(
+            active_cell_integrand,
+            dim=positions.shape[0],
+            at=fem.Cells(grid),
+            values=active_cell_values,
             temporary_store=self.temporary_store,
         )
 
@@ -1366,6 +1397,7 @@ class SolverImplicitMPM(SolverBase):
                 velocity_basis_str=self.velocity_basis,
                 collider_basis_str=self.collider_basis,
                 max_cell_count=self.max_active_cell_count,
+                environment_first=self._separate_worlds,
                 temporary_store=self.temporary_store,
             )
 
@@ -1415,63 +1447,33 @@ class SolverImplicitMPM(SolverBase):
 
             if self.gimp:
                 particle_locations = self._particle_grid_locations_gimp(
-                    domain, positions, self._mpm_model.particle_radius
+                    domain, positions, self._mpm_model.particle_radius, self._particle_environment
+                )
+                pic = fem.PicQuadrature(
+                    domain=domain,
+                    positions=particle_locations,
+                    measures=self._mpm_model.particle_volume,
+                    temporary_store=self.temporary_store,
+                    use_domain_element_indices=True,
                 )
             else:
-                particle_locations = self._particle_grid_locations(domain, positions)
-
-            pic = fem.PicQuadrature(
-                domain=domain,
-                positions=particle_locations,
-                measures=self._mpm_model.particle_volume,
-                temporary_store=self.temporary_store,
-                use_domain_element_indices=True,
-            )
+                pic = fem.PicQuadrature(
+                    domain=domain,
+                    positions=positions,
+                    env_indices=self._particle_environment,
+                    measures=self._mpm_model.particle_volume,
+                    temporary_store=self.temporary_store,
+                    use_domain_element_indices=True,
+                )
 
         return pic
 
-    def _particle_grid_locations(self, domain: fem.GeometryDomain, positions: wp.array) -> wp.array:
-        """Convert particle positions to grid locations."""
-
-        cell_lookup = domain.element_partition_lookup
-
-        @fem.cache.dynamic_kernel(suffix=domain.name)
-        def particle_locations(
-            cell_arg_value: domain.ElementArg,
-            domain_index_arg_value: domain.ElementIndexArg,
-            positions: wp.array[wp.vec3],
-            cell_index: wp.array[fem.ElementIndex],
-            cell_coords: wp.array[fem.Coords],
-        ):
-            p = wp.tid()
-            domain_arg = domain.DomainArg(cell_arg_value, domain_index_arg_value)
-
-            sample = cell_lookup(domain_arg, positions[p])
-
-            cell_index[p] = domain.element_partition_index(domain_index_arg_value, sample.element_index)
-            cell_coords[p] = sample.element_coords
-
-        device = positions.device
-
-        cell_indices = fem.borrow_temporary(self.temporary_store, shape=positions.shape[0], dtype=fem.ElementIndex)
-        cell_coords = fem.borrow_temporary(self.temporary_store, shape=positions.shape[0], dtype=fem.Coords)
-        wp.launch(
-            particle_locations,
-            dim=positions.shape[0],
-            inputs=[
-                domain.element_arg_value(device=device),
-                domain.element_index_arg_value(device=device),
-                positions,
-                cell_indices,
-                cell_coords,
-            ],
-            device=device,
-        )
-
-        return cell_indices, cell_coords
-
     def _particle_grid_locations_gimp(
-        self, domain: fem.GeometryDomain, positions: wp.array, radii: wp.array
+        self,
+        domain: fem.GeometryDomain,
+        positions: wp.array,
+        radii: wp.array,
+        particle_environment: wp.array | None,
     ) -> wp.array:
         """Convert particle positions to grid locations."""
 
@@ -1498,12 +1500,15 @@ class SolverImplicitMPM(SolverBase):
                     particle_cell_fractions[i] += cell_weight
                     return
 
-        @fem.cache.dynamic_kernel(suffix=domain.name)
+        separate_worlds = self._separate_worlds
+
+        @fem.cache.dynamic_kernel(suffix=f"{domain.name}_{'isolated' if separate_worlds else 'shared'}")
         def particle_locations_gimp(
             cell_arg_value: domain.ElementArg,
             domain_index_arg_value: domain.ElementIndexArg,
             positions: wp.array[wp.vec3],
             radii: wp.array[float],
+            particle_environment: wp.array[int],
             cell_index: wp.array2d[fem.ElementIndex],
             cell_coords: wp.array2d[fem.Coords],
             cell_fractions: wp.array2d[float],
@@ -1524,7 +1529,10 @@ class SolverImplicitMPM(SolverBase):
                 k = vtx & 1
 
                 pos = center - wp.vec3(radius) + 2.0 * radius * wp.vec3(float(i), float(j), float(k))
-                sample = cell_lookup(domain_arg, pos)
+                if wp.static(separate_worlds):
+                    sample = cell_lookup(domain_arg, pos, int(particle_environment[p]))
+                else:
+                    sample = cell_lookup(domain_arg, pos)
 
                 if sample.element_index == fem.NULL_ELEMENT_INDEX:
                     continue
@@ -1565,6 +1573,7 @@ class SolverImplicitMPM(SolverBase):
                 domain.element_index_arg_value(device=device),
                 positions,
                 radii,
+                particle_environment,
                 cell_indices,
                 cell_coords,
                 cell_fractions,
