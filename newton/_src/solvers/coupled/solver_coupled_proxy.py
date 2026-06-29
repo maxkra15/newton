@@ -769,8 +769,29 @@ class SolverCoupledProxy(SolverCoupled):
     def _after_entries_constructed(self) -> None:
         self._refresh_proxy_view_maps()
         self._validate_in_place_proxy_entries()
+        self._validate_proxy_collision_providers()
         self._apply_proxy_effective_masses()
         self._init_proxy_collision_pipelines()
+
+    def _validate_proxy_collision_providers(self) -> None:
+        """Reject ambiguous destination contact provider configurations."""
+        entry_provider_sources: dict[str, set[str]] = {}
+        for source, destination in self._proxy_groups:
+            if self._entries[destination].collision_pipeline is not None:
+                entry_provider_sources.setdefault(destination, set()).add(source)
+        for destination, sources in entry_provider_sources.items():
+            if len(sources) > 1:
+                raise ValueError(
+                    f"Proxy destination {destination!r} cannot use one entry collision pipeline "
+                    f"with multiple proxy sources: {sorted(sources)}"
+                )
+
+        for source, destination in self._proxy_collision_configs:
+            if self._entries[destination].collision_pipeline is not None:
+                raise ValueError(
+                    f"Proxy direction {source!r} to {destination!r} cannot configure both an entry "
+                    "collision pipeline and a Proxy collision pipeline"
+                )
 
     def _refresh_proxy_view_maps(self) -> None:
         """Remap dense proxy maps to the source/destination view layouts."""
@@ -1425,6 +1446,13 @@ class SolverCoupledProxy(SolverCoupled):
                 self._distribute_state(state_in, dt=dt, iteration_restart=True)
             self._step_proxy(state_in, control, contacts, dt, iteration_restart=k > 0)
 
+    def _refresh_entry_collision_pipelines(self) -> None:
+        """Defer destination providers until their proxy state has been synchronized."""
+        proxy_destinations = {destination for _, destination in self._proxy_groups}
+        for entry in self._entries.values():
+            if entry.name not in proxy_destinations:
+                self._refresh_entry_collision_pipeline(entry)
+
     def _reset_aitken_iteration_state(self) -> None:
         for proxy in [*self._proxy_mappings, *self._proxy_particle_mappings]:
             if int(proxy.proxy_relaxation_mode) != int(_ProxyRelaxationMode.AITKEN):
@@ -1587,6 +1615,13 @@ class SolverCoupledProxy(SolverCoupled):
                 dst_contacts, contacts_freshly_detected = self._proxy_collision_contacts(
                     collision_config, dst.state_0, iteration_restart=iteration_restart
                 )
+                filter_dst_contacts = False
+            elif dst.collision_pipeline is not None:
+                if iteration_restart:
+                    contacts_freshly_detected = False
+                else:
+                    contacts_freshly_detected = self._refresh_entry_collision_pipeline(dst)
+                dst_contacts = dst.collision_contacts
                 filter_dst_contacts = False
 
             restore_external_contacts = None

@@ -122,6 +122,10 @@ class SolverEntry:
     has_particle_force_input: bool = False
     body_gravity_acceleration: wp.array[wp.vec3] | None = None
     particle_gravity_acceleration: wp.array[wp.vec3] | None = None
+    collision_pipeline: object | None = None
+    collision_contacts: Contacts | None = None
+    collide_interval: int = 1
+    collide_counter: int = 0
 
 
 class SolverCoupled(SolverBase, CouplingInterface):
@@ -170,6 +174,10 @@ class SolverCoupled(SolverBase, CouplingInterface):
             in_place: Whether the sub-solver may step in-place.
             preserve_shape_ids: Whether shape ids remain in the parent model
                 namespace instead of being compacted.
+            collision_pipeline: Optional factory for an entry-local collision
+                provider constructed from the finalized entry view.
+            collide_interval: Outer coupled-step interval between entry-local
+                collision refreshes. ``None`` means every step.
         """
 
         name: str
@@ -182,6 +190,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
         substeps: int = 1
         in_place: bool = False
         preserve_shape_ids: bool = True
+        collision_pipeline: Callable[[ModelView], object | None] | None = None
+        collide_interval: int | None = None
 
     def __init__(
         self,
@@ -320,6 +330,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                     preserve_shape_ids=bool(cfg.preserve_shape_ids),
                 )
             self._filter_shape_contact_pairs(view)
+            collision_pipeline, collision_contacts, collide_interval = self._build_entry_collision_pipeline(cfg, view)
 
             index_maps = self._build_entry_index_maps(view, index_lists)
             body_dynamics_disabled_local_indices = self._global_indices_to_local_array(
@@ -357,6 +368,9 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 joint_dof_global_to_local=index_maps.joint_dof_global_to_local,
                 preserve_shape_ids=bool(cfg.preserve_shape_ids),
                 in_place=bool(cfg.in_place),
+                collision_pipeline=collision_pipeline,
+                collision_contacts=collision_contacts,
+                collide_interval=collide_interval,
             )
 
         self._after_entries_constructed()
@@ -371,6 +385,38 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 entry.state_tmp = entry.view.state()
 
         self._after_entry_states_created()
+
+    def _build_entry_collision_pipeline(
+        self,
+        cfg: SolverCoupled.Entry,
+        view: ModelView,
+    ) -> tuple[object | None, Contacts | None, int]:
+        """Construct one entry-local collision provider from its finalized view."""
+        factory = cfg.collision_pipeline
+        if factory is None:
+            if cfg.collide_interval is not None:
+                raise ValueError(
+                    f"SolverCoupled.Entry {cfg.name!r} collide_interval requires a collision_pipeline factory"
+                )
+            return None, None, 1
+        if not callable(factory):
+            raise TypeError(f"SolverCoupled.Entry {cfg.name!r} collision_pipeline must be callable")
+
+        collide_interval = 1 if cfg.collide_interval is None else int(cfg.collide_interval)
+        if collide_interval < 1:
+            raise ValueError(f"SolverCoupled.Entry {cfg.name!r} collide_interval must be >= 1")
+
+        pipeline = factory(view)
+        if pipeline is None:
+            return None, None, collide_interval
+        contacts = getattr(pipeline, "contacts", None)
+        collide = getattr(pipeline, "collide", None)
+        if not callable(contacts) or not callable(collide):
+            raise TypeError(
+                f"SolverCoupled.Entry {cfg.name!r} collision_pipeline factory must return "
+                "an object with contacts() and collide()"
+            )
+        return pipeline, contacts(), collide_interval
 
     def _joint_state_indices(self, joints: Sequence[int]) -> tuple[wp.array, wp.array]:
         model = self.model
@@ -1892,14 +1938,31 @@ class SolverCoupled(SolverBase, CouplingInterface):
 
     @property
     def supports_cuda_graph_capture(self) -> bool:
-        """Return whether every coupled entry supports CUDA graph capture."""
-        return all(entry.solver.supports_cuda_graph_capture for entry in self._entries.values())
+        """Return whether every coupled entry and collision provider supports CUDA graph capture."""
+        return all(
+            entry.solver.supports_cuda_graph_capture
+            and (
+                entry.collision_pipeline is None
+                or (
+                    entry.collide_interval == 1
+                    and bool(getattr(entry.collision_pipeline, "supports_cuda_graph_capture", True))
+                )
+            )
+            for entry in self._entries.values()
+        )
 
     def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
         """Prepare entry contact buffers and recursively prepare sub-solvers."""
         self.prepare_contacts(contacts)
         for entry in self._entries.values():
-            entry.solver.prepare_cuda_graph_capture(self.entry_contacts(entry.name, contacts))
+            if entry.collision_pipeline is not None:
+                prepare_pipeline = getattr(entry.collision_pipeline, "prepare_cuda_graph_capture", None)
+                if callable(prepare_pipeline):
+                    prepare_pipeline()
+                entry_contacts = entry.collision_contacts
+            else:
+                entry_contacts = self.entry_contacts(entry.name, contacts)
+            entry.solver.prepare_cuda_graph_capture(entry_contacts)
 
     def step(
         self,
@@ -1917,6 +1980,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
         contacts) own their own buffers internally.
         """
         self._distribute_state(state_in, dt=dt)
+        self._refresh_entry_collision_pipelines()
         self._step_coupled(state_in, state_out, control, contacts, dt)
         _copy_state(state_in, state_out)
         self._reconcile_state(state_out)
@@ -1954,6 +2018,30 @@ class SolverCoupled(SolverBase, CouplingInterface):
         for contacts in self._entry_contact_buffers.values():
             contacts.clear(bump_generation=True)
         self._entry_contact_sources.clear()
+        for entry in self._entries.values():
+            entry.collide_counter = 0
+            if entry.collision_contacts is not None:
+                clear_contacts = getattr(entry.collision_contacts, "clear", None)
+                if callable(clear_contacts):
+                    clear_contacts(bump_generation=True)
+
+    def _refresh_entry_collision_pipeline(self, entry: SolverEntry) -> bool:
+        """Refresh one entry collision buffer according to its outer-step cadence."""
+        if entry.collision_pipeline is None:
+            return False
+        if entry.state_0 is None:
+            raise RuntimeError(f"SolverCoupled.Entry {entry.name!r} is missing its input state")
+
+        contacts_freshly_detected = entry.collide_counter % entry.collide_interval == 0
+        if contacts_freshly_detected:
+            entry.collision_pipeline.collide(entry.state_0, entry.collision_contacts)
+        entry.collide_counter += 1
+        return contacts_freshly_detected
+
+    def _refresh_entry_collision_pipelines(self) -> None:
+        """Refresh configured entry collision providers once per coupled step."""
+        for entry in self._entries.values():
+            self._refresh_entry_collision_pipeline(entry)
 
     def _rebuild_entry_solver_state_caches(self) -> None:
         """Refresh optional sub-solver spatial caches from reset entry states."""
@@ -2222,7 +2310,10 @@ class SolverCoupled(SolverBase, CouplingInterface):
     ) -> Contacts | None:
         """Step one sub-solver entry, honoring its local substep count."""
         if filter_contacts:
-            contacts = self._contacts_for_entry(entry, contacts)
+            if entry.collision_pipeline is not None:
+                contacts = entry.collision_contacts
+            else:
+                contacts = self._contacts_for_entry(entry, contacts)
         control = _copy_control_to_entry(control, entry)
         if control_callback is not None:
             control_callback(control)
