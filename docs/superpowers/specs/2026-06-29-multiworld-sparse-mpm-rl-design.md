@@ -56,7 +56,7 @@ dirty checkouts.
 | Repository | Integration branch | Base | Inputs |
 |---|---|---|---|
 | Warp | `max/warp-max` | `origin/main` at `b8596fd51` | `max/capture-environment-partition` at `675c15b7f`; `max/s2-rebuildable-edge-grid` at `2eb92885e` |
-| Newton | `max/newton-max` | `origin/main` at `49ca73b9` | `max/coupled-public-apis` at `8a896239`; `max/implicit-mpm-cuda-graph` at `d61ea124`; `sparse-rebuildable` at `a8601c24` |
+| Newton | `max/newton-max` | `origin/main` at `49ca73b9` | `max/coupled-public-apis` at `9d70911e`; `max/implicit-mpm-cuda-graph` at `d61ea124`; `sparse-rebuildable` at `a8601c24` |
 | IsaacLab | `max/franka-pour-multiworld-mpm` | committed `max/newton-coupling-manager` at `80d2b8b42b` | selected uncommitted Franka Pour task files from the dirty coupling checkout, plus the final immutable Newton/Warp revisions |
 
 `max/newton-max` is an integration branch, not a proposed squashed upstream PR
@@ -81,6 +81,14 @@ remains alive until the captured graph is destroyed. A topology rebuild may
 change active counts and index contents, but not storage addresses or declared
 capacities. Rebuild status is written to a device-side bit mask. Host-side
 inspection is allowed after replay, never from within capture.
+
+Automatically generated environment packing offsets are recomputed on-device
+from the current masked point bounds during each rebuild. The offset array and
+its bounds/scan scratch retain fixed addresses, while their values may change.
+This prevents independently moving environments from aliasing the same packed
+NanoVDB coordinates. Explicit caller-provided offsets remain fixed and make
+the caller responsible for non-overlapping spatial bounds. Environment count,
+guard width, alignment, and buffer capacities remain structural invariants.
 
 The environment-partition path and rebuildable-edge path overlap in Warp
 context allocation and FEM tests. Conflict resolution must keep both lifetime
@@ -122,6 +130,8 @@ hold:
   including S2 edges when the selected strain or collider basis needs them;
 - particle count, world count, world ordering, solver configuration, and
   reserved capacities remain fixed across replay;
+- automatic packed-environment offsets may change, but their array shape,
+  guard width, and alignment remain fixed;
 - the nonlinear/linear solver combination has no host convergence checks in
   the captured path.
 
@@ -212,6 +222,8 @@ branches could not cover.
   within fixed capacity.
 - Rebuild a multi-environment NanoVDB with changing voxel and S2 edge topology
   under capture.
+- Move one environment beyond its initial packed extent and verify automatic
+  offsets change without packed-coordinate aliasing or pointer replacement.
 - Exercise exact-capacity success and one-over-capacity status for voxels,
   nodes, leaves, and edges.
 - Verify capture-owned temporary objects remain valid through repeated replay.
