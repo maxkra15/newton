@@ -11,10 +11,8 @@ from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
-def _make_mpm_particle_builder(gravity=(0.0, -9.81, 0.0), velocity=(0.0, 0.0, 0.0)):
-    gravity_array = np.asarray(gravity)
-    gravity_magnitude = float(gravity_array if gravity_array.ndim == 0 else gravity_array[1])
-    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=gravity_magnitude)
+def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0)):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=float(gravity))
     SolverImplicitMPM.register_custom_attributes(builder)
     builder.add_particle_grid(
         pos=wp.vec3(0.025, 0.025, 0.025),
@@ -73,8 +71,13 @@ def test_multiworld_global_particles_rejected(test, device):
 
 def test_single_world_global_particles_supported(test, device):
     model = _make_mpm_particle_builder().finalize(device=device)
+    initial_q = model.particle_q.numpy()
     _solver, state = _step_mpm(model, _make_mpm_config(), step_count=1)
-    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+    particle_q = state.particle_q.numpy()
+    particle_qd = state.particle_qd.numpy()
+    test.assertTrue(np.isfinite(particle_q).all())
+    test.assertFalse(np.array_equal(particle_q, initial_q))
+    test.assertTrue(np.all(particle_qd[:, 1] < 0.0))
 
 
 def test_multiworld_shared_grid_opt_out_accepts_global_particles(test, device):
@@ -83,10 +86,67 @@ def test_multiworld_shared_grid_opt_out_accepts_global_particles(test, device):
     builder.add_world(local)
     builder.add_world(local)
     model = builder.finalize(device=device)
+    initial_q = model.particle_q.numpy()
     config = _make_mpm_config()
     config.separate_worlds = False
     _solver, state = _step_mpm(model, config, step_count=1)
-    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+    particle_q = state.particle_q.numpy()
+    particle_qd = state.particle_qd.numpy()
+    particle_world = model.particle_world.numpy()
+    test.assertTrue(np.isfinite(particle_q).all())
+    test.assertFalse(np.array_equal(particle_q, initial_q))
+    for world in range(-1, model.world_count):
+        world_qd = particle_qd[particle_world == world]
+        test.assertGreater(world_qd.shape[0], 0)
+        test.assertTrue(np.all(world_qd[:, 1] < 0.0))
+
+
+def test_multiworld_invalid_particle_world_rejected(test, device):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    local = _make_mpm_particle_builder()
+    builder.add_world(local)
+    builder.add_world(local)
+    model = builder.finalize(device=device)
+    particle_world = model.particle_world.numpy()
+
+    for invalid_world in (-2, model.world_count):
+        invalid_particle_world = particle_world.copy()
+        invalid_particle_world[0] = invalid_world
+        model.particle_world.assign(invalid_particle_world)
+        with test.subTest(invalid_world=invalid_world):
+            with test.assertRaisesRegex(ValueError, "invalid MPM particle world IDs"):
+                SolverImplicitMPM(model, _make_mpm_config())
+
+
+def test_multiworld_effective_isolation_mode(test, device):
+    single_world_model = _make_mpm_particle_builder().finalize(device=device)
+    single_world_solver = SolverImplicitMPM(single_world_model, _make_mpm_config())
+    test.assertFalse(single_world_solver._separate_worlds)
+    test.assertEqual(single_world_solver._environment_count, 1)
+    test.assertIsNone(single_world_solver._particle_environment)
+
+    local = _make_mpm_particle_builder()
+    isolated_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81)
+    SolverImplicitMPM.register_custom_attributes(isolated_builder)
+    isolated_builder.add_world(local)
+    isolated_builder.add_world(local)
+    isolated_model = isolated_builder.finalize(device=device)
+    isolated_solver = SolverImplicitMPM(isolated_model, _make_mpm_config())
+    test.assertTrue(isolated_solver._separate_worlds)
+    test.assertEqual(isolated_solver._environment_count, isolated_model.world_count)
+    test.assertIs(isolated_solver._particle_environment, isolated_model.particle_world)
+
+    shared_builder = _make_mpm_particle_builder()
+    shared_builder.add_world(local)
+    shared_builder.add_world(local)
+    shared_model = shared_builder.finalize(device=device)
+    shared_config = _make_mpm_config()
+    shared_config.separate_worlds = False
+    shared_solver = SolverImplicitMPM(shared_model, shared_config)
+    test.assertFalse(shared_solver._separate_worlds)
+    test.assertEqual(shared_solver._environment_count, 1)
+    test.assertIsNone(shared_solver._particle_environment)
 
 
 def test_sand_cube_on_plane(test, device):
@@ -322,6 +382,20 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_shared_grid_opt_out_accepts_global_particles",
     test_multiworld_shared_grid_opt_out_accepts_global_particles,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_invalid_particle_world_rejected",
+    test_multiworld_invalid_particle_world_rejected,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_effective_isolation_mode",
+    test_multiworld_effective_isolation_mode,
     devices=basic_devices,
 )
 
