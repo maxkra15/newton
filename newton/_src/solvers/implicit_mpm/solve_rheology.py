@@ -1698,6 +1698,13 @@ def _strain_environment_node_counts(rheology: RheologyData) -> tuple[int, ...]:
     return tuple(int(offsets[i + 1] - offsets[i]) for i in range(offsets.shape[0] - 1))
 
 
+def _linear_solver_tolerance_scale(strain_node_counts: Sequence[int]) -> float:
+    """Return a conservative absolute-tolerance scale for batched Krylov solves."""
+
+    min_populated_node_count = min((count for count in strain_node_counts if count > 0), default=0)
+    return math.sqrt(1 + min_populated_node_count)
+
+
 def _normalized_residuals(residual, strain_node_counts: Sequence[int]) -> tuple[float, float]:
     residual_l2 = max(
         (
@@ -1885,7 +1892,10 @@ def solve_rheology(
 
     if solvers[0] in _ITERATIVE_LINEAR_SOLVERS:
         strain_node_counts = _strain_environment_node_counts(rheology)
-        tolerance_scale = math.sqrt(1 + max(strain_node_counts, default=0))
+        # Warp's batched Krylov solvers accept one absolute tolerance for all
+        # batches. Scale by the smallest populated batch so no environment gets
+        # a looser stopping criterion than it would in an independent solve.
+        tolerance_scale = _linear_solver_tolerance_scale(strain_node_counts)
         rheology_solver = _LinearSolver(delassus_operator, method=solvers[0], temporary_store=temporary_store)
         rheology_solver.solve(tolerance, tolerance_scale, max_iterations, use_graph, verbose)
         rheology_solver.release()

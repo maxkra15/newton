@@ -14,21 +14,30 @@ from newton._src.solvers.implicit_mpm.rasterized_collisions import (
     collision_sdf,
     rasterize_collider_kernel,
 )
-from newton._src.solvers.implicit_mpm.solve_rheology import ArraySquaredNorm, _linear_solver_result_norms
+from newton._src.solvers.implicit_mpm.solve_rheology import (
+    ArraySquaredNorm,
+    _linear_solver_result_norms,
+    _linear_solver_tolerance_scale,
+)
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
-def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0), young_modulus=1.0e4):
+def _make_mpm_particle_builder(
+    gravity=-9.81,
+    velocity=(0.0, 0.0, 0.0),
+    young_modulus=1.0e4,
+    dimensions=(2, 2, 2),
+):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=float(gravity))
     SolverImplicitMPM.register_custom_attributes(builder)
     builder.add_particle_grid(
         pos=wp.vec3(0.025, 0.025, 0.025),
         rot=wp.quat_identity(),
         vel=wp.vec3(velocity),
-        dim_x=2,
-        dim_y=2,
-        dim_z=2,
+        dim_x=dimensions[0],
+        dim_y=dimensions[1],
+        dim_z=dimensions[2],
         cell_x=0.05,
         cell_y=0.05,
         cell_z=0.05,
@@ -164,9 +173,15 @@ def test_linear_solver_result_norms(test, device):
     test.assertEqual(atol, 4.0)
 
 
+def test_linear_solver_tolerance_scale(test, device):
+    test.assertEqual(_linear_solver_tolerance_scale((8, 0, 63)), 3.0)
+    test.assertEqual(_linear_solver_tolerance_scale((0, 0)), 1.0)
+
+
 def test_multiworld_cr_matches_independent(test, device):
     young_moduli = (2.5e3, 4.0e4)
     velocity_amplitudes = (3.0, 11.0)
+    particle_dimensions = ((2, 2, 2), (3, 2, 2))
     reference_states = []
     reference_initial_q = []
     reference_initial_qd = []
@@ -176,10 +191,13 @@ def test_multiworld_cr_matches_independent(test, device):
     config.tolerance = 1.0e-5
     config.warmstart_mode = "none"
 
-    for young_modulus, velocity_amplitude in zip(young_moduli, velocity_amplitudes, strict=True):
+    for young_modulus, velocity_amplitude, dimensions in zip(
+        young_moduli, velocity_amplitudes, particle_dimensions, strict=True
+    ):
         reference_model = _make_mpm_particle_builder(
             gravity=0.0,
             young_modulus=young_modulus,
+            dimensions=dimensions,
         ).finalize(device=device)
         initial_q = reference_model.particle_q.numpy()
         initial_qd = _compressive_shear_velocity(initial_q, velocity_amplitude)
@@ -195,9 +213,17 @@ def test_multiworld_cr_matches_independent(test, device):
     multiworld_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
     SolverImplicitMPM.register_custom_attributes(multiworld_builder)
     for world_builder in (
-        _make_mpm_particle_builder(gravity=0.0, young_modulus=young_moduli[0]),
+        _make_mpm_particle_builder(
+            gravity=0.0,
+            young_modulus=young_moduli[0],
+            dimensions=particle_dimensions[0],
+        ),
         empty_builder,
-        _make_mpm_particle_builder(gravity=0.0, young_modulus=young_moduli[1]),
+        _make_mpm_particle_builder(
+            gravity=0.0,
+            young_modulus=young_moduli[1],
+            dimensions=particle_dimensions[1],
+        ),
     ):
         multiworld_builder.add_world(world_builder)
     multiworld_model = multiworld_builder.finalize(device=device)
@@ -432,34 +458,32 @@ def test_multiworld_invalid_particle_world_rejected(test, device):
                 SolverImplicitMPM(model, _make_mpm_config())
 
 
-def test_multiworld_effective_isolation_mode(test, device):
-    single_world_model = _make_mpm_particle_builder().finalize(device=device)
-    single_world_solver = SolverImplicitMPM(single_world_model, _make_mpm_config())
-    test.assertFalse(single_world_solver._separate_worlds)
-    test.assertEqual(single_world_solver._environment_count, 1)
-    test.assertIsNone(single_world_solver._particle_environment)
+def test_multiworld_shared_grid_couples_worlds(test, device):
+    def run(separate_worlds):
+        local = _make_mpm_particle_builder(gravity=0.0)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.add_world(local)
+        builder.add_world(local)
+        model = builder.finalize(device=device)
+        model.set_gravity((3.0, 0.0, 0.0), world=0)
+        model.set_gravity((-3.0, 0.0, 0.0), world=1)
 
-    local = _make_mpm_particle_builder()
-    isolated_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81)
-    SolverImplicitMPM.register_custom_attributes(isolated_builder)
-    isolated_builder.add_world(local)
-    isolated_builder.add_world(local)
-    isolated_model = isolated_builder.finalize(device=device)
-    isolated_solver = SolverImplicitMPM(isolated_model, _make_mpm_config())
-    test.assertTrue(isolated_solver._separate_worlds)
-    test.assertEqual(isolated_solver._environment_count, isolated_model.world_count)
-    test.assertIs(isolated_solver._particle_environment, isolated_model.particle_world)
+        config = _make_mpm_config()
+        config.separate_worlds = separate_worlds
+        _, state = _step_mpm(model, config, step_count=1)
+        starts = model.particle_world_start.numpy()
+        velocities = state.particle_qd.numpy()
+        return np.asarray(
+            [np.mean(velocities[starts[world] : starts[world + 1]], axis=0) for world in range(model.world_count)]
+        )
 
-    shared_builder = _make_mpm_particle_builder()
-    shared_builder.add_world(local)
-    shared_builder.add_world(local)
-    shared_model = shared_builder.finalize(device=device)
-    shared_config = _make_mpm_config()
-    shared_config.separate_worlds = False
-    shared_solver = SolverImplicitMPM(shared_model, shared_config)
-    test.assertFalse(shared_solver._separate_worlds)
-    test.assertEqual(shared_solver._environment_count, 1)
-    test.assertIsNone(shared_solver._particle_environment)
+    isolated_velocity = run(separate_worlds=True)
+    shared_velocity = run(separate_worlds=False)
+
+    test.assertGreater(isolated_velocity[0, 0], 1.0e-3)
+    test.assertLess(isolated_velocity[1, 0], -1.0e-3)
+    np.testing.assert_allclose(shared_velocity, 0.0, rtol=0.0, atol=1.0e-6)
 
 
 def test_multiworld_collider_world_validation(test, device):
@@ -669,7 +693,11 @@ def test_multiworld_render_grains_follow_particle_world(test, device):
     np.testing.assert_array_equal(grains.numpy(), grains_initial)
 
     solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
-    solver.update_render_grains(state_0, state_1, grains, dt=dt)
+    # The helper must select the grains' device rather than relying on the
+    # caller's current Warp device.
+    update_device = "cpu" if device.is_cuda else device
+    with wp.ScopedDevice(update_device):
+        solver.update_render_grains(state_0, state_1, grains, dt=dt)
 
     grain_positions = grains.numpy()
     particle_world_start = model.particle_world_start.numpy()
@@ -1211,6 +1239,13 @@ add_function_test(
 
 add_function_test(
     TestImplicitMPM,
+    "test_linear_solver_tolerance_scale",
+    test_linear_solver_tolerance_scale,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
     "test_multiworld_cr_matches_independent",
     test_multiworld_cr_matches_independent,
     devices=basic_devices,
@@ -1302,8 +1337,8 @@ add_function_test(
 
 add_function_test(
     TestImplicitMPM,
-    "test_multiworld_effective_isolation_mode",
-    test_multiworld_effective_isolation_mode,
+    "test_multiworld_shared_grid_couples_worlds",
+    test_multiworld_shared_grid_couples_worlds,
     devices=basic_devices,
 )
 

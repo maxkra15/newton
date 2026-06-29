@@ -23,6 +23,8 @@ import newton
 from newton.solvers import SolverImplicitMPM
 
 _CUDA_UNAVAILABLE = wp.get_cuda_device_count() == 0
+_ISOLATED_MULTIWORLD_UNAVAILABLE = not hasattr(SolverImplicitMPM.Config, "separate_worlds")
+_BENCHMARK_UNAVAILABLE = _CUDA_UNAVAILABLE or _ISOLATED_MULTIWORLD_UNAVAILABLE
 _PARTICLES_PER_WORLD = 8
 
 
@@ -126,11 +128,11 @@ class FastImplicitMPMMultiworld:
                 runner.step(self.dt)
         wp.synchronize_device(self.device)
 
-    @skip_benchmark_if(_CUDA_UNAVAILABLE)
+    @skip_benchmark_if(_BENCHMARK_UNAVAILABLE)
     def time_step(self, world_count: int, layout: str) -> None:
         self._step_all()
 
-    @skip_benchmark_if(_CUDA_UNAVAILABLE)
+    @skip_benchmark_if(_BENCHMARK_UNAVAILABLE)
     def track_milliseconds_per_world_step(self, world_count: int, layout: str) -> float:
         start_time = time.perf_counter()
         self._step_all()
@@ -145,8 +147,13 @@ if __name__ == "__main__":
 
     from newton.utils import run_benchmark
 
-    if _CUDA_UNAVAILABLE:
-        print("Skipping FastImplicitMPMMultiworld: CUDA device cuda:0 is unavailable.")
+    if _BENCHMARK_UNAVAILABLE:
+        reason = (
+            "CUDA device cuda:0 is unavailable"
+            if _CUDA_UNAVAILABLE
+            else "SolverImplicitMPM.Config.separate_worlds is unavailable"
+        )
+        print(f"Skipping FastImplicitMPMMultiworld: {reason}.")
         raise SystemExit(0)
 
     benchmark_list = {
