@@ -477,13 +477,40 @@ def test_multiworld_global_dynamic_collider_rejected(test, device):
 
 def test_multiworld_global_kinematic_collider_supported(test, device):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
-    body = builder.add_body(is_kinematic=True)
+    inertia = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    body = builder.add_body(mass=1.0, inertia=inertia, lock_inertia=True, is_kinematic=True)
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
     builder.add_shape_box(body, cfg=shape_cfg)
     model = _make_two_world_particle_model(device, builder=builder)
 
-    collider = SolverImplicitMPM(model, _make_mpm_config())._mpm_model.collider
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    collider = solver._mpm_model.collider
+    test.assertGreater(model.body_mass.numpy()[body], 0.0)
     np.testing.assert_array_equal(collider.collider_world.numpy(), np.array((-1,)))
+    np.testing.assert_array_equal(solver._mpm_model.collider_body_mass.numpy(), np.zeros(model.body_count))
+    test.assertFalse(solver._mpm_model.has_compliant_colliders)
+
+    with test.assertRaisesRegex(ValueError, "global dynamic collider"):
+        solver.setup_collider(body_mass=model.body_mass)
+
+
+def test_multiworld_local_dynamic_collider_and_mass_override(test, device):
+    local_builder = _make_mpm_particle_builder(gravity=0.0)
+    inertia = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    body = local_builder.add_body(mass=1.0, inertia=inertia, lock_inertia=True)
+    local_builder.add_shape_box(body, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    model = _make_two_world_particle_model(device, local_builder=local_builder)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+
+    np.testing.assert_array_equal(solver._mpm_model.collider.collider_world.numpy(), np.array((0, 1)))
+    test.assertTrue(np.all(solver._mpm_model.collider_body_mass.numpy() > 0.0))
+    test.assertTrue(solver._mpm_model.has_compliant_colliders)
+
+    effective_mass = wp.zeros_like(model.body_mass)
+    solver.setup_collider(body_mass=effective_mass)
+    test.assertIs(solver._mpm_model.collider_body_mass, effective_mass)
+    np.testing.assert_array_equal(solver._mpm_model.collider_body_mass.numpy(), np.zeros(model.body_count))
+    test.assertFalse(solver._mpm_model.has_compliant_colliders)
 
 
 def test_multiworld_default_static_colliders_grouped_by_world(test, device):
@@ -518,6 +545,26 @@ def test_multiworld_external_collider_world_count_mismatch(test, device):
 
     with test.assertRaisesRegex(ValueError, "world_count"):
         solver.setup_collider(model=external_model)
+
+
+def test_shared_solver_globalizes_external_multiworld_colliders(test, device):
+    model = _make_mpm_particle_builder(gravity=0.0).finalize(device=device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+
+    external_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    local_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    local_builder.add_shape_box(-1, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    external_builder.add_world(local_builder)
+    external_builder.add_world(local_builder)
+    external_model = external_builder.finalize(device=device)
+
+    solver.setup_collider(model=external_model)
+
+    collider = solver._mpm_model.collider
+    test.assertGreater(collider.collider_world.shape[0], 0)
+    np.testing.assert_array_equal(collider.collider_world.numpy(), np.full(collider.collider_world.shape, -1))
+    np.testing.assert_array_equal(collider.query_collider_ids.numpy(), np.arange(collider.collider_world.shape[0]))
+    test.assertEqual(collider.query_world_offsets.numpy()[1], collider.collider_world.shape[0])
 
 
 def test_sand_cube_on_plane(test, device):
@@ -864,6 +911,13 @@ add_function_test(
 
 add_function_test(
     TestImplicitMPM,
+    "test_multiworld_local_dynamic_collider_and_mass_override",
+    test_multiworld_local_dynamic_collider_and_mass_override,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
     "test_multiworld_default_static_colliders_grouped_by_world",
     test_multiworld_default_static_colliders_grouped_by_world,
     devices=basic_devices,
@@ -873,6 +927,13 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_external_collider_world_count_mismatch",
     test_multiworld_external_collider_world_count_mismatch,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_shared_solver_globalizes_external_multiworld_colliders",
+    test_shared_solver_globalizes_external_multiworld_colliders,
     devices=basic_devices,
 )
 

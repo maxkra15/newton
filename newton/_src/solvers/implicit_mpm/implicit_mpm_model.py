@@ -368,14 +368,15 @@ class ImplicitMPMModel:
                 outputs=[self.particle_volume, self.particle_density],
             )
 
-    def notify_collider_changed(self):
+    def notify_collider_changed(self, body_mass: np.ndarray | None = None):
         """Refresh cached extrema for collider parameters.
 
         Tracks the minimum collider mass to determine whether compliant
         colliders are present and to enable/disable related computations.
         """
         body_ids = self.collider.collider_body_index.numpy()
-        body_mass = self.collider_body_mass.numpy()
+        if body_mass is None:
+            body_mass = self.collider_body_mass.numpy()
         dynamic_body_ids = body_ids[body_ids >= 0]
         dynamic_body_ids = dynamic_body_ids[body_mass[dynamic_body_ids] > 0.0]
         dynamic_body_masses = body_mass[dynamic_body_ids]
@@ -405,8 +406,9 @@ class ImplicitMPMModel:
         properties (thickness, friction, adhesion, projection threshold).
 
         By default, this will setup collisions against all collision shapes in the model with flag `newton.ShapeFlag.COLLIDE_PARTICLES`.
-        Rigid body colliders will be treated as kinematic if their mass is zero; for all model bodies to be treated as kinematic,
-        pass ``body_mass=wp.zeros_like(model.body_mass)``.
+        Rigid body colliders will be treated as kinematic if their effective mass is zero. When ``body_mass`` is omitted,
+        bodies flagged with :attr:`newton.BodyFlags.KINEMATIC` have zero effective mass regardless of their stored mass.
+        An explicit ``body_mass`` array is authoritative.
 
         For any collider index `i`, only one of ``collider_meshes[i]`` and ``collider_body_ids`` may not be `None`.
         If material properties are not provided for a collider, but a body index is provided,
@@ -422,7 +424,8 @@ class ImplicitMPMModel:
               particle may be before it is projected out. (m)
             model: The model to read collider properties from. Default to self.model.
             body_com: For dynamic colliders, per-body center of mass. Default to model.body_com.
-            body_mass: For dynamic colliders, per-body mass. Default to model.body_mass.
+            body_mass: For dynamic colliders, per-body effective mass. By default, use ``model.body_mass`` with
+                zero mass for bodies flagged with :attr:`newton.BodyFlags.KINEMATIC`.
             body_inv_inertia: For dynamic colliders, per-body inverse inertia. Default to model.body_inv_inertia.
             body_q: For dynamic colliders, per-body initial transform. Default to model.body_q.
             collider_world_ids: Per-collider Newton world IDs. Custom meshes default to global
@@ -451,12 +454,28 @@ class ImplicitMPMModel:
         )
         supplied_world_ids = None if collider_world_ids is None else list(collider_world_ids)
 
-        shape_world = (
-            model.shape_world.numpy() if model.shape_world is not None else np.full(model.shape_count, -1, dtype=int)
-        )
-        body_world = (
-            model.body_world.numpy() if model.body_world is not None else np.full(model.body_count, -1, dtype=int)
-        )
+        shape_world = None
+        body_world = None
+
+        def get_shape_world():
+            nonlocal shape_world
+            if shape_world is None:
+                shape_world = (
+                    model.shape_world.numpy()
+                    if model.shape_world is not None
+                    else np.full(model.shape_count, -1, dtype=int)
+                )
+            return shape_world
+
+        def get_body_world():
+            nonlocal body_world
+            if body_world is None:
+                body_world = (
+                    model.body_world.numpy()
+                    if model.body_world is not None
+                    else np.full(model.body_count, -1, dtype=int)
+                )
+            return body_world
 
         default_discovery = collider_meshes is None and collider_body_ids is None
         collider_shapes = []
@@ -466,10 +485,18 @@ class ImplicitMPMModel:
             collider_body_ids = []
 
             static_shapes = _get_body_collision_shapes(model, -1)
-            for world_id in sorted({int(world) for world in shape_world[static_shapes]}):
+            if self._separate_worlds:
+                static_collider_worlds = sorted({int(world) for world in get_shape_world()[static_shapes]})
+            else:
+                static_collider_worlds = [-1] if len(static_shapes) > 0 else []
+            for world_id in static_collider_worlds:
                 collider_meshes.append(None)
                 collider_body_ids.append(-1)
-                collider_shapes.append(static_shapes[shape_world[static_shapes] == world_id])
+                collider_shapes.append(
+                    static_shapes[get_shape_world()[static_shapes] == world_id]
+                    if self._separate_worlds
+                    else static_shapes
+                )
                 inferred_world_ids.append(world_id)
 
             for body_id in range(model.body_count):
@@ -479,7 +506,7 @@ class ImplicitMPMModel:
                 collider_meshes.append(None)
                 collider_body_ids.append(body_id)
                 collider_shapes.append(shapes)
-                inferred_world_ids.append(int(body_world[body_id]))
+                inferred_world_ids.append(int(get_body_world()[body_id]) if self._separate_worlds else -1)
         else:
             if collider_body_ids is None:
                 collider_body_ids = [None] * len(collider_meshes)
@@ -564,21 +591,26 @@ class ImplicitMPMModel:
                     collider_body_ids[collider_id] = body_id
 
                     if body_id >= 0:
-                        world_id = validate_world_id(body_world[body_id], collider_id)
-                        if requested_world_id is not None:
+                        if self._separate_worlds:
+                            world_id = validate_world_id(get_body_world()[body_id], collider_id)
+                        else:
+                            world_id = -1
+                        if requested_world_id is not None and self._separate_worlds:
                             validated_world_id = validate_world_id(requested_world_id, collider_id)
                             if validated_world_id != world_id:
                                 raise ValueError(
                                     f"Collider world ID {validated_world_id} for collider {collider_id} does not "
                                     f"match body {body_id}'s inferred world ID {world_id}."
                                 )
+                        elif requested_world_id is not None:
+                            world_id = requested_world_id
                         collider_shapes[collider_id] = _get_body_collision_shapes(model, body_id)
                     else:
                         if static_shapes is None:
                             static_shapes = _get_body_collision_shapes(model, -1)
                         if self._separate_worlds:
                             if requested_world_id is None:
-                                static_world_ids = sorted({int(world) for world in shape_world[static_shapes]})
+                                static_world_ids = sorted({int(world) for world in get_shape_world()[static_shapes]})
                                 if len(static_world_ids) != 1:
                                     raise ValueError(
                                         "An explicit body -1 collider is ambiguous in isolated multi-world mode; "
@@ -587,7 +619,7 @@ class ImplicitMPMModel:
                                 world_id = static_world_ids[0]
                             else:
                                 world_id = validate_world_id(requested_world_id, collider_id)
-                            collider_shapes[collider_id] = static_shapes[shape_world[static_shapes] == world_id]
+                            collider_shapes[collider_id] = static_shapes[get_shape_world()[static_shapes] == world_id]
                         else:
                             world_id = -1 if requested_world_id is None else requested_world_id
                             collider_shapes[collider_id] = static_shapes
@@ -596,6 +628,7 @@ class ImplicitMPMModel:
 
         if body_com is None:
             body_com = model.body_com
+        body_mass_is_explicit = body_mass is not None
         if body_mass is None:
             body_mass = model.body_mass
         if body_inv_inertia is None:
@@ -603,7 +636,13 @@ class ImplicitMPMModel:
         if body_q is None:
             body_q = model.body_q
 
-        effective_body_mass = body_mass.numpy()
+        effective_body_mass = body_mass.numpy().copy()
+        if not body_mass_is_explicit and model.body_flags is not None:
+            body_flags = model.body_flags.numpy()
+            kinematic_bodies = (body_flags & int(newton.BodyFlags.KINEMATIC)) != 0
+            if np.any(kinematic_bodies & (effective_body_mass != 0.0)):
+                effective_body_mass[kinematic_bodies] = 0.0
+                body_mass = wp.array(effective_body_mass, dtype=body_mass.dtype, device=body_mass.device)
         if self._separate_worlds:
             for collider_id, (body_id, world_id) in enumerate(zip(collider_body_ids, collider_world_ids, strict=True)):
                 if world_id == -1 and body_id is not None and body_id >= 0 and effective_body_mass[body_id] > 0.0:
@@ -740,7 +779,7 @@ class ImplicitMPMModel:
         self.collider_body_q = body_q
         self._collider_meshes = collider_meshes  # Keep a ref so that meshes are not garbage collected
 
-        self.notify_collider_changed()
+        self.notify_collider_changed(effective_body_mass)
 
     @property
     def has_compliant_particles(self):
