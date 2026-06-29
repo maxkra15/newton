@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
+import inspect
+import math
 from typing import Any
 
+import numpy as np
 import warp as wp
 import warp.fem as fem
 import warp.sparse as wps
@@ -882,6 +886,26 @@ def clamp_coordinates(
 
 
 @wp.kernel
+def build_active_particle_mask(particle_flags: wp.array[wp.int32], point_mask: wp.array[wp.int32]):
+    particle_index = wp.tid()
+    point_mask[particle_index] = wp.where(
+        particle_flags[particle_index] & newton.ParticleFlags.ACTIVE,
+        wp.int32(1),
+        wp.int32(0),
+    )
+
+
+@wp.kernel
+def record_volume_rebuild_status(status: wp.array[wp.uint32], accumulated_status: wp.array[wp.uint32]):
+    """Retain and report rebuild failures without a host synchronization."""
+    rebuild_status = status[0]
+    new_status = rebuild_status & ~accumulated_status[0]
+    if new_status != wp.uint32(0):
+        accumulated_status[0] = accumulated_status[0] | rebuild_status
+        wp.printf("Warning: Implicit MPM sparse grid rebuild failed with status %u.\n", rebuild_status)
+
+
+@wp.kernel
 def pad_voxels(particle_q: wp.array[wp.vec3i], padded_q: wp.array4d[wp.vec3i]):
     pid = wp.tid()
 
@@ -896,7 +920,93 @@ def positive_modn(x: int, n: int):
     return (x % n + n) % n
 
 
-def allocate_by_voxels(particle_q, voxel_size, padding_voxels: int = 0):
+@functools.lru_cache(maxsize=1)
+def supports_rebuildable_volume() -> bool:
+    """Whether the installed Warp exposes the rebuildable-volume API used here."""
+    try:
+        allocate_parameters = inspect.signature(wp.Volume.allocate_by_voxels).parameters
+        rebuild_parameters = inspect.signature(wp.Volume.rebuild).parameters
+        return {"rebuildable", "status", "point_mask"} <= allocate_parameters.keys() and {
+            "status",
+            "point_mask",
+        } <= rebuild_parameters.keys()
+    except (AttributeError, ValueError, TypeError):
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def supports_rebuildable_nanogrid() -> bool:
+    """Whether the installed Warp can wrap rebuildable volumes in a rebuildable Nanogrid."""
+    try:
+        init_parameters = inspect.signature(fem.Nanogrid).parameters
+        rebuild_parameters = inspect.signature(fem.Nanogrid.rebuild).parameters
+        return (
+            supports_rebuildable_volume()
+            and "rebuildable" in init_parameters
+            and {"status", "point_mask"} <= rebuild_parameters.keys()
+        )
+    except (AttributeError, ValueError, TypeError):
+        return False
+
+
+def _rebuild_capacity(particle_q, voxel_size, ratio: float, max_active_voxels: int, point_mask=None) -> dict[str, int]:
+    """Estimate rebuildable-volume capacities (active voxels + NanoVDB node counts).
+
+    Active-voxel and leaf-node storage reserves ``max_active_voxels`` entries.
+    The lower/upper internal nodes each span 16x and 32x more cells, so their
+    counts are typically small; they are estimated from one throwaway build of
+    the current particles scaled by ``ratio`` for spreading headroom. Rebuild
+    status reports when any reserved capacity is exceeded.
+    """
+    initial = wp.Volume.allocate_by_voxels(
+        voxel_points=particle_q,
+        voxel_size=voxel_size,
+        point_mask=point_mask,
+    )
+    if initial.get_voxel_count() == 0:
+        return {
+            "max_active_voxels": max_active_voxels,
+            "max_leaf_nodes": max_active_voxels,
+            "max_lower_nodes": min(max_active_voxels, 8),
+            "max_upper_nodes": min(max_active_voxels, 4),
+        }
+    ijk = initial.get_voxels().numpy()
+    lower = np.unique(np.floor_divide(ijk, 8 * 16), axis=0).shape[0]
+    upper = np.unique(np.floor_divide(ijk, 8 * 16 * 32), axis=0).shape[0]
+    return {
+        "max_active_voxels": max_active_voxels,
+        "max_leaf_nodes": max_active_voxels,
+        "max_lower_nodes": min(max_active_voxels, max(8, math.ceil(lower * ratio))),
+        "max_upper_nodes": min(max_active_voxels, max(4, math.ceil(upper * ratio))),
+    }
+
+
+def allocate_by_voxels(
+    particle_q,
+    voxel_size,
+    padding_voxels: int = 0,
+    rebuildable: bool = False,
+    max_active_voxels: int | None = None,
+    capacity_ratio: float = 16.0,
+    status=None,
+    point_mask=None,
+):
+    if rebuildable:
+        # Persistent capacity-sized volume refreshed in place each step so the sparse
+        # grid build is CUDA-graph-capturable. Padding is unsupported here.
+        capacity = max_active_voxels if max_active_voxels and max_active_voxels > 0 else particle_q.shape[0]
+        kwargs = _rebuild_capacity(particle_q, voxel_size, capacity_ratio, capacity, point_mask=point_mask)
+        if status is not None:
+            kwargs["status"] = status
+        if point_mask is not None:
+            kwargs["point_mask"] = point_mask
+        return wp.Volume.allocate_by_voxels(
+            voxel_points=particle_q,
+            voxel_size=voxel_size,
+            rebuildable=True,
+            **kwargs,
+        )
+
     volume = wp.Volume.allocate_by_voxels(
         voxel_points=particle_q.flatten(),
         voxel_size=voxel_size,
