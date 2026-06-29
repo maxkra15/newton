@@ -11,6 +11,84 @@ from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
+def _make_mpm_particle_builder(gravity=(0.0, -9.81, 0.0), velocity=(0.0, 0.0, 0.0)):
+    gravity_array = np.asarray(gravity)
+    gravity_magnitude = float(gravity_array if gravity_array.ndim == 0 else gravity_array[1])
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=gravity_magnitude)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particle_grid(
+        pos=wp.vec3(0.025, 0.025, 0.025),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(velocity),
+        dim_x=2,
+        dim_y=2,
+        dim_z=2,
+        cell_x=0.05,
+        cell_y=0.05,
+        cell_z=0.05,
+        mass=0.01,
+        jitter=0.0,
+        custom_attributes={"mpm:young_modulus": 1.0e4, "mpm:poisson_ratio": 0.2},
+    )
+    return builder
+
+
+def _make_mpm_config(grid_type="dense", integration_scheme="pic", solver="jacobi"):
+    config = SolverImplicitMPM.Config()
+    config.grid_type = grid_type
+    config.voxel_size = 0.1
+    config.integration_scheme = integration_scheme
+    config.solver = solver
+    config.max_iterations = 4
+    config.tolerance = 0.0
+    config.warmstart_mode = "grid"
+    return config
+
+
+def _step_mpm(model, config, step_count=3, dt=0.01):
+    solver = SolverImplicitMPM(model, config=config)
+    state_0 = model.state()
+    state_1 = model.state()
+    for _ in range(step_count):
+        solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+        state_0, state_1 = state_1, state_0
+    return solver, state_0
+
+
+def test_multiworld_isolation_config(test, device):
+    config = SolverImplicitMPM.Config()
+    test.assertTrue(config.separate_worlds)
+
+
+def test_multiworld_global_particles_rejected(test, device):
+    builder = _make_mpm_particle_builder()
+    local = _make_mpm_particle_builder()
+    builder.add_world(local)
+    builder.add_world(local)
+    model = builder.finalize(device=device)
+
+    with test.assertRaisesRegex(ValueError, "global MPM particles"):
+        SolverImplicitMPM(model, _make_mpm_config())
+
+
+def test_single_world_global_particles_supported(test, device):
+    model = _make_mpm_particle_builder().finalize(device=device)
+    _solver, state = _step_mpm(model, _make_mpm_config(), step_count=1)
+    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
+
+def test_multiworld_shared_grid_opt_out_accepts_global_particles(test, device):
+    builder = _make_mpm_particle_builder()
+    local = _make_mpm_particle_builder()
+    builder.add_world(local)
+    builder.add_world(local)
+    model = builder.finalize(device=device)
+    config = _make_mpm_config()
+    config.separate_worlds = False
+    _solver, state = _step_mpm(model, config, step_count=1)
+    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
+
 def test_sand_cube_on_plane(test, device):
     # Emits a cube of particles on the ground
 
@@ -212,11 +290,40 @@ def test_finite_difference_collider_velocity(test, device):
 
 
 devices = get_test_devices()
+basic_devices = get_test_devices(mode="basic")
 
 
 class TestImplicitMPM(unittest.TestCase):
     pass
 
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_isolation_config",
+    test_multiworld_isolation_config,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_global_particles_rejected",
+    test_multiworld_global_particles_rejected,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_single_world_global_particles_supported",
+    test_single_world_global_particles_supported,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_shared_grid_opt_out_accepts_global_particles",
+    test_multiworld_shared_grid_opt_out_accepts_global_particles,
+    devices=basic_devices,
+)
 
 add_function_test(
     TestImplicitMPM, "test_sand_cube_on_plane", test_sand_cube_on_plane, devices=devices, check_output=False
