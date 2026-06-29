@@ -644,6 +644,10 @@ class SolverImplicitMPM(SolverBase):
         verbose: If True, enable verbose solver output. If False, suppress details. If None, enable verbose output when
             ``wp.config.log_level`` is configured for debug logging.
         enable_timers: Enable per-section wall-clock timings.
+
+    Raises:
+        ValueError: If an isolated multi-world model contains global MPM
+            particles or particle world IDs outside ``[-1, model.world_count)``.
     """
 
     @dataclass
@@ -944,14 +948,19 @@ class SolverImplicitMPM(SolverBase):
 
         if self._separate_worlds:
             particle_world = model.particle_world.numpy()
-            if np.any(particle_world < 0):
+            invalid_world_ids = np.unique(particle_world[(particle_world < -1) | (particle_world >= model.world_count)])
+            if invalid_world_ids.size:
+                raise ValueError(
+                    "SolverImplicitMPM cannot isolate a multi-world model containing invalid MPM particle world IDs; "
+                    f"found {invalid_world_ids.tolist()}, but IDs must be -1 (global) or in "
+                    f"[0, {model.world_count}) for model.world_count={model.world_count}."
+                )
+            if np.any(particle_world == -1):
                 raise ValueError(
                     "SolverImplicitMPM cannot isolate a multi-world model containing global MPM particles; "
                     "replicate the particles into each world or set Config.separate_worlds=False for legacy "
                     "coupled behavior."
                 )
-            if np.any(particle_world >= model.world_count):
-                raise ValueError("MPM particle world IDs must be smaller than model.world_count.")
 
         self._mpm_model = ImplicitMPMModel(model, config)
 
