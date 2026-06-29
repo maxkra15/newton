@@ -7,11 +7,12 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.implicit_mpm.solve_rheology import ArraySquaredNorm
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
-def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0)):
+def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0), young_modulus=1.0e4):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=float(gravity))
     SolverImplicitMPM.register_custom_attributes(builder)
     builder.add_particle_grid(
@@ -27,7 +28,7 @@ def _make_mpm_particle_builder(gravity=-9.81, velocity=(0.0, 0.0, 0.0)):
         mass=0.01,
         jitter=0.0,
         radius_mean=0.025,
-        custom_attributes={"mpm:young_modulus": 1.0e4, "mpm:poisson_ratio": 0.2},
+        custom_attributes={"mpm:young_modulus": young_modulus, "mpm:poisson_ratio": 0.2},
     )
     return builder
 
@@ -52,6 +53,92 @@ def _step_mpm(model, config, step_count=3, dt=0.01):
         solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
         state_0, state_1 = state_1, state_0
     return solver, state_0
+
+
+def _compressive_shear_velocity(positions, amplitude):
+    centered = positions - np.mean(positions, axis=0)
+    return amplitude * np.column_stack(
+        (
+            -1.0 * centered[:, 0] + 0.4 * centered[:, 1],
+            -0.7 * centered[:, 1] + 0.3 * centered[:, 2],
+            -0.5 * centered[:, 2] + 0.6 * centered[:, 0],
+        )
+    )
+
+
+def test_array_squared_norm_batches(test, device):
+    data = wp.array((1.0, 4.0, 9.0, 16.0, 25.0), dtype=float, device=device)
+    offsets = wp.array((0, 2, 2, 5), dtype=int, device=device)
+    norm = ArraySquaredNorm(max_length=5, batch_offsets=offsets, device=device)
+
+    try:
+        result = norm.compute_squared_norm(data)
+        test.assertEqual(result.shape, (2, 3))
+        np.testing.assert_array_equal(result.numpy()[0], np.array((5.0, 0.0, 50.0)))
+        np.testing.assert_array_equal(result.numpy()[1], np.array((4.0, 0.0, 25.0)))
+    finally:
+        norm.release()
+
+
+def test_multiworld_cr_matches_independent(test, device):
+    young_moduli = (2.5e3, 4.0e4)
+    velocity_amplitudes = (3.0, 11.0)
+    reference_states = []
+    reference_initial_q = []
+    reference_initial_qd = []
+
+    config = _make_mpm_config(grid_type="dense", integration_scheme="pic", solver="cr")
+    config.max_iterations = 20
+    config.tolerance = 1.0e-5
+    config.warmstart_mode = "none"
+
+    for young_modulus, velocity_amplitude in zip(young_moduli, velocity_amplitudes, strict=True):
+        reference_model = _make_mpm_particle_builder(
+            gravity=0.0,
+            young_modulus=young_modulus,
+        ).finalize(device=device)
+        initial_q = reference_model.particle_q.numpy()
+        initial_qd = _compressive_shear_velocity(initial_q, velocity_amplitude)
+        reference_model.particle_qd.assign(initial_qd)
+        _, reference_state = _step_mpm(reference_model, config, step_count=2)
+        reference_states.append((reference_state.particle_q.numpy(), reference_state.particle_qd.numpy()))
+        reference_initial_q.append(initial_q)
+        reference_initial_qd.append(initial_qd)
+
+    multiworld_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(multiworld_builder)
+    for young_modulus in young_moduli:
+        multiworld_builder.add_world(
+            _make_mpm_particle_builder(
+                gravity=0.0,
+                young_modulus=young_modulus,
+            )
+        )
+    multiworld_model = multiworld_builder.finalize(device=device)
+    starts = multiworld_model.particle_world_start.numpy()
+    multiworld_initial_q = multiworld_model.particle_q.numpy()
+    multiworld_initial_qd = np.empty_like(multiworld_initial_q)
+    for world, velocity_amplitude in enumerate(velocity_amplitudes):
+        world_slice = slice(starts[world], starts[world + 1])
+        multiworld_initial_qd[world_slice] = _compressive_shear_velocity(
+            multiworld_initial_q[world_slice], velocity_amplitude
+        )
+    multiworld_model.particle_qd.assign(multiworld_initial_qd)
+
+    _, multiworld_state = _step_mpm(multiworld_model, config, step_count=2)
+    multiworld_q = multiworld_state.particle_q.numpy()
+    multiworld_qd = multiworld_state.particle_qd.numpy()
+
+    for world, (reference_q, reference_qd) in enumerate(reference_states):
+        world_slice = slice(starts[world], starts[world + 1])
+        world_q = multiworld_q[world_slice]
+        world_qd = multiworld_qd[world_slice]
+        np.testing.assert_allclose(world_q, reference_q, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        np.testing.assert_allclose(world_qd, reference_qd, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        test.assertTrue(np.isfinite(world_q).all())
+        test.assertTrue(np.isfinite(world_qd).all())
+        test.assertGreater(np.linalg.norm(reference_q - reference_initial_q[world]), 1.0e-4)
+        test.assertGreater(np.linalg.norm(reference_qd - reference_initial_qd[world]), 1.0e-4)
 
 
 def _run_multiworld_reference_case(device, grid_type="dense", integration_scheme="pic", solver="jacobi"):
@@ -555,6 +642,20 @@ basic_cuda_devices = get_cuda_test_devices(mode="basic")
 class TestImplicitMPM(unittest.TestCase):
     pass
 
+
+add_function_test(
+    TestImplicitMPM,
+    "test_array_squared_norm_batches",
+    test_array_squared_norm_batches,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_cr_matches_independent",
+    test_multiworld_cr_matches_independent,
+    devices=basic_devices,
+)
 
 add_function_test(
     TestImplicitMPM,
