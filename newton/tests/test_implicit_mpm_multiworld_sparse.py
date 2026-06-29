@@ -4,9 +4,11 @@
 """Integration tests for coupled multi-world implicit MPM."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
+import warp.fem as fem
 
 import newton
 from newton.solvers import SolverImplicitMPM, SolverXPBD
@@ -281,6 +283,36 @@ def _make_sparse_capture_case(device):
     return model, solver, model.state(), model.state()
 
 
+def _make_sparse_reset_case(device):
+    world_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(world_builder)
+    world_builder.add_particle(pos=(0.025, 0.025, 0.025), vel=(0.0, 0.0, 0.0), mass=0.01, radius=0.025)
+    world_builder.add_body(
+        xform=wp.transform((0.0, -0.1, 0.0), wp.quat_identity()),
+        inertia=wp.mat33(np.eye(3)),
+        mass=1.0,
+    )
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_world(world_builder)
+    builder.add_world(world_builder)
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(model, config=_make_sparse_capture_config(), enable_timers=False)
+    return model, solver, model.state()
+
+
+def _make_point_warmstart_reset_case(device):
+    model = _make_two_world_particle_model(device)
+    config = _make_mpm_config()
+    config.max_active_cell_count = 64
+    config.collider_basis = "pic"
+    config.strain_basis = "pic"
+    config.warmstart_mode = "grid"
+    solver = SolverImplicitMPM(model, config=config, enable_timers=False)
+    return model, solver, model.state()
+
+
 def _require_sparse_capture_prerequisites(test, device):
     if not device.is_cuda:
         test.skipTest("Sparse implicit MPM outer capture requires CUDA.")
@@ -334,6 +366,378 @@ def test_sparse_multiworld_constructs_environment_grid(test, device):
     test.assertEqual(grid.environment_count(), 2)
     test.assertTrue(solver.supports_cuda_graph_capture)
     test.assertEqual(solver.max_active_cell_count, 128)
+
+
+def test_cuda_graph_capture_capability_and_preparation(test, device):
+    model, solver, state_0, state_1 = _make_sparse_capture_case(device)
+    test.assertTrue(solver.supports_cuda_graph_capture)
+
+    for solver_name in ("cg", "cr", "gmres", "gs"):
+        config = _make_sparse_capture_config()
+        config.solver = solver_name
+        incompatible_solver = SolverImplicitMPM(model, config=config, enable_timers=False)
+        test.assertEqual(incompatible_solver._environment_count, 2)
+        test.assertTrue(incompatible_solver._sparse_rebuildable)
+        test.assertFalse(incompatible_solver.supports_cuda_graph_capture, solver_name)
+        with test.assertRaisesRegex(RuntimeError, "every resolved rheology solver.*jacobi"):
+            incompatible_solver.prepare_cuda_graph_capture()
+
+    fixed_config = _make_mpm_config()
+    fixed_config.max_active_cell_count = 128
+    fixed_solver = SolverImplicitMPM(model, config=fixed_config, enable_timers=False)
+    test.assertTrue(fixed_solver.supports_cuda_graph_capture)
+
+    uncapped_fixed_config = _make_mpm_config()
+    uncapped_fixed_config.max_active_cell_count = -1
+    uncapped_fixed_solver = SolverImplicitMPM(model, config=uncapped_fixed_config, enable_timers=False)
+    test.assertFalse(uncapped_fixed_solver.supports_cuda_graph_capture)
+    with test.assertRaisesRegex(RuntimeError, "max_active_cell_count > 0"):
+        uncapped_fixed_solver.prepare_cuda_graph_capture()
+
+    incompatible_sparse_configs = []
+    plain_sparse_config = _make_sparse_capture_config()
+    plain_sparse_config.max_active_cell_count = -1
+    incompatible_sparse_configs.append(("plain", plain_sparse_config))
+    padded_sparse_config = _make_sparse_capture_config()
+    padded_sparse_config.grid_padding = 1
+    incompatible_sparse_configs.append(("padding", padded_sparse_config))
+    unsupported_basis_config = _make_sparse_capture_config()
+    unsupported_basis_config.velocity_basis = "B2"
+    incompatible_sparse_configs.append(("basis", unsupported_basis_config))
+    for reason, config in incompatible_sparse_configs:
+        incompatible_solver = SolverImplicitMPM(model, config=config, enable_timers=False)
+        test.assertFalse(incompatible_solver._sparse_rebuildable, reason)
+        test.assertFalse(incompatible_solver.supports_cuda_graph_capture, reason)
+        with test.assertRaisesRegex(RuntimeError, "rebuildable sparse grid"):
+            incompatible_solver.prepare_cuda_graph_capture()
+
+    state_before = {
+        name: array.numpy().copy()
+        for name, array in {
+            **_sparse_case_state_arrays(state_0),
+            "particle_q_out": state_1.particle_q,
+            "particle_qd_out": state_1.particle_qd,
+        }.items()
+    }
+    grid = solver._scratchpad.grid
+    scratchpad = solver._scratchpad
+    edge_grid = grid.edge_grid
+
+    solver.prepare_cuda_graph_capture()
+
+    test.assertIs(solver._scratchpad, scratchpad)
+    test.assertIs(grid.edge_grid, edge_grid)
+    for name, expected in state_before.items():
+        if name == "particle_q_out":
+            actual = state_1.particle_q.numpy()
+        elif name == "particle_qd_out":
+            actual = state_1.particle_qd.numpy()
+        else:
+            actual = _sparse_case_state_arrays(state_0)[name].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+    solver.enable_timers = True
+    test.assertFalse(solver.supports_cuda_graph_capture)
+    with test.assertRaisesRegex(RuntimeError, "enable_timers=False"):
+        solver.prepare_cuda_graph_capture()
+    solver.enable_timers = False
+
+    with mock.patch.object(wp, "is_mempool_enabled", return_value=False):
+        test.assertFalse(solver.supports_cuda_graph_capture)
+        with test.assertRaisesRegex(RuntimeError, "memory pool"):
+            solver.prepare_cuda_graph_capture()
+
+    with mock.patch.object(wp, "is_conditional_graph_supported", return_value=False):
+        test.assertFalse(solver.supports_cuda_graph_capture)
+        with test.assertRaisesRegex(RuntimeError, "conditional CUDA graph"):
+            solver.prepare_cuda_graph_capture()
+
+    solver.grid_type = "dense"
+    test.assertFalse(solver.supports_cuda_graph_capture)
+    with test.assertRaisesRegex(RuntimeError, "grid_type='dense'"):
+        solver.prepare_cuda_graph_capture()
+    solver.grid_type = "sparse"
+
+    cpu_model = _make_two_world_particle_model("cpu")
+    cpu_config = _make_mpm_config()
+    cpu_config.max_active_cell_count = 128
+    cpu_solver = SolverImplicitMPM(cpu_model, config=cpu_config, enable_timers=False)
+    test.assertFalse(cpu_solver.supports_cuda_graph_capture)
+    with test.assertRaisesRegex(RuntimeError, "CUDA device"):
+        cpu_solver.prepare_cuda_graph_capture()
+
+
+def test_sparse_status_is_sticky_until_explicitly_cleared(test, device):
+    _require_sparse_capture_prerequisites(test, device)
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particle((0.01, 0.01, 0.01), (0.0, 0.0, 0.0), mass=1.0)
+    builder.add_particle((0.02, 0.02, 0.02), (0.0, 0.0, 0.0), mass=1.0)
+    model = builder.finalize(device=device)
+    config = _make_sparse_capture_config()
+    config.max_active_cell_count = 1
+    config.collider_basis = "Q1"
+    solver = SolverImplicitMPM(model, config=config, enable_timers=False)
+    state_in = model.state()
+    state_out = model.state()
+
+    overflow_positions = state_in.particle_q.numpy()
+    overflow_positions[1] = (1.01, 1.01, 1.01)
+    state_in.particle_q.assign(overflow_positions)
+
+    with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+        solver.step(state_in, state_out, control=None, contacts=None, dt=0.001)
+
+    wp.capture_launch(capture.graph)
+    success_positions = state_in.particle_q.numpy()
+    success_positions[1] = (0.02, 0.02, 0.02)
+    state_in.particle_q.assign(success_positions)
+    wp.capture_launch(capture.graph)
+
+    test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+    test.assertTrue(int(solver._grid_accumulated_status.numpy()[0]) & wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+    with test.assertRaisesRegex(RuntimeError, "sparse grid rebuild capacity"):
+        solver.check_sparse_grid_rebuild_status()
+
+    solver.clear_sparse_grid_rebuild_status()
+    test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+    test.assertEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+    solver.check_sparse_grid_rebuild_status()
+
+    with wp.ScopedCapture(device=device, force_module_load=False):
+        with test.assertRaisesRegex(RuntimeError, "clear sparse grid rebuild status.*CUDA graph capture"):
+            solver.clear_sparse_grid_rebuild_status()
+
+
+def _assign_nondefault_mpm_history(state):
+    particle_count = state.particle_q.shape[0]
+    matrices = np.arange(1, particle_count * 9 + 1, dtype=np.float32).reshape(particle_count, 3, 3)
+    state.mpm.particle_elastic_strain.assign(matrices)
+    state.mpm.particle_transform.assign(matrices + 100.0)
+    state.mpm.particle_qd_grad.assign(matrices + 200.0)
+    state.mpm.particle_stress.assign(matrices + 300.0)
+    state.mpm.particle_Jp.assign(np.arange(2, particle_count + 2, dtype=np.float32))
+
+
+def _mpm_history_snapshot(state):
+    return {
+        "particle_elastic_strain": state.mpm.particle_elastic_strain.numpy().copy(),
+        "particle_transform": state.mpm.particle_transform.numpy().copy(),
+        "particle_qd_grad": state.mpm.particle_qd_grad.numpy().copy(),
+        "particle_stress": state.mpm.particle_stress.numpy().copy(),
+        "particle_Jp": state.mpm.particle_Jp.numpy().copy(),
+    }
+
+
+def test_masked_reset_restores_only_selected_world_history(test, device):
+    model, solver, state = _make_sparse_reset_case(device)
+    _assign_nondefault_mpm_history(state)
+    grid_warmstarts = (
+        solver._last_step_data.ws_impulse_field,
+        solver._last_step_data.ws_stress_field,
+    )
+    for index, field in enumerate(grid_warmstarts, start=1):
+        test.assertNotIsInstance(field.space.basis, fem.PointBasisSpace)
+        field.dof_values.assign(np.full_like(field.dof_values.numpy(), float(index)))
+    warmstarts_before = tuple(field.dof_values.numpy().copy() for field in grid_warmstarts)
+    starts = model.particle_world_start.numpy()
+    selected = slice(starts[0], starts[1])
+    unselected = slice(starts[1], starts[2])
+    before = _mpm_history_snapshot(state)
+
+    body_q = state.body_q.numpy()
+    body_q[:, :3] = np.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=np.float32)
+    state.body_q.assign(body_q)
+    solver._last_step_data.body_q_prev.zero_()
+    solver._grid_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+    solver._grid_accumulated_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+
+    world_mask = wp.array((True, False), dtype=wp.bool, device=device)
+    solver.reset(state, world_mask=world_mask)
+
+    after = _mpm_history_snapshot(state)
+    identity = np.eye(3, dtype=np.float32)[None, ...]
+    np.testing.assert_array_equal(after["particle_elastic_strain"][selected], identity)
+    np.testing.assert_array_equal(after["particle_transform"][selected], identity)
+    np.testing.assert_array_equal(after["particle_qd_grad"][selected], np.zeros((1, 3, 3), dtype=np.float32))
+    np.testing.assert_array_equal(after["particle_stress"][selected], np.zeros((1, 3, 3), dtype=np.float32))
+    np.testing.assert_array_equal(after["particle_Jp"][selected], np.ones(1, dtype=np.float32))
+    for name in after:
+        np.testing.assert_array_equal(after[name][unselected], before[name][unselected])
+    for field, expected in zip(grid_warmstarts, warmstarts_before, strict=True):
+        np.testing.assert_array_equal(field.dof_values.numpy(), expected)
+    np.testing.assert_array_equal(solver._last_step_data.body_q_prev.numpy(), state.body_q.numpy())
+    test.assertEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+    test.assertEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+
+    _assign_nondefault_mpm_history(state)
+    before_body_only = _mpm_history_snapshot(state)
+    solver.reset(state, world_mask=world_mask, flags=newton.StateFlags.BODY_Q)
+    for name, expected in before_body_only.items():
+        np.testing.assert_array_equal(_mpm_history_snapshot(state)[name], expected)
+
+    solver.reset(state, world_mask=None)
+    after_full = _mpm_history_snapshot(state)
+    expected_identity = np.repeat(identity, model.particle_count, axis=0)
+    np.testing.assert_array_equal(after_full["particle_elastic_strain"], expected_identity)
+    np.testing.assert_array_equal(after_full["particle_transform"], expected_identity)
+    np.testing.assert_array_equal(after_full["particle_qd_grad"], np.zeros_like(expected_identity))
+    np.testing.assert_array_equal(after_full["particle_stress"], np.zeros_like(expected_identity))
+    np.testing.assert_array_equal(after_full["particle_Jp"], np.ones(model.particle_count, dtype=np.float32))
+    for field, expected in zip(grid_warmstarts, warmstarts_before, strict=True):
+        np.testing.assert_array_equal(field.dof_values.numpy(), np.zeros_like(expected))
+
+
+def test_masked_reset_clears_only_selected_point_warmstarts(test, device):
+    model, solver, state = _make_point_warmstart_reset_case(device)
+    impulse = solver._last_step_data.ws_impulse_field
+    stress = solver._last_step_data.ws_stress_field
+    test.assertIsInstance(impulse.space.basis, fem.PointBasisSpace)
+    test.assertIsInstance(stress.space.basis, fem.PointBasisSpace)
+    test.assertEqual(impulse.dof_values.shape, (model.particle_count,))
+    test.assertEqual(stress.dof_values.shape, (model.particle_count,))
+
+    impulse_values = np.arange(1, model.particle_count * 3 + 1, dtype=np.float32).reshape(-1, 3)
+    stress_values = np.arange(101, 101 + model.particle_count * 6, dtype=np.float32).reshape(-1, 6)
+    impulse.dof_values.assign(impulse_values)
+    stress.dof_values.assign(stress_values)
+    impulse_before = impulse.dof_values.numpy().copy()
+    stress_before = stress.dof_values.numpy().copy()
+    starts = model.particle_world_start.numpy()
+    selected = slice(starts[0], starts[1])
+    unselected = slice(starts[1], starts[2])
+
+    solver.reset(state, world_mask=wp.array((True, False), dtype=wp.bool, device=device))
+
+    impulse_after = impulse.dof_values.numpy()
+    stress_after = stress.dof_values.numpy()
+    np.testing.assert_array_equal(impulse_after[selected], np.zeros_like(impulse_before[selected]))
+    np.testing.assert_array_equal(stress_after[selected], np.zeros_like(stress_before[selected]))
+    np.testing.assert_array_equal(impulse_after[unselected], impulse_before[unselected])
+    np.testing.assert_array_equal(stress_after[unselected], stress_before[unselected])
+
+    impulse.dof_values.assign(impulse_values + 1000.0)
+    stress.dof_values.assign(stress_values + 1000.0)
+    solver.reset(state, world_mask=None)
+    np.testing.assert_array_equal(impulse.dof_values.numpy(), np.zeros_like(impulse_values))
+    np.testing.assert_array_equal(stress.dof_values.numpy(), np.zeros_like(stress_values))
+
+    valid_impulse_values = impulse.dof_values
+    impulse.dof_values = wp.zeros(model.particle_count + 1, dtype=valid_impulse_values.dtype, device=device)
+    stress.dof_values.assign(stress_values)
+    with test.assertRaisesRegex(ValueError, "ws_impulse_field.*shape"):
+        solver.reset(state, world_mask=None)
+    np.testing.assert_array_equal(stress.dof_values.numpy(), stress_values)
+    impulse.dof_values = valid_impulse_values
+
+
+def test_coupled_mpm_non_in_place_capture_replays_after_reset(test, device):
+    _require_sparse_capture_prerequisites(test, device)
+    model = _make_two_world_particle_model(device)
+    config = _make_mpm_config()
+    config.max_active_cell_count = 64
+    coupled = SolverCoupled(
+        model=model,
+        entries=(
+            SolverCoupled.Entry(
+                name="mpm",
+                solver=lambda view: SolverImplicitMPM(view, config=config, enable_timers=False),
+                particles=range(model.particle_count),
+                substeps=2,
+            ),
+        ),
+    )
+    test.assertTrue(coupled.supports_cuda_graph_capture)
+    coupled.prepare_cuda_graph_capture()
+
+    state_0 = model.state()
+    state_1 = model.state()
+    coupled.step(state_0, state_1, control=None, contacts=None, dt=1.0e-4)
+    coupled.reset(state_1)
+
+    with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+        coupled.step(state_1, state_0, control=None, contacts=None, dt=1.0e-4)
+        coupled.step(state_0, state_1, control=None, contacts=None, dt=1.0e-4)
+
+    wp.capture_launch(capture.graph)
+    wp.capture_launch(capture.graph)
+    coupled.reset(state_1, world_mask=wp.array((True, False), dtype=wp.bool, device=device))
+    wp.capture_launch(capture.graph)
+
+    test.assertTrue(np.isfinite(state_0.particle_q.numpy()).all())
+    test.assertTrue(np.isfinite(state_1.particle_q.numpy()).all())
+    entry = coupled._entries["mpm"]
+    for values in _mpm_history_snapshot(entry.state_1).values():
+        test.assertTrue(np.isfinite(values).all())
+
+
+def test_reset_validates_state_and_world_mask_before_mutation(test, device):
+    model, solver, state = _make_sparse_reset_case(device)
+    _assign_nondefault_mpm_history(state)
+    expected = _mpm_history_snapshot(state)
+    solver._grid_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+    solver._grid_accumulated_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+
+    invalid_masks = (
+        wp.array((True,), dtype=wp.bool, device=device),
+        wp.array((1, 0), dtype=wp.int32, device=device),
+        wp.array((True, False), dtype=wp.bool, device="cpu"),
+    )
+    for world_mask in invalid_masks:
+        with test.subTest(shape=world_mask.shape, dtype=world_mask.dtype, device=str(world_mask.device)):
+            with test.assertRaises((TypeError, ValueError)):
+                solver.reset(state, world_mask=world_mask)
+            for name, values in expected.items():
+                np.testing.assert_array_equal(_mpm_history_snapshot(state)[name], values)
+            test.assertNotEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+
+    valid_mask = wp.array((True, False), dtype=wp.bool, device=device)
+    original_jp = state.mpm.particle_Jp
+    state.mpm.particle_Jp = wp.zeros(model.particle_count + 1, dtype=float, device=device)
+    with test.assertRaisesRegex(ValueError, "particle_Jp.*shape"):
+        solver.reset(state, world_mask=valid_mask)
+    state.mpm.particle_Jp = original_jp
+    for name, values in expected.items():
+        np.testing.assert_array_equal(_mpm_history_snapshot(state)[name], values)
+    test.assertNotEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+
+    def assert_reset_inputs_unchanged():
+        for name, values in expected.items():
+            np.testing.assert_array_equal(_mpm_history_snapshot(state)[name], values)
+        test.assertNotEqual(int(solver._grid_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+        test.assertNotEqual(int(solver._grid_accumulated_status.numpy()[0]), wp.Volume.REBUILD_SUCCESS)
+
+    with test.subTest(count="world_count"):
+        initial_world_count = model.world_count
+        model.world_count = 1
+        try:
+            with test.assertRaisesRegex(
+                RuntimeError,
+                r"model\.world_count changed after construction: expected 2, got 1",
+            ):
+                solver.reset(state, world_mask=wp.array((True,), dtype=wp.bool, device=device))
+        finally:
+            model.world_count = initial_world_count
+        assert_reset_inputs_unchanged()
+
+    # Restore the fixture even when the preceding subtest exposed a mutation,
+    # so particle-count drift is tested independently.
+    _assign_nondefault_mpm_history(state)
+    expected = _mpm_history_snapshot(state)
+    solver._grid_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+    solver._grid_accumulated_status.fill_(wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED)
+    with test.subTest(count="particle_count"):
+        initial_particle_count = model.particle_count
+        model.particle_count = 1
+        try:
+            with test.assertRaisesRegex(
+                RuntimeError,
+                r"model\.particle_count changed after construction: expected 2, got 1",
+            ):
+                solver.reset(state, world_mask=valid_mask)
+        finally:
+            model.particle_count = initial_particle_count
+        assert_reset_inputs_unchanged()
 
 
 def test_sparse_multiworld_capture_rebuilds_isolated_topology(test, device):
@@ -456,6 +860,42 @@ add_function_test(
     TestImplicitMPMMultiworldSparse,
     "test_sparse_multiworld_constructs_environment_grid",
     test_sparse_multiworld_constructs_environment_grid,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_cuda_graph_capture_capability_and_preparation",
+    test_cuda_graph_capture_capability_and_preparation,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_sparse_status_is_sticky_until_explicitly_cleared",
+    test_sparse_status_is_sticky_until_explicitly_cleared,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_masked_reset_restores_only_selected_world_history",
+    test_masked_reset_restores_only_selected_world_history,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_masked_reset_clears_only_selected_point_warmstarts",
+    test_masked_reset_clears_only_selected_point_warmstarts,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_coupled_mpm_non_in_place_capture_replays_after_reset",
+    test_coupled_mpm_non_in_place_capture_replays_after_reset,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_reset_validates_state_and_world_mask_before_mutation",
+    test_reset_validates_state_and_world_mask_before_mutation,
     devices=devices,
 )
 add_function_test(

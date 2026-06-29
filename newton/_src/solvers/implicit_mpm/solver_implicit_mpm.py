@@ -76,6 +76,8 @@ from .implicit_mpm_solver_kernels import (
     mat66,
     node_color,
     record_volume_rebuild_status,
+    reset_mpm_particle_history,
+    reset_mpm_point_warmstart,
     rotate_matrix_columns,
     rotate_matrix_rows,
     scatter_field_dof_values,
@@ -1018,11 +1020,14 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     ):
         super().__init__(model)
 
-        if model.particle_count == 0:
+        self._initial_particle_count = int(model.particle_count)
+        self._initial_world_count = int(model.world_count)
+
+        if self._initial_particle_count == 0:
             raise ValueError("SolverImplicitMPM requires at least one particle.")
 
-        self._separate_worlds = bool(config.separate_worlds and model.world_count > 1)
-        self._environment_count = model.world_count if self._separate_worlds else 1
+        self._separate_worlds = bool(config.separate_worlds and self._initial_world_count > 1)
+        self._environment_count = self._initial_world_count if self._separate_worlds else 1
         self._particle_environment = model.particle_world if self._separate_worlds else None
         self._particle_world_ranges = None
 
@@ -1219,8 +1224,61 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     @property
     @override
     def supports_cuda_graph_capture(self) -> bool:
-        """Return whether the resolved MPM grid topology is persistent."""
-        return self.grid_type == "fixed" or self._sparse_rebuildable
+        """Return whether this solver uses the validated CUDA graph configuration."""
+        return self._cuda_graph_capture_unsupported_reason() is None
+
+    def _cuda_graph_capture_unsupported_reason(self) -> str | None:
+        device = self.model.device
+        if not device.is_cuda:
+            return "CUDA graph capture requires a CUDA device."
+        if not wp.is_mempool_enabled(device):
+            return "CUDA graph capture requires the Warp memory pool to be enabled."
+        if not wp.is_conditional_graph_supported():
+            return "CUDA graph capture requires Warp conditional CUDA graph support."
+        if self.enable_timers:
+            return "CUDA graph capture requires enable_timers=False."
+        if any(solver != "jacobi" for solver in self.solver):
+            return f"CUDA graph capture requires every resolved rheology solver to be 'jacobi'; got {self.solver}."
+
+        if self.grid_type == "fixed":
+            if self.max_active_cell_count <= 0:
+                return "Fixed-grid CUDA graph capture requires Config.max_active_cell_count > 0."
+            return None
+        if self.grid_type == "sparse":
+            if not self._sparse_rebuildable:
+                return (
+                    "Sparse-grid CUDA graph capture requires a rebuildable sparse grid with positive "
+                    "Config.max_active_cell_count, Config.grid_padding=0, velocity_basis='Q1', and supported "
+                    "strain and collider bases."
+                )
+            return None
+        return f"CUDA graph capture does not support Config.grid_type={self.grid_type!r}."
+
+    @override
+    def prepare_cuda_graph_capture(self, contacts: newton.Contacts | None = None) -> None:
+        """Materialize graph-persistent MPM topology and buffers without stepping.
+
+        Args:
+            contacts: Unused. Implicit MPM manages collisions internally.
+
+        Raises:
+            RuntimeError: If the resolved solver configuration is not supported
+                inside an outer CUDA graph.
+        """
+        del contacts
+        unsupported_reason = self._cuda_graph_capture_unsupported_reason()
+        if unsupported_reason is not None:
+            raise RuntimeError(f"SolverImplicitMPM does not support outer CUDA graph capture. {unsupported_reason}")
+
+        with wp.ScopedDevice(self.model.device):
+            scratch = self._scratchpad
+            if isinstance(scratch.grid, fem.Nanogrid) and (
+                self.strain_basis in ("S2", "S3") or self.collider_basis in ("S2", "S3")
+            ):
+                _ = scratch.grid.edge_grid
+            self._require_velocity_space_fields(scratch, self._mpm_model.has_compliant_particles)
+            self._require_collision_space_fields(scratch, self._last_step_data)
+            self._require_strain_space_fields(scratch, self._last_step_data)
 
     def check_sparse_grid_rebuild_status(self) -> None:
         """Raise if a rebuildable sparse grid exceeded its reserved capacity.
@@ -1239,6 +1297,205 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             status |= int(self._grid_accumulated_status.numpy()[0])
         if status != wp.Volume.REBUILD_SUCCESS:
             raise _sparse_grid_rebuild_error(status)
+
+    def clear_sparse_grid_rebuild_status(self) -> None:
+        """Clear the latest and accumulated sparse-grid rebuild status.
+
+        Call this outside CUDA graph capture after handling a reported rebuild
+        failure. A subsequent :meth:`check_sparse_grid_rebuild_status` then
+        reports only failures produced after this boundary.
+
+        Raises:
+            RuntimeError: If called while the solver device is capturing a CUDA
+                graph.
+        """
+        if self.model.device.is_capturing:
+            raise RuntimeError("Cannot clear sparse grid rebuild status during CUDA graph capture")
+        if self._grid_status is not None:
+            self._grid_status.zero_()
+        if self._grid_accumulated_status is not None:
+            self._grid_accumulated_status.zero_()
+
+    @staticmethod
+    def _validate_reset_array(
+        array: wp.array | None,
+        *,
+        name: str,
+        shape: tuple[int, ...],
+        dtype,
+        device: wp.Device,
+    ) -> None:
+        if not isinstance(array, wp.array):
+            raise ValueError(f"state.{name} must be a Warp array.")
+        if array.shape != shape:
+            raise ValueError(f"state.{name} has shape {array.shape}, expected {shape}.")
+        if array.dtype != dtype:
+            raise TypeError(f"state.{name} has dtype {array.dtype}, expected {dtype}.")
+        if array.device != device:
+            raise ValueError(f"state.{name} is on device {array.device}, expected {device}.")
+
+    def _validate_reset_inputs(self, state: newton.State, world_mask: wp.array | None) -> None:
+        if state is None:
+            raise ValueError("'state' argument is required.")
+
+        particle_count = int(self.model.particle_count)
+        if particle_count != self._initial_particle_count:
+            raise RuntimeError(
+                "SolverImplicitMPM model.particle_count changed after construction: "
+                f"expected {self._initial_particle_count}, got {particle_count}."
+            )
+        world_count = int(self.model.world_count)
+        if world_count != self._initial_world_count:
+            raise RuntimeError(
+                "SolverImplicitMPM model.world_count changed after construction: "
+                f"expected {self._initial_world_count}, got {world_count}."
+            )
+
+        device = self.model.device
+        particle_shape = (self._initial_particle_count,)
+        self._validate_reset_array(
+            state.particle_q,
+            name="particle_q",
+            shape=particle_shape,
+            dtype=wp.vec3,
+            device=device,
+        )
+        self._validate_reset_array(
+            state.particle_qd,
+            name="particle_qd",
+            shape=particle_shape,
+            dtype=wp.vec3,
+            device=device,
+        )
+        if not hasattr(state, "mpm"):
+            raise ValueError("state is missing the 'mpm' custom-attribute namespace.")
+        for name, dtype in (
+            ("particle_elastic_strain", wp.mat33),
+            ("particle_transform", wp.mat33),
+            ("particle_qd_grad", wp.mat33),
+            ("particle_stress", wp.mat33),
+            ("particle_Jp", wp.float32),
+        ):
+            self._validate_reset_array(
+                getattr(state.mpm, name, None),
+                name=f"mpm.{name}",
+                shape=particle_shape,
+                dtype=dtype,
+                device=device,
+            )
+
+        if self.model.body_count > 0:
+            self._validate_reset_array(
+                state.body_q,
+                name="body_q",
+                shape=(self.model.body_count,),
+                dtype=wp.transform,
+                device=device,
+            )
+
+        if world_mask is None:
+            return
+        if not isinstance(world_mask, wp.array):
+            raise TypeError("world_mask must be a Warp array with dtype wp.bool.")
+        expected_shape = (self._initial_world_count,)
+        if world_mask.shape != expected_shape:
+            raise ValueError(f"world_mask has shape {world_mask.shape}, expected {expected_shape}.")
+        if world_mask.dtype != wp.bool:
+            raise TypeError(f"world_mask has dtype {world_mask.dtype}, expected {wp.bool}.")
+        if world_mask.device != device:
+            raise ValueError(f"world_mask is on device {world_mask.device}, expected {device}.")
+
+    def _validate_reset_warmstart_fields(self) -> None:
+        expected_shape = (self._initial_particle_count,)
+        for name, field in (
+            ("ws_impulse_field", self._last_step_data.ws_impulse_field),
+            ("ws_stress_field", self._last_step_data.ws_stress_field),
+        ):
+            if field is None or not isinstance(field.space.basis, fem.PointBasisSpace):
+                continue
+            if field.dof_values.shape != expected_shape:
+                raise ValueError(
+                    f"last-step {name}.dof_values has shape {field.dof_values.shape}, expected {expected_shape}."
+                )
+
+    def _clear_reset_warmstarts(self, world_mask: wp.array | None) -> None:
+        for field in (
+            self._last_step_data.ws_impulse_field,
+            self._last_step_data.ws_stress_field,
+        ):
+            if field is None:
+                continue
+            if world_mask is None:
+                field.dof_values.zero_()
+            elif self._initial_particle_count > 0 and isinstance(field.space.basis, fem.PointBasisSpace):
+                wp.launch(
+                    reset_mpm_point_warmstart,
+                    dim=self._initial_particle_count,
+                    inputs=[self.model.particle_world, world_mask, field.dof_values],
+                    device=self.model.device,
+                )
+
+    @override
+    def reset(
+        self,
+        state: newton.State,
+        world_mask: wp.array | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
+        """Reset implicit MPM history for all or selected worlds.
+
+        Particle history is reset when ``flags`` includes either
+        :attr:`~newton.StateFlags.PARTICLE_Q` or
+        :attr:`~newton.StateFlags.PARTICLE_QD`. If ``flags`` is ``None``, all
+        particle history is reset. Particle-backed warm starts are cleared for
+        selected worlds; a full reset clears all warm-start fields. Sparse-grid
+        rebuild status is always cleared at a valid reset boundary, and the
+        previous-collider-pose cache is refreshed from ``state``.
+
+        Args:
+            state: Simulation state whose MPM history is modified in place.
+            world_mask: Optional boolean mask of shape ``(model.world_count,)``
+                selecting worlds to reset. If ``None``, reset all worlds.
+            flags: Optional state bitmask. If ``None``, reset all particle
+                history.
+        """
+        self._validate_reset_inputs(state, world_mask)
+        self._validate_reset_warmstart_fields()
+        state_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        reset_particle_history = bool(state_flags & StateFlags.PARTICLE)
+
+        # Clearing first ensures a capture-time rejection cannot leave state
+        # partially reset.
+        self.clear_sparse_grid_rebuild_status()
+
+        with wp.ScopedDevice(self.model.device):
+            self._clear_reset_warmstarts(world_mask)
+
+            if reset_particle_history and self.model.particle_count > 0:
+                if world_mask is None:
+                    identity = wp.mat33(np.eye(3))
+                    state.mpm.particle_elastic_strain.fill_(identity)
+                    state.mpm.particle_transform.fill_(identity)
+                    state.mpm.particle_qd_grad.zero_()
+                    state.mpm.particle_stress.zero_()
+                    state.mpm.particle_Jp.fill_(1.0)
+                else:
+                    wp.launch(
+                        reset_mpm_particle_history,
+                        dim=self.model.particle_count,
+                        inputs=[
+                            self.model.particle_world,
+                            world_mask,
+                            state.mpm.particle_elastic_strain,
+                            state.mpm.particle_transform,
+                            state.mpm.particle_qd_grad,
+                            state.mpm.particle_stress,
+                            state.mpm.particle_Jp,
+                        ],
+                        device=self.model.device,
+                    )
+
+            self._last_step_data.save_collider_current_position(state.body_q)
 
     @override
     def step(

@@ -4,7 +4,9 @@
 """Smoke tests for the coupled solver prototype."""
 
 import unittest
+from types import SimpleNamespace
 from typing import ClassVar
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -831,14 +833,152 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 1)
         self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 0)
 
-    def test_implicit_mpm_cuda_graph_capability_requires_fixed_topology(self):
-        """Resolved fixed-grid MPM supports capture while dynamic grids do not."""
+    def test_implicit_mpm_cuda_graph_capability_requires_safe_sequence_and_topology(self):
+        """MPM advertises only the validated persistent-topology Jacobi configurations."""
         solver = SolverImplicitMPM.__new__(SolverImplicitMPM)
+        solver.model = SimpleNamespace(device=SimpleNamespace(is_cuda=True))
+        solver.enable_timers = False
+        solver.solver = ("jacobi",)
+        solver.max_active_cell_count = 16
+        solver._sparse_rebuildable = True
 
-        for grid_type, expected in (("sparse", False), ("dense", False), ("fixed", True)):
-            with self.subTest(grid_type=grid_type):
-                solver.grid_type = grid_type
-                self.assertEqual(solver.supports_cuda_graph_capture, expected)
+        cases = (
+            ("fixed", 16, True, ("jacobi",), True),
+            ("fixed", -1, True, ("jacobi",), False),
+            ("sparse", 16, True, ("jacobi",), True),
+            ("sparse", 16, False, ("jacobi",), False),
+            ("dense", 16, False, ("jacobi",), False),
+            ("fixed", 16, True, ("cg",), False),
+            ("fixed", 16, True, ("cr",), False),
+            ("fixed", 16, True, ("gmres",), False),
+            ("fixed", 16, True, ("gs",), False),
+            ("fixed", 16, True, ("jacobi", "cg"), False),
+        )
+        with (
+            mock.patch.object(wp, "is_mempool_enabled", return_value=True),
+            mock.patch.object(wp, "is_conditional_graph_supported", return_value=True),
+        ):
+            for grid_type, capacity, rebuildable, solver_sequence, expected in cases:
+                with self.subTest(
+                    grid_type=grid_type,
+                    capacity=capacity,
+                    rebuildable=rebuildable,
+                    solver_sequence=solver_sequence,
+                ):
+                    solver.grid_type = grid_type
+                    solver.max_active_cell_count = capacity
+                    solver._sparse_rebuildable = rebuildable
+                    solver.solver = solver_sequence
+                    self.assertEqual(solver.supports_cuda_graph_capture, expected)
+
+            solver.grid_type = "fixed"
+            solver.max_active_cell_count = 16
+            solver.solver = ("jacobi",)
+            solver.enable_timers = True
+            self.assertFalse(solver.supports_cuda_graph_capture)
+
+    def test_implicit_mpm_reset_syncs_namespaced_non_in_place_state(self):
+        """Coupled reset should mirror MPM history into the non-in-place output state."""
+        world_builder = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(world_builder)
+        world_builder.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
+
+        builder = newton.ModelBuilder(gravity=0.0)
+        SolverImplicitMPM.register_custom_attributes(builder)
+        builder.add_world(world_builder)
+        builder.add_world(world_builder)
+        model = builder.finalize(device="cpu")
+        config = SolverImplicitMPM.Config(
+            grid_type="fixed",
+            grid_padding=1,
+            max_active_cell_count=32,
+            max_iterations=1,
+            solver="jacobi",
+            transfer_scheme="pic",
+            warmstart_mode="none",
+        )
+        coupled = SolverCoupled(
+            model=model,
+            entries=(
+                SolverCoupled.Entry(
+                    name="mpm",
+                    solver=lambda view: SolverImplicitMPM(view, config=config, enable_timers=False),
+                    particles=range(model.particle_count),
+                    substeps=2,
+                ),
+            ),
+        )
+        entry = coupled._entries["mpm"]
+        self.assertFalse(entry.in_place)
+        self.assertEqual(entry.substeps, 2)
+        self.assertIsNot(entry.state_0, entry.state_1)
+        self.assertIsNotNone(entry.state_tmp)
+
+        def assign_history(state, offset):
+            count = state.particle_q.shape[0]
+            matrices = np.arange(1, count * 9 + 1, dtype=np.float32).reshape(count, 3, 3) + offset
+            state.mpm.particle_elastic_strain.assign(matrices)
+            state.mpm.particle_transform.assign(matrices + 100.0)
+            state.mpm.particle_qd_grad.assign(matrices + 200.0)
+            state.mpm.particle_stress.assign(matrices + 300.0)
+            state.mpm.particle_Jp.assign(np.arange(2, count + 2, dtype=np.float32) + offset)
+
+        def history(state):
+            return {
+                "particle_elastic_strain": state.mpm.particle_elastic_strain.numpy().copy(),
+                "particle_transform": state.mpm.particle_transform.numpy().copy(),
+                "particle_qd_grad": state.mpm.particle_qd_grad.numpy().copy(),
+                "particle_stress": state.mpm.particle_stress.numpy().copy(),
+                "particle_Jp": state.mpm.particle_Jp.numpy().copy(),
+            }
+
+        assign_history(entry.state_0, 0.0)
+        assign_history(entry.state_1, 1000.0)
+        expected = history(entry.state_0)
+        expected["particle_elastic_strain"][0] = np.eye(3, dtype=np.float32)
+        expected["particle_transform"][0] = np.eye(3, dtype=np.float32)
+        expected["particle_qd_grad"][0] = 0.0
+        expected["particle_stress"][0] = 0.0
+        expected["particle_Jp"][0] = 1.0
+
+        parent_state_0 = model.state()
+        parent_state_1 = model.state()
+        coupled.reset(parent_state_0, world_mask=wp.array((True, False), dtype=wp.bool, device=model.device))
+
+        for name, values in expected.items():
+            np.testing.assert_array_equal(history(entry.state_0)[name], values)
+            np.testing.assert_array_equal(history(entry.state_1)[name], values)
+
+        # Implicit MPM attaches output-only arrays to entry states during a
+        # step. Repeated substeps and post-step reset must remain compatible
+        # with the persistent custom MPM namespace.
+        coupled.reset(parent_state_0)
+        coupled.step(parent_state_0, parent_state_1, control=None, contacts=None, dt=1.0e-4)
+        self.assertFalse(hasattr(entry.state_0, "collider_ids"))
+        self.assertIsInstance(entry.state_1.collider_ids, wp.array)
+        coupled.step(parent_state_1, parent_state_0, control=None, contacts=None, dt=1.0e-4)
+        self.assertFalse(hasattr(entry.state_0, "collider_ids"))
+        coupled.reset(parent_state_0)
+
+        entry.substeps = 3
+        real_step = entry.solver.step
+        step_count = 0
+
+        def step_with_final_history_marker(state_in, state_out, control, contacts, dt):
+            nonlocal step_count
+            real_step(state_in, state_out, control, contacts, dt)
+            step_count += 1
+            if step_count == 3:
+                state_out.mpm.particle_Jp.fill_(7.0)
+
+        with mock.patch.object(entry.solver, "step", side_effect=step_with_final_history_marker):
+            coupled.step(parent_state_0, parent_state_1, control=None, contacts=None, dt=1.0e-4)
+
+        self.assertEqual(step_count, 3)
+        history_after_odd_substeps = history(entry.state_1)
+        for name, values in history(entry.state_tmp).items():
+            np.testing.assert_array_equal(history_after_odd_substeps[name], values)
+        np.testing.assert_array_equal(history_after_odd_substeps["particle_Jp"], np.full(model.particle_count, 7.0))
 
 
 class TestSolverCoupledEntryCollision(unittest.TestCase):
