@@ -4,7 +4,9 @@
 """Smoke tests for the coupled solver prototype."""
 
 import unittest
+from types import SimpleNamespace
 from typing import ClassVar
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -831,14 +833,49 @@ class TestSolverCoupledGraphCapture(unittest.TestCase):
         self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 1)
         self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 0)
 
-    def test_implicit_mpm_cuda_graph_capability_requires_fixed_topology(self):
-        """Resolved fixed-grid MPM supports capture while dynamic grids do not."""
+    def test_implicit_mpm_cuda_graph_capability_requires_safe_sequence_and_topology(self):
+        """MPM advertises only the validated persistent-topology Jacobi configurations."""
         solver = SolverImplicitMPM.__new__(SolverImplicitMPM)
+        solver.model = SimpleNamespace(device=SimpleNamespace(is_cuda=True))
+        solver.enable_timers = False
+        solver.solver = ("jacobi",)
+        solver.max_active_cell_count = 16
+        solver._sparse_rebuildable = True
 
-        for grid_type, expected in (("sparse", False), ("dense", False), ("fixed", True)):
-            with self.subTest(grid_type=grid_type):
-                solver.grid_type = grid_type
-                self.assertEqual(solver.supports_cuda_graph_capture, expected)
+        cases = (
+            ("fixed", 16, True, ("jacobi",), True),
+            ("fixed", -1, True, ("jacobi",), False),
+            ("sparse", 16, True, ("jacobi",), True),
+            ("sparse", 16, False, ("jacobi",), False),
+            ("dense", 16, False, ("jacobi",), False),
+            ("fixed", 16, True, ("cg",), False),
+            ("fixed", 16, True, ("cr",), False),
+            ("fixed", 16, True, ("gmres",), False),
+            ("fixed", 16, True, ("gs",), False),
+            ("fixed", 16, True, ("jacobi", "cg"), False),
+        )
+        with (
+            mock.patch.object(wp, "is_mempool_enabled", return_value=True),
+            mock.patch.object(wp, "is_conditional_graph_supported", return_value=True),
+        ):
+            for grid_type, capacity, rebuildable, solver_sequence, expected in cases:
+                with self.subTest(
+                    grid_type=grid_type,
+                    capacity=capacity,
+                    rebuildable=rebuildable,
+                    solver_sequence=solver_sequence,
+                ):
+                    solver.grid_type = grid_type
+                    solver.max_active_cell_count = capacity
+                    solver._sparse_rebuildable = rebuildable
+                    solver.solver = solver_sequence
+                    self.assertEqual(solver.supports_cuda_graph_capture, expected)
+
+            solver.grid_type = "fixed"
+            solver.max_active_cell_count = 16
+            solver.solver = ("jacobi",)
+            solver.enable_timers = True
+            self.assertFalse(solver.supports_cuda_graph_capture)
 
 
 class TestSolverCoupledEntryCollision(unittest.TestCase):

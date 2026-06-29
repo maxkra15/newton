@@ -897,12 +897,36 @@ def build_active_particle_mask(particle_flags: wp.array[wp.int32], point_mask: w
 
 @wp.kernel
 def record_volume_rebuild_status(status: wp.array[wp.uint32], accumulated_status: wp.array[wp.uint32]):
-    """Retain and report rebuild failures without a host synchronization."""
-    rebuild_status = status[0]
-    new_status = rebuild_status & ~accumulated_status[0]
-    if new_status != wp.uint32(0):
-        accumulated_status[0] = accumulated_status[0] | rebuild_status
-        wp.printf("Warning: Implicit MPM sparse grid rebuild failed with status %u.\n", rebuild_status)
+    """Retain rebuild failures without a host synchronization."""
+    accumulated_status[0] = accumulated_status[0] | status[0]
+
+
+@wp.kernel
+def reset_mpm_particle_history(
+    particle_world: wp.array[wp.int32],
+    world_mask: wp.array[wp.bool],
+    particle_elastic_strain: wp.array[wp.mat33],
+    particle_transform: wp.array[wp.mat33],
+    particle_qd_grad: wp.array[wp.mat33],
+    particle_stress: wp.array[wp.mat33],
+    particle_Jp: wp.array[float],
+):
+    """Reset implicit MPM history for particles owned by selected worlds."""
+    particle_index = wp.tid()
+    world = particle_world[particle_index]
+    selected = False
+    if world >= 0 and world < world_mask.shape[0]:
+        selected = world_mask[world]
+    elif world < 0 and world_mask.shape[0] == 1:
+        selected = world_mask[0]
+
+    if selected:
+        identity = wp.identity(n=3, dtype=float)
+        particle_elastic_strain[particle_index] = identity
+        particle_transform[particle_index] = identity
+        particle_qd_grad[particle_index] = wp.mat33(0.0)
+        particle_stress[particle_index] = wp.mat33(0.0)
+        particle_Jp[particle_index] = 1.0
 
 
 @wp.kernel
