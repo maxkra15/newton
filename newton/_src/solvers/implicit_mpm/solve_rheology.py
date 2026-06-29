@@ -131,6 +131,7 @@ class ArraySquaredNorm:
                 inputs=(self.batch_result, batch_offsets),
                 outputs=(self.batch_result,),
                 block_dim=self.tile_size,
+                device=self.device,
                 record_cmd=True,
             )
             return
@@ -151,6 +152,7 @@ class ArraySquaredNorm:
             inputs=(self.partial_sums_a,),
             outputs=(self.partial_sums_b,),
             block_dim=self.tile_size,
+            device=self.device,
             record_cmd=True,
         )
 
@@ -1456,7 +1458,7 @@ class _LinearSolver:
         )
 
         with _ScopedDisableGC():
-            end_iter, residual, _ = self._method_fn(
+            end_iter, residual, atol = self._method_fn(
                 A=self.linear_operator,
                 M=self.preconditioner,
                 b=self.rheology.plastic_strain_delta,
@@ -1476,8 +1478,8 @@ class _LinearSolver:
         if verbose and not (use_graph and self.momentum.velocity.device.is_capturing):
             if use_graph:
                 end_iter = end_iter.numpy()[0]
-                residual = float(residual.numpy().max())
-            res = math.sqrt(residual) / tolerance_scale
+            residual, _ = _linear_solver_result_norms(residual, atol, use_graph)
+            res = residual / tolerance_scale
             print(f"{self.name} terminated after {end_iter} iterations with residual {res}")
 
     @property
@@ -1489,6 +1491,13 @@ class _LinearSolver:
         if self._batch_offsets is not None:
             self._batch_offsets.release()
             self._batch_offsets = None
+
+
+def _linear_solver_result_norms(residual, atol, use_graph: bool) -> tuple[float, float]:
+    if use_graph:
+        residual = math.sqrt(float(residual.numpy().max()))
+        atol = math.sqrt(float(atol.numpy().max()))
+    return residual, atol
 
 
 class _ContactSolver:
