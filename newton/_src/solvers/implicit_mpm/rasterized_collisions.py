@@ -51,6 +51,18 @@ class Collider:
     collider_body_index: wp.array[int]
     """Body index of each collider. Shape (collider_count,)"""
 
+    collider_world: wp.array[int]
+    """Newton world ID of each stable collider. Shape (collider_count,)."""
+
+    collider_face_offset: wp.array[int]
+    """Start of each stable collider's faces in ``face_material_index``. Shape (collider_count,)."""
+
+    query_collider_ids: wp.array[int]
+    """Stable collider IDs grouped by global, then local world. Shape (collider_count,)."""
+
+    query_world_offsets: wp.array[int]
+    """Offsets into ``query_collider_ids`` for the global and local world groups. Shape (world_count + 2,)."""
+
     face_material_index: wp.array[int]
     """Material index for each collider mesh face. Shape (sum(mesh.face_count for mesh in meshes),)"""
 

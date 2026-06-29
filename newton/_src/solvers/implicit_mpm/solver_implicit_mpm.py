@@ -1073,6 +1073,8 @@ class SolverImplicitMPM(SolverBase):
         body_mass: wp.array | None = None,
         body_inv_inertia: wp.array | None = None,
         body_q: wp.array | None = None,
+        *,
+        collider_world_ids: list[int] | None = None,
     ) -> None:
         """Configure collider geometry and material properties.
 
@@ -1092,6 +1094,15 @@ class SolverImplicitMPM(SolverBase):
             body_mass: For dynamic colliders, per-body mass. Pass zeros for kinematic bodies.
             body_inv_inertia: For dynamic colliders, per-body inverse inertia.
             body_q: For dynamic colliders, per-body initial transform.
+            collider_world_ids: Per-collider Newton world IDs. Custom meshes default to global
+                (``-1``), while body-backed colliders infer their body's world and require any
+                supplied ID to match. IDs must be ``-1`` or in ``[0, model.world_count)``.
+
+        Raises:
+            ValueError: If collider-aligned inputs have different lengths, a world ID is invalid,
+                an isolated external collider model has a different ``world_count``, or an isolated
+                global body-backed collider is dynamic. Replicate a global dynamic collider per
+                world, make it static or kinematic, or disable ``Config.separate_worlds``.
         """
         self._mpm_model.setup_collider(
             collider_meshes=collider_meshes,
@@ -1105,6 +1116,7 @@ class SolverImplicitMPM(SolverBase):
             body_mass=body_mass,
             body_inv_inertia=body_inv_inertia,
             body_q=body_q,
+            collider_world_ids=collider_world_ids,
         )
 
         self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
