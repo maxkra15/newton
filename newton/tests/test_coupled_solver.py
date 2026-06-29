@@ -956,7 +956,7 @@ class TestSolverCoupledEntryCollision(unittest.TestCase):
                 entries=[SolverCoupled.Entry("entry", _StepCountingCopySolver, collide_interval=1)],
             )
 
-        for interval in (0, -1):
+        for interval in (0, -1, 1.5, True, "2"):
             with self.subTest(interval=interval), self.assertRaisesRegex(ValueError, "collide_interval.*>= 1"):
                 SolverCoupled(
                     model=model,

@@ -402,8 +402,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
         if not callable(factory):
             raise TypeError(f"SolverCoupled.Entry {cfg.name!r} collision_pipeline must be callable")
 
-        collide_interval = 1 if cfg.collide_interval is None else int(cfg.collide_interval)
-        if collide_interval < 1:
+        collide_interval = 1 if cfg.collide_interval is None else cfg.collide_interval
+        if type(collide_interval) is not int or collide_interval < 1:
             raise ValueError(f"SolverCoupled.Entry {cfg.name!r} collide_interval must be >= 1")
 
         pipeline = factory(view)
