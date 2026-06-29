@@ -7,6 +7,12 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.implicit_mpm.rasterized_collisions import (
+    _ALL_COLLIDER_WORLDS,
+    Collider,
+    collision_sdf,
+    rasterize_collider_kernel,
+)
 from newton._src.solvers.implicit_mpm.solve_rheology import ArraySquaredNorm, _linear_solver_result_norms
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
@@ -56,7 +62,32 @@ def _make_two_world_particle_model(device, builder=None, local_builder=None):
     return builder.finalize(device=device)
 
 
-def _make_box_collider_mesh(device, half_extent=0.5):
+@wp.kernel
+def _query_collision_sdf(
+    positions: wp.array[wp.vec3],
+    environment_indices: wp.array[int],
+    collider: Collider,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_q_prev: wp.array[wp.transform],
+    collider_ids: wp.array[int],
+    material_ids: wp.array[int],
+    friction: wp.array[float],
+    adhesion: wp.array[float],
+    projection_threshold: wp.array[float],
+):
+    i = wp.tid()
+    _sdf, _normal, _velocity, collider_id, material_id = collision_sdf(
+        positions[i], environment_indices[i], collider, body_q, body_qd, body_q_prev, 0.01
+    )
+    collider_ids[i] = collider_id
+    material_ids[i] = material_id
+    friction[i] = collider.material_friction[material_id]
+    adhesion[i] = collider.material_adhesion[material_id]
+    projection_threshold[i] = collider.material_projection_threshold[material_id]
+
+
+def _make_box_collider_mesh(device, half_extent=0.5, center=(0.0, 0.0, 0.0)):
     box = newton.Mesh.create_box(
         half_extent,
         half_extent,
@@ -66,7 +97,7 @@ def _make_box_collider_mesh(device, half_extent=0.5):
         compute_uvs=False,
         compute_inertia=False,
     )
-    points = wp.array(box.vertices, dtype=wp.vec3, device=device)
+    points = wp.array(box.vertices + np.asarray(center), dtype=wp.vec3, device=device)
     indices = wp.array(box.indices, dtype=int, device=device)
     return wp.Mesh(points, indices, wp.zeros_like(points))
 
@@ -463,6 +494,155 @@ def test_multiworld_collider_world_validation(test, device):
     np.testing.assert_array_equal(collider.collider_face_offset.numpy(), expected_face_offsets)
 
 
+def test_multiworld_collision_sdf_filters_stable_colliders(test, device):
+    model = _make_two_world_particle_model(device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    meshes = [
+        _make_box_collider_mesh(device, half_extent=0.25),
+        _make_box_collider_mesh(device, half_extent=0.25, center=(3.0, 0.0, 0.0)),
+        _make_box_collider_mesh(device, half_extent=0.25),
+    ]
+    solver.setup_collider(
+        collider_meshes=meshes,
+        collider_world_ids=[1, -1, 0],
+        collider_friction=[0.1, 0.2, 0.3],
+        collider_adhesion=[10.0, 20.0, 30.0],
+        collider_projection_threshold=[0.01, 0.02, 0.03],
+    )
+    collider = solver._mpm_model.collider
+    collider.query_max_dist = 1.0
+
+    positions = wp.array(
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (3.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        dtype=wp.vec3,
+        device=device,
+    )
+    environment_indices = wp.array((0, 1, 0, 1, _ALL_COLLIDER_WORLDS), dtype=int, device=device)
+    collider_ids = wp.empty(5, dtype=int, device=device)
+    material_ids = wp.empty(5, dtype=int, device=device)
+    friction = wp.empty(5, dtype=float, device=device)
+    adhesion = wp.empty(5, dtype=float, device=device)
+    projection_threshold = wp.empty(5, dtype=float, device=device)
+    state = model.state()
+
+    wp.launch(
+        _query_collision_sdf,
+        dim=5,
+        inputs=[
+            positions,
+            environment_indices,
+            collider,
+            state.body_q,
+            state.body_qd,
+            None,
+            collider_ids,
+            material_ids,
+            friction,
+            adhesion,
+            projection_threshold,
+        ],
+        device=device,
+    )
+
+    np.testing.assert_array_equal(collider_ids.numpy(), np.array((2, 0, 1, 1, 0)))
+    np.testing.assert_array_equal(material_ids.numpy(), np.array((3, 1, 2, 2, 1)))
+    np.testing.assert_allclose(friction.numpy(), np.array((0.3, 0.1, 0.2, 0.2, 0.1)))
+    np.testing.assert_allclose(adhesion.numpy(), np.array((30.0, 10.0, 20.0, 20.0, 10.0)))
+    np.testing.assert_allclose(projection_threshold.numpy(), np.array((0.03, 0.01, 0.02, 0.02, 0.01)))
+
+
+def test_multiworld_rasterize_collider_node_environments(test, device):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    local_builder = _make_mpm_particle_builder(gravity=0.0)
+    for _ in range(3):
+        builder.add_world(local_builder)
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    solver.setup_collider(
+        collider_meshes=[
+            _make_box_collider_mesh(device, half_extent=0.25),
+            _make_box_collider_mesh(device, half_extent=0.25, center=(3.0, 0.0, 0.0)),
+        ],
+        collider_world_ids=[0, -1],
+    )
+    collider = solver._mpm_model.collider
+    collider.query_max_dist = 1.0
+
+    node_positions = wp.array(
+        ((0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (0.0, 0.0, 0.0), (3.0, 0.0, 0.0)),
+        dtype=wp.vec3,
+        device=device,
+    )
+    node_environment_offsets = wp.array((0, 2, 2, 4), dtype=int, device=device)
+    node_volumes = wp.ones(4, dtype=float, device=device)
+    collider_sdf = wp.empty(4, dtype=float, device=device)
+    collider_velocity = wp.empty(4, dtype=wp.vec3, device=device)
+    collider_normals = wp.empty(4, dtype=wp.vec3, device=device)
+    collider_friction = wp.empty(4, dtype=float, device=device)
+    collider_adhesion = wp.empty(4, dtype=float, device=device)
+    collider_ids = wp.empty(4, dtype=int, device=device)
+    state = model.state()
+
+    wp.launch(
+        rasterize_collider_kernel,
+        dim=4,
+        inputs=[
+            collider,
+            state.body_q,
+            state.body_qd,
+            None,
+            0.1,
+            0.0,
+            0.01,
+            node_positions,
+            node_environment_offsets,
+            node_volumes,
+            collider_sdf,
+            collider_velocity,
+            collider_normals,
+            collider_friction,
+            collider_adhesion,
+            collider_ids,
+        ],
+        device=device,
+    )
+
+    np.testing.assert_array_equal(collider_ids.numpy(), np.array((0, 1, -1, 1)))
+    test.assertLess(collider_sdf.numpy()[0], 0.0)
+    test.assertLess(collider_sdf.numpy()[1], 0.0)
+    test.assertGreater(collider_sdf.numpy()[2], 1.0e6)
+    test.assertLess(collider_sdf.numpy()[3], 0.0)
+
+
+def test_multiworld_project_outside_filters_particle_world(test, device):
+    model = _make_two_world_particle_model(device)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    collider_mesh = _make_box_collider_mesh(device, half_extent=0.2, center=(0.05, 0.05, 0.05))
+    state_in = model.state()
+    initial_positions = state_in.particle_q.numpy()
+    particle_world = model.particle_world.numpy()
+
+    solver.setup_collider(collider_meshes=[collider_mesh], collider_world_ids=[0])
+    local_state_out = model.state()
+    solver.project_outside(state_in, local_state_out, dt=0.01, gap=1.0)
+    local_positions = local_state_out.particle_q.numpy()
+
+    test.assertFalse(np.array_equal(local_positions[particle_world == 0], initial_positions[particle_world == 0]))
+    np.testing.assert_array_equal(local_positions[particle_world == 1], initial_positions[particle_world == 1])
+
+    solver.setup_collider(collider_meshes=[collider_mesh], collider_world_ids=[-1])
+    global_state_out = model.state()
+    solver.project_outside(state_in, global_state_out, dt=0.01, gap=1.0)
+    global_positions = global_state_out.particle_q.numpy()
+
+    test.assertFalse(np.array_equal(global_positions[particle_world == 0], initial_positions[particle_world == 0]))
+    test.assertFalse(np.array_equal(global_positions[particle_world == 1], initial_positions[particle_world == 1]))
+    np.testing.assert_allclose(
+        global_positions[particle_world == 0], global_positions[particle_world == 1], rtol=0.0, atol=1.0e-7
+    )
+
+
 def test_multiworld_global_dynamic_collider_rejected(test, device):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
     inertia = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
@@ -565,6 +745,9 @@ def test_shared_solver_globalizes_external_multiworld_colliders(test, device):
     np.testing.assert_array_equal(collider.collider_world.numpy(), np.full(collider.collider_world.shape, -1))
     np.testing.assert_array_equal(collider.query_collider_ids.numpy(), np.arange(collider.collider_world.shape[0]))
     test.assertEqual(collider.query_world_offsets.numpy()[1], collider.collider_world.shape[0])
+    face_count = _make_box_collider_mesh(device).indices.shape[0] // 3
+    test.assertEqual(collider.face_material_index.shape[0], 2 * face_count)
+    test.assertEqual(np.unique(collider.face_material_index.numpy()).shape[0], 2)
 
 
 def test_sand_cube_on_plane(test, device):
@@ -892,6 +1075,27 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_collider_world_validation",
     test_multiworld_collider_world_validation,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_collision_sdf_filters_stable_colliders",
+    test_multiworld_collision_sdf_filters_stable_colliders,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_rasterize_collider_node_environments",
+    test_multiworld_rasterize_collider_node_environments,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_multiworld_project_outside_filters_particle_world",
+    test_multiworld_project_outside_filters_particle_world,
     devices=basic_devices,
 )
 

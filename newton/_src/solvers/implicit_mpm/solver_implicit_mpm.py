@@ -1097,8 +1097,9 @@ class SolverImplicitMPM(SolverBase):
             body_inv_inertia: For dynamic colliders, per-body inverse inertia.
             body_q: For dynamic colliders, per-body initial transform.
             collider_world_ids: Per-collider Newton world IDs. Custom meshes default to global
-                (``-1``), while body-backed colliders infer their body's world and require any
-                supplied ID to match. IDs must be ``-1`` or in ``[0, model.world_count)``.
+                (``-1``). In isolated mode, body-backed colliders infer their body's world and
+                require any supplied ID to match. Shared-mode default discovery globalizes
+                colliders. IDs must be ``-1`` or in ``[0, model.world_count)``.
 
         Raises:
             ValueError: If collider-aligned inputs have different lengths, a world ID is invalid,
@@ -1217,6 +1218,7 @@ class SolverImplicitMPM(SolverBase):
                 state_in.mpm.particle_qd_grad,
                 self.model.particle_flags,
                 self.model.particle_mass,
+                self._particle_environment,
                 self._mpm_model.collider,
                 state_in.body_q,
                 state_in.body_qd if self.collider_velocity_mode == "forward" else None,
@@ -1808,6 +1810,7 @@ class SolverImplicitMPM(SolverBase):
                 scratch.collider_adhesion,
                 scratch.collider_ids,
                 temporary_store=self.temporary_store,
+                node_environment_offsets=scratch.collider_environment_offsets,
             )
 
             # normal interpolation
