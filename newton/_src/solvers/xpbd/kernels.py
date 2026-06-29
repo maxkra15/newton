@@ -4,6 +4,7 @@
 import warp as wp
 
 from ...geometry import ParticleFlags
+from ...geometry.broad_phase_common import test_world_pair
 from ...math import (
     vec_abs,
     vec_leaky_max,
@@ -236,6 +237,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array[float],
     particle_radius: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -259,6 +261,7 @@ def solve_particle_particle_contacts(
     radius = particle_radius[i]
     w1 = particle_invmass[i]
     i_fluid = particle_flags[i] & ParticleFlags.FLUID
+    world_i = particle_world[i]
 
     # particle contact
     query = wp.hash_grid_query(grid, x, radius + max_radius + k_cohesion)
@@ -267,6 +270,8 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     while wp.hash_grid_query_next(query, index):
+        if not test_world_pair(world_i, particle_world[index]):
+            continue
         if i_fluid != 0 and (particle_flags[index] & ParticleFlags.FLUID) != 0:
             # fluid-fluid interactions are handled by the density constraint
             continue

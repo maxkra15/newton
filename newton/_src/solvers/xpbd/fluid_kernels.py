@@ -13,6 +13,7 @@ maintained on its own.
 import warp as wp
 
 from ...geometry import ParticleFlags
+from ...geometry.broad_phase_common import test_world_pair
 
 PI = wp.constant(3.141592653589793)
 
@@ -94,6 +95,7 @@ def compute_fluid_lambdas(
     particle_mass: wp.array[float],
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     smoothing_length: float,
     rest_density: float,
     relaxation_epsilon: float,
@@ -128,6 +130,7 @@ def compute_fluid_lambdas(
     x = particle_x[i]
     h = smoothing_length
     inv_rest_density = 1.0 / rest_density
+    world_i = particle_world[i]
 
     density = particle_mass[i] * poly6_kernel(0.0, h)
     grad_i = wp.vec3(0.0)
@@ -142,6 +145,8 @@ def compute_fluid_lambdas(
     query = wp.hash_grid_query(grid, x, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j == i:
             continue
         flags_j = particle_flags[j]
@@ -179,6 +184,7 @@ def solve_fluid_deltas(
     particle_mass: wp.array[float],
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     fluid_lambda: wp.array[float],
     smoothing_length: float,
     rest_density: float,
@@ -214,6 +220,7 @@ def solve_fluid_deltas(
     h = smoothing_length
     inv_rest_density = 1.0 / rest_density
     lambda_i = fluid_lambda[i]
+    world_i = particle_world[i]
 
     min_sep = 0.05 * rest_distance
     min_dist = 0.5 * rest_distance
@@ -231,6 +238,8 @@ def solve_fluid_deltas(
     query = wp.hash_grid_query(grid, x, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j == i:
             continue
         flags_j = particle_flags[j]
@@ -302,6 +311,7 @@ def compute_fluid_vorticity(
     particle_v: wp.array[wp.vec3],
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     fluid_density: wp.array[float],
     smoothing_length: float,
     # outputs
@@ -320,10 +330,13 @@ def compute_fluid_vorticity(
     v = particle_v[i]
     h = smoothing_length
     omega = wp.vec3(0.0)
+    world_i = particle_world[i]
 
     query = wp.hash_grid_query(grid, x, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j == i:
             continue
         flags_j = particle_flags[j]
@@ -348,6 +361,7 @@ def solve_fluid_velocities(
     particle_mass: wp.array[float],
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     fluid_density: wp.array[float],
     fluid_vorticity: wp.array[wp.vec3],
     smoothing_length: float,
@@ -375,6 +389,7 @@ def solve_fluid_velocities(
     x = particle_x[i]
     h = smoothing_length
     omega_i = fluid_vorticity[i]
+    world_i = particle_world[i]
 
     rho_i = wp.max(fluid_density[i], 1.0e-6)
     weight_sum = particle_mass[i] / rho_i * poly6_kernel(0.0, h)
@@ -384,6 +399,8 @@ def solve_fluid_velocities(
     query = wp.hash_grid_query(grid, x, h)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
+        if not test_world_pair(world_i, particle_world[j]):
+            continue
         if j == i:
             continue
         flags_j = particle_flags[j]

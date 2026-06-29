@@ -396,6 +396,7 @@ def test_fluid_max_neighbors_truncates_density(test, device):
                 model.particle_mass,
                 model.particle_inv_mass,
                 model.particle_flags,
+                model.particle_world,
                 h,
                 solver._fluid_rest_density_eff,
                 solver._fluid_eps,

@@ -130,6 +130,12 @@ def write_pair(
 
 # Collision filtering
 @wp.func
+def test_world_pair(world_a: int, world_b: int) -> bool:
+    """Return whether two Newton world IDs may interact."""
+    return world_a == world_b or world_a == -1 or world_b == -1
+
+
+@wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:
     """Test if two collision groups should interact.
 
@@ -172,11 +178,9 @@ def test_world_and_group_pair(world_a: int, world_b: int, collision_group_a: int
     Returns:
         bool: True if the entities should collide, False otherwise
     """
-    # Check world indices first
-    if world_a != -1 and world_b != -1 and world_a != world_b:
+    if not test_world_pair(world_a, world_b):
         return False
 
-    # If same world or at least one is global (-1), check collision groups
     return test_group_pair(collision_group_a, collision_group_b)
 
 
