@@ -702,8 +702,9 @@ class SolverImplicitMPM(SolverBase):
         warmstart solvers left-to-right, e.g. ``("cr", "gs")`` or
         ``("cg", "jacobi", "gs")``. Isolated multi-world outer CUDA graph
         capture is currently validated with nonlinear ``"jacobi"``. The
-        ``"cg"``, ``"cr"``, and ``"gmres"`` paths perform host reads and are
-        excluded from outer capture."""
+        ``"cg"``, ``"cr"``, and ``"gmres"`` paths read per-environment node
+        counts on the host and are excluded from this multi-world capture
+        configuration."""
         warmstart_mode: Literal["none", "auto", "particles", "grid", "smoothed"] = "auto"
         """Warmstart mode to use for the rheology solver."""
         collider_velocity_mode: Literal["forward", "backward"] = "forward"

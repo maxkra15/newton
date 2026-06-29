@@ -322,9 +322,11 @@ input, capacity, state-buffer sequence, or time step.
 Dense grids are excluded because their bounds are recomputed through a host
 read on every step. Sparse grids are excluded because they rebuild NanoVDB
 topology outside capture. The ``"cg"``, ``"cr"``, and ``"gmres"`` Krylov paths
-are also excluded because they read per-environment counts and solve results on
-the host. Other nonlinear solver choices are not part of the currently
-validated outer-capture configuration.
+are also excluded from isolated multi-world capture because their batched
+tolerance scaling reads per-environment node counts on the host. Their
+single-world result-reporting path does not have this limitation. Other
+nonlinear solver choices are not part of the currently validated outer-capture
+configuration.
 
 .. _Per-world gravity:
 
