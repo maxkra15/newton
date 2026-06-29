@@ -119,9 +119,74 @@ def test_multiworld_sparse_gimp_matches_independent(test, device):
     _run_multiworld_reference_case(device, grid_type="sparse", integration_scheme="gimp")
 
 
+def test_multiworld_sparse_empty_worlds_padding_matches_independent(test, device):
+    populated_worlds = (1, 3)
+    world_gravities = ((3.0, -2.0, 0.0), (-5.0, 1.0, 0.0))
+    reference_states = []
+
+    for world_gravity in world_gravities:
+        reference_model = _make_mpm_particle_builder().finalize(device=device)
+        reference_model.set_gravity(world_gravity)
+        reference_config = _make_mpm_config(grid_type="sparse", integration_scheme="pic")
+        reference_config.grid_padding = 1
+        _, reference_state = _step_mpm(reference_model, reference_config)
+        reference_states.append((reference_state.particle_q.numpy(), reference_state.particle_qd.numpy()))
+
+    local_builder = _make_mpm_particle_builder()
+    empty_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    empty_builder.add_body(is_kinematic=True, label="empty_world_marker")
+    multiworld_builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
+    SolverImplicitMPM.register_custom_attributes(multiworld_builder)
+    for world_builder in (empty_builder, local_builder, empty_builder, local_builder, empty_builder):
+        multiworld_builder.add_world(world_builder)
+
+    multiworld_model = multiworld_builder.finalize(device=device)
+    for world, world_gravity in zip(populated_worlds, world_gravities, strict=True):
+        multiworld_model.set_gravity(world_gravity, world=world)
+
+    starts = multiworld_model.particle_world_start.numpy()
+    particles_per_world = reference_states[0][0].shape[0]
+    for world in (0, 2, 4):
+        test.assertEqual(starts[world], starts[world + 1])
+    for world in populated_worlds:
+        test.assertEqual(starts[world + 1] - starts[world], particles_per_world)
+
+    multiworld_config = _make_mpm_config(grid_type="sparse", integration_scheme="pic")
+    multiworld_config.grid_padding = 1
+    _, multiworld_state = _step_mpm(multiworld_model, multiworld_config)
+    multiworld_q = multiworld_state.particle_q.numpy()
+    multiworld_qd = multiworld_state.particle_qd.numpy()
+
+    mean_velocities = []
+    for world, (reference_q, reference_qd) in zip(populated_worlds, reference_states, strict=True):
+        world_slice = slice(starts[world], starts[world + 1])
+        world_q = multiworld_q[world_slice]
+        world_qd = multiworld_qd[world_slice]
+        np.testing.assert_array_equal(np.isfinite(world_q), np.ones_like(world_q, dtype=bool))
+        np.testing.assert_array_equal(np.isfinite(world_qd), np.ones_like(world_qd, dtype=bool))
+        np.testing.assert_allclose(world_q, reference_q, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        np.testing.assert_allclose(world_qd, reference_qd, rtol=1.0e-5, atol=1.0e-6, equal_nan=False)
+        mean_velocities.append(np.mean(world_qd, axis=0))
+
+    mean_velocities = np.asarray(mean_velocities)
+    np.testing.assert_array_less(np.full(2, 1.0e-3), np.abs(mean_velocities[:, 0]))
+    np.testing.assert_array_equal(np.sign(mean_velocities[:, 0]), np.array((1.0, -1.0)))
+
+
 def test_multiworld_isolation_config(test, device):
     config = SolverImplicitMPM.Config()
     test.assertTrue(config.separate_worlds)
+
+
+def test_empty_particle_model_rejected(test, device):
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_world(newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81))
+    builder.add_world(newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=-9.81))
+    model = builder.finalize(device=device)
+
+    with test.assertRaisesRegex(ValueError, "at least one particle"):
+        SolverImplicitMPM(model, _make_mpm_config())
 
 
 def test_multiworld_global_particles_rejected(test, device):
@@ -528,8 +593,22 @@ add_function_test(
 
 add_function_test(
     TestImplicitMPM,
+    "test_multiworld_sparse_empty_worlds_padding_matches_independent",
+    test_multiworld_sparse_empty_worlds_padding_matches_independent,
+    devices=basic_cuda_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
     "test_multiworld_isolation_config",
     test_multiworld_isolation_config,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_empty_particle_model_rejected",
+    test_empty_particle_model_rejected,
     devices=basic_devices,
 )
 
