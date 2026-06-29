@@ -19,6 +19,7 @@ from newton._src.solvers.mujoco.equality import _add_equality_constraint
 from newton._src.solvers.vbd.rigid_vbd_kernels import forward_step_rigid_bodies
 from newton.solvers import (
     SolverBase,
+    SolverImplicitMPM,
     SolverMuJoCo,
     SolverSemiImplicit,
     SolverVBD,
@@ -343,6 +344,22 @@ class _StepCountingCopySolver(SolverBase, CouplingInterface):
             wp.copy(state_out.particle_qd, state_in.particle_qd)
 
 
+class _GraphCaptureRecordingSolver(_StepCountingCopySolver):
+    """Copy solver with configurable graph support and preparation recording."""
+
+    def __init__(self, model, supported: bool = True):
+        super().__init__(model)
+        self.supported = supported
+        self.prepared_contacts = []
+
+    @property
+    def supports_cuda_graph_capture(self) -> bool:
+        return self.supported
+
+    def prepare_cuda_graph_capture(self, contacts=None) -> None:
+        self.prepared_contacts.append(contacts)
+
+
 class _ContactRecordingCopySolver(_StepCountingCopySolver):
     """Copy solver that records rigid contact shape ids seen by step()."""
 
@@ -653,6 +670,145 @@ class TestModelView(unittest.TestCase):
         view = ModelView(self.model, "test")
         view.body_inv_mass = None
         self.assertIsNone(view.body_inv_mass)
+
+
+class TestSolverCoupledGraphCapture(unittest.TestCase):
+    """Test CUDA graph capability aggregation and preparation forwarding."""
+
+    @staticmethod
+    def _recording_factory(record, name: str, *, supported: bool = True):
+        def factory(model):
+            solver = _GraphCaptureRecordingSolver(model, supported=supported)
+            record[name] = solver
+            return solver
+
+        return factory
+
+    def test_nested_cuda_graph_capability_is_aggregated(self):
+        """An unsupported nested leaf should reject capture for every parent."""
+        model = newton.ModelBuilder().finalize(device="cpu")
+        leaves = {}
+        nested_solvers = []
+
+        def nested_factory(view):
+            nested = SolverCoupled(
+                model=view,
+                entries=[
+                    SolverCoupled.Entry(
+                        name="supported",
+                        solver=self._recording_factory(leaves, "supported"),
+                    ),
+                    SolverCoupled.Entry(
+                        name="unsupported",
+                        solver=self._recording_factory(leaves, "unsupported", supported=False),
+                    ),
+                ],
+            )
+            nested_solvers.append(nested)
+            return nested
+
+        coupled = SolverCoupled(
+            model=model,
+            entries=[SolverCoupled.Entry(name="nested", solver=nested_factory)],
+        )
+
+        self.assertFalse(nested_solvers[0].supports_cuda_graph_capture)
+        self.assertFalse(coupled.supports_cuda_graph_capture)
+
+    def test_prepare_cuda_graph_capture_forwards_filtered_contacts_recursively(self):
+        """Preparation should pass exact filtered buffers without stepping or changing state."""
+        builder = newton.ModelBuilder()
+        body_left = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        body_right = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        shape_left = builder.add_shape_sphere(body=body_left, radius=0.1)
+        shape_right = builder.add_shape_sphere(body=body_right, radius=0.1)
+        model = builder.finalize(device="cpu")
+
+        leaves = {}
+        nested_solvers = []
+
+        def nested_factory(view):
+            nested = SolverCoupled(
+                model=view,
+                entries=[
+                    SolverCoupled.Entry(
+                        name="left",
+                        solver=self._recording_factory(leaves, "left"),
+                        bodies=[body_left],
+                        shapes=[shape_left],
+                    ),
+                    SolverCoupled.Entry(
+                        name="right",
+                        solver=self._recording_factory(leaves, "right"),
+                        bodies=[body_right],
+                        shapes=[shape_right],
+                    ),
+                ],
+            )
+            nested_solvers.append(nested)
+            return nested
+
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="nested",
+                    solver=nested_factory,
+                    bodies=[body_left, body_right],
+                    shapes=[shape_left, shape_right],
+                )
+            ],
+        )
+        nested = nested_solvers[0]
+        contacts = newton.Contacts(rigid_contact_max=4, soft_contact_max=0, device=model.device)
+        contacts.rigid_contact_count.fill_(2)
+        contacts.rigid_contact_shape0.assign(np.array([shape_left, shape_right, -1, -1], dtype=np.int32))
+        contacts.rigid_contact_shape1.assign(np.array([shape_left, shape_right, -1, -1], dtype=np.int32))
+
+        model_body_q_before = model.body_q.numpy().copy()
+        coupled_state_before = coupled.entry_state("nested", "input").body_q.numpy().copy()
+        nested_state_before = {
+            name: nested.entry_state(name, "input").body_q.numpy().copy() for name in ("left", "right")
+        }
+
+        coupled.prepare_cuda_graph_capture(contacts)
+
+        outer_filtered = coupled.entry_contacts("nested", contacts)
+        left_filtered = nested.entry_contacts("left", outer_filtered)
+        right_filtered = nested.entry_contacts("right", outer_filtered)
+        self.assertIs(leaves["left"].prepared_contacts[0], left_filtered)
+        self.assertIs(leaves["right"].prepared_contacts[0], right_filtered)
+        self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 1)
+        self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 1)
+        self.assertEqual(int(left_filtered.rigid_contact_shape0.numpy()[0]), shape_left)
+        self.assertEqual(int(right_filtered.rigid_contact_shape0.numpy()[0]), shape_right)
+        self.assertEqual(leaves["left"].step_count, 0)
+        self.assertEqual(leaves["right"].step_count, 0)
+        np.testing.assert_array_equal(model.body_q.numpy(), model_body_q_before)
+        np.testing.assert_array_equal(coupled.entry_state("nested", "input").body_q.numpy(), coupled_state_before)
+        for name in ("left", "right"):
+            np.testing.assert_array_equal(nested.entry_state(name, "input").body_q.numpy(), nested_state_before[name])
+
+        contacts.clear()
+        contacts.rigid_contact_count.fill_(1)
+        contacts.rigid_contact_shape0.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
+        contacts.rigid_contact_shape1.assign(np.array([shape_right, -1, -1, -1], dtype=np.int32))
+
+        coupled.prepare_cuda_graph_capture(contacts)
+
+        self.assertIs(leaves["left"].prepared_contacts[1], left_filtered)
+        self.assertIs(leaves["right"].prepared_contacts[1], right_filtered)
+        self.assertEqual(int(left_filtered.rigid_contact_count.numpy()[0]), 0)
+        self.assertEqual(int(right_filtered.rigid_contact_count.numpy()[0]), 1)
+
+    def test_implicit_mpm_cuda_graph_capability_requires_fixed_topology(self):
+        """Resolved fixed-grid MPM supports capture while dynamic grids do not."""
+        solver = SolverImplicitMPM.__new__(SolverImplicitMPM)
+
+        for grid_type, expected in (("sparse", False), ("dense", False), ("fixed", True)):
+            with self.subTest(grid_type=grid_type):
+                solver.grid_type = grid_type
+                self.assertEqual(solver.supports_cuda_graph_capture, expected)
 
 
 class TestSolverCoupledBasic(unittest.TestCase):

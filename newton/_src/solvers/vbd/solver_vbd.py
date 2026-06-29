@@ -782,6 +782,42 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
     @override
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Preallocate contact-capacity-dependent buffers before graph capture.
+
+        Args:
+            contacts: Contact buffers whose capacities determine persistent
+                rigid-rigid, rigid-particle, history, and query storage.
+        """
+        if contacts is None:
+            return
+
+        rigid_contact_max = int(contacts.rigid_contact_max)
+        soft_contact_max = int(contacts.soft_contact_max)
+
+        body_body_state = getattr(self, "body_body_contact_penalty_k", None)
+        if body_body_state is not None:
+            self._init_body_body_contact_state(rigid_contact_max)
+
+        self._init_body_particle_contact_state(soft_contact_max)
+
+        self._rigid_contact_body0 = self._grow_contact_array(
+            self._rigid_contact_body0, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_body1 = self._grow_contact_array(
+            self._rigid_contact_body1, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_point0_world = self._grow_contact_array(
+            self._rigid_contact_point0_world, rigid_contact_max, wp.vec3
+        )
+        self._rigid_contact_point1_world = self._grow_contact_array(
+            self._rigid_contact_point1_world, rigid_contact_max, wp.vec3
+        )
+
+        if self.rigid_contact_history and hasattr(self, "_prev_contact_lambda"):
+            self._init_rigid_contact_warmstart(max(1, rigid_contact_max))
+
+    @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
@@ -1053,34 +1089,67 @@ class SolverVBD(SolverBase, CouplingInterface):
     # Initialization Helper Methods
     # =====================================================
 
+    def _grow_contact_array(self, array, capacity: int, dtype, *, fill_value=None):
+        """Grow a contact array while preserving its existing prefix."""
+        if array is not None and array.shape[0] >= capacity:
+            return array
+
+        if fill_value is None:
+            grown = wp.zeros(capacity, dtype=dtype, device=self.device)
+        else:
+            grown = wp.full(capacity, fill_value, dtype=dtype, device=self.device)
+        if array is not None and array.shape[0] > 0:
+            wp.copy(grown, array, count=array.shape[0])
+        return grown
+
     def _init_body_body_contact_state(self, rigid_contact_max: int) -> None:
-        """Allocate body-body contact state arrays sized to the given contact buffer capacity."""
-        self.body_body_contact_penalty_k = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_ke = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_kd = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_mu = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_lambda = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_C0 = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_stick_flag = wp.zeros(rigid_contact_max, dtype=wp.int32, device=self.device)
+        """Ensure body-body contact state arrays have the requested capacity."""
+        self.body_body_contact_penalty_k = self._grow_contact_array(
+            self.body_body_contact_penalty_k, rigid_contact_max, float
+        )
+        self.body_body_contact_material_ke = self._grow_contact_array(
+            self.body_body_contact_material_ke, rigid_contact_max, float
+        )
+        self.body_body_contact_material_kd = self._grow_contact_array(
+            self.body_body_contact_material_kd, rigid_contact_max, float
+        )
+        self.body_body_contact_material_mu = self._grow_contact_array(
+            self.body_body_contact_material_mu, rigid_contact_max, float
+        )
+        self.body_body_contact_lambda = self._grow_contact_array(
+            self.body_body_contact_lambda, rigid_contact_max, wp.vec3
+        )
+        self.body_body_contact_C0 = self._grow_contact_array(self.body_body_contact_C0, rigid_contact_max, wp.vec3)
+        self.body_body_contact_stick_flag = self._grow_contact_array(
+            self.body_body_contact_stick_flag, rigid_contact_max, wp.int32
+        )
 
     def _init_body_particle_contact_state(self, soft_contact_max: int) -> None:
-        """Allocate body-particle material arrays sized to the given soft contact capacity."""
-        self.body_particle_contact_penalty_k = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_ke = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_kd = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_mu = wp.zeros(soft_contact_max, dtype=float, device=self.device)
+        """Ensure body-particle material arrays have the requested capacity."""
+        self.body_particle_contact_penalty_k = self._grow_contact_array(
+            self.body_particle_contact_penalty_k, soft_contact_max, float
+        )
+        self.body_particle_contact_material_ke = self._grow_contact_array(
+            self.body_particle_contact_material_ke, soft_contact_max, float
+        )
+        self.body_particle_contact_material_kd = self._grow_contact_array(
+            self.body_particle_contact_material_kd, soft_contact_max, float
+        )
+        self.body_particle_contact_material_mu = self._grow_contact_array(
+            self.body_particle_contact_material_mu, soft_contact_max, float
+        )
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
-        """Allocate rigid contact warm-start buffers."""
+        """Ensure rigid contact warm-start buffers have the requested capacity."""
         cap = max(1, rigid_contact_max)
-        self._prev_contact_lambda = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_stick_flag = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        self._prev_contact_penalty_k = wp.zeros(cap, dtype=float, device=self.device)
-        self._prev_contact_point0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_point1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_normal = wp.zeros(cap, dtype=wp.vec3, device=self.device)
+        self._prev_contact_lambda = self._grow_contact_array(self._prev_contact_lambda, cap, wp.vec3)
+        self._prev_contact_stick_flag = self._grow_contact_array(self._prev_contact_stick_flag, cap, wp.int32)
+        self._prev_contact_penalty_k = self._grow_contact_array(self._prev_contact_penalty_k, cap, float)
+        self._prev_contact_point0 = self._grow_contact_array(self._prev_contact_point0, cap, wp.vec3)
+        self._prev_contact_point1 = self._grow_contact_array(self._prev_contact_point1, cap, wp.vec3)
+        self._prev_contact_offset0 = self._grow_contact_array(self._prev_contact_offset0, cap, wp.vec3)
+        self._prev_contact_offset1 = self._grow_contact_array(self._prev_contact_offset1, cap, wp.vec3)
+        self._prev_contact_normal = self._grow_contact_array(self._prev_contact_normal, cap, wp.vec3)
 
     def _raise_if_capturing_resize(self, name: str, current: int, required: int) -> None:
         if self.device.is_capturing and not wp.is_mempool_enabled(self.device):

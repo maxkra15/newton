@@ -2017,6 +2017,134 @@ def _collect_rigid_contact_forces_reports_surface_points(test, device):
     np.testing.assert_allclose(reported1_np[:count], expected1, atol=1.0e-5)
 
 
+def _prepare_cuda_graph_capture_preallocates_vbd_contacts(test, device):
+    """VBD preparation should size every contact buffer once without advancing state."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+    builder.add_shape_sphere(body=body, radius=0.1)
+    builder.add_particle(pos=(0.0, 0.0, 0.5), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
+    builder.color()
+
+    with wp.ScopedDevice(device):
+        model = builder.finalize()
+        solver = newton.solvers.SolverVBD(model, rigid_contact_history=True)
+
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=0,
+                soft_contact_max=0,
+                device=device,
+                contact_matching=True,
+            )
+        )
+        test.assertIsNotNone(solver._prev_contact_lambda)
+        test.assertGreaterEqual(solver._prev_contact_lambda.shape[0], 1)
+
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=2,
+                soft_contact_max=2,
+                device=device,
+                contact_matching=True,
+            )
+        )
+        solver.body_body_contact_penalty_k.fill_(11.0)
+        solver.body_body_contact_lambda.fill_(wp.vec3(1.0, 2.0, 3.0))
+        solver.body_particle_contact_penalty_k.fill_(13.0)
+        solver._rigid_contact_body0.fill_(17)
+        solver._prev_contact_penalty_k.fill_(19.0)
+        solver._prev_contact_lambda.fill_(wp.vec3(4.0, 5.0, 6.0))
+
+        rigid_capacity = max(7, solver.body_body_contact_penalty_k.shape[0] + 3)
+        soft_capacity = max(5, solver.body_particle_contact_penalty_k.shape[0] + 3)
+        contacts = newton.Contacts(
+            rigid_contact_max=rigid_capacity,
+            soft_contact_max=soft_capacity,
+            device=device,
+            contact_matching=True,
+        )
+
+        model_body_q_before = model.body_q.numpy().copy()
+        model_particle_q_before = model.particle_q.numpy().copy()
+        body_q_prev_before = solver.body_q_prev.numpy().copy()
+        particle_q_prev_before = solver.particle_q_prev.numpy().copy()
+
+        solver.prepare_cuda_graph_capture(contacts)
+
+        np.testing.assert_array_equal(solver.body_body_contact_penalty_k.numpy()[:2], [11.0, 11.0])
+        np.testing.assert_array_equal(
+            solver.body_body_contact_lambda.numpy()[:2],
+            np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(solver.body_particle_contact_penalty_k.numpy()[:2], [13.0, 13.0])
+        np.testing.assert_array_equal(solver._rigid_contact_body0.numpy()[:2], [17, 17])
+        np.testing.assert_array_equal(solver._prev_contact_penalty_k.numpy()[:2], [19.0, 19.0])
+        np.testing.assert_array_equal(
+            solver._prev_contact_lambda.numpy()[:2],
+            np.array([[4.0, 5.0, 6.0], [4.0, 5.0, 6.0]], dtype=np.float32),
+        )
+
+        rigid_names = (
+            "body_body_contact_penalty_k",
+            "body_body_contact_material_ke",
+            "body_body_contact_material_kd",
+            "body_body_contact_material_mu",
+            "body_body_contact_lambda",
+            "body_body_contact_C0",
+            "body_body_contact_stick_flag",
+        )
+        soft_names = (
+            "body_particle_contact_penalty_k",
+            "body_particle_contact_material_ke",
+            "body_particle_contact_material_kd",
+            "body_particle_contact_material_mu",
+        )
+        query_names = (
+            "_rigid_contact_body0",
+            "_rigid_contact_body1",
+            "_rigid_contact_point0_world",
+            "_rigid_contact_point1_world",
+        )
+        history_names = (
+            "_prev_contact_lambda",
+            "_prev_contact_stick_flag",
+            "_prev_contact_penalty_k",
+            "_prev_contact_point0",
+            "_prev_contact_point1",
+            "_prev_contact_offset0",
+            "_prev_contact_offset1",
+            "_prev_contact_normal",
+        )
+        all_names = rigid_names + soft_names + query_names + history_names
+
+        for name in rigid_names + query_names + history_names:
+            test.assertGreaterEqual(getattr(solver, name).shape[0], rigid_capacity, name)
+        for name in soft_names:
+            test.assertGreaterEqual(getattr(solver, name).shape[0], soft_capacity, name)
+
+        arrays_before = {name: getattr(solver, name) for name in all_names}
+        pointers_before = {name: array.ptr for name, array in arrays_before.items()}
+
+        solver.prepare_cuda_graph_capture(contacts)
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=rigid_capacity - 1,
+                soft_contact_max=soft_capacity - 1,
+                device=device,
+                contact_matching=True,
+            )
+        )
+
+        for name, array in arrays_before.items():
+            test.assertIs(getattr(solver, name), array, name)
+            test.assertEqual(getattr(solver, name).ptr, pointers_before[name], name)
+
+        np.testing.assert_array_equal(model.body_q.numpy(), model_body_q_before)
+        np.testing.assert_array_equal(model.particle_q.numpy(), model_particle_q_before)
+        np.testing.assert_array_equal(solver.body_q_prev.numpy(), body_q_prev_before)
+        np.testing.assert_array_equal(solver.particle_q_prev.numpy(), particle_q_prev_before)
+
+
 class TestSolverVBD(unittest.TestCase):
     pass
 
@@ -2161,6 +2289,12 @@ add_function_test(
     TestSolverVBD,
     "test_collect_rigid_contact_forces_reports_surface_points",
     _collect_rigid_contact_forces_reports_surface_points,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_prepare_cuda_graph_capture_preallocates_vbd_contacts",
+    _prepare_cuda_graph_capture_preallocates_vbd_contacts,
     devices=devices,
 )
 

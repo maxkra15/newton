@@ -1890,6 +1890,17 @@ class SolverCoupled(SolverBase, CouplingInterface):
     # SolverBase interface
     # ------------------------------------------------------------------
 
+    @property
+    def supports_cuda_graph_capture(self) -> bool:
+        """Return whether every coupled entry supports CUDA graph capture."""
+        return all(entry.solver.supports_cuda_graph_capture for entry in self._entries.values())
+
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Prepare entry contact buffers and recursively prepare sub-solvers."""
+        self.prepare_contacts(contacts)
+        for entry in self._entries.values():
+            entry.solver.prepare_cuda_graph_capture(self.entry_contacts(entry.name, contacts))
+
     def step(
         self,
         state_in: State,
@@ -2393,6 +2404,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 ],
                 device=self.model.device,
             )
+
+        wp.copy(filtered.contact_generation, contacts.contact_generation)
 
         return filtered
 

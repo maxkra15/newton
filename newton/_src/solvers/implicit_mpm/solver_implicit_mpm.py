@@ -1043,6 +1043,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """Grid voxel size used by the solver."""
         return self._mpm_model.voxel_size
 
+    @property
+    @override
+    def supports_cuda_graph_capture(self) -> bool:
+        """Return whether the resolved MPM grid topology is fixed."""
+        return self.grid_type == "fixed"
+
     @override
     def step(
         self,
