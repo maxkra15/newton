@@ -963,6 +963,9 @@ class SolverImplicitMPM(SolverBase):
     ):
         super().__init__(model)
 
+        if model.particle_count == 0:
+            raise ValueError("SolverImplicitMPM requires at least one particle.")
+
         self._separate_worlds = bool(config.separate_worlds and model.world_count > 1)
         self._environment_count = model.world_count if self._separate_worlds else 1
         self._particle_environment = model.particle_world if self._separate_worlds else None
