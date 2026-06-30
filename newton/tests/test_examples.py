@@ -912,6 +912,13 @@ add_example_test(
     test_options={"num-frames": 5, "xpbd-iterations": 4, "vbd-iterations": 2},
     use_viewer=True,
 )
+add_example_test(
+    TestMultiphysicsExamples,
+    name="multiphysics.example_waterhose_insert",
+    devices=cuda_test_devices,
+    test_options={"num_frames": 4000, "usd_required": True, "test_timeout": 600},
+    use_viewer=True,
+)
 
 
 class TestSoftbodyExamples(unittest.TestCase):
