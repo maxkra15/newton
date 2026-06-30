@@ -988,6 +988,23 @@ class Example:
             parse_visuals_as_colliders=False,
             ignore_inertial_definitions=True,
         )
+        driven_children = {int(child) for child in robot.joint_child if int(child) >= 0}
+        min_inertia = wp.mat33(
+            robot.bound_inertia,
+            0.0,
+            0.0,
+            0.0,
+            robot.bound_inertia,
+            0.0,
+            0.0,
+            0.0,
+            robot.bound_inertia,
+        )
+        for body_id in driven_children:
+            if robot.body_mass[body_id] <= 0.0:
+                robot.body_mass[body_id] = robot.bound_mass
+                robot.body_inertia[body_id] = min_inertia
+
         # Keep pre-mimic-support behavior for this example: gripper mimic constraints
         # were previously ignored by SolverMuJoCo and alter the baseline trajectories.
         mimic_count = len(robot.constraint_mimic_enabled)
@@ -1940,6 +1957,7 @@ class Example:
             rigid_joint_linear_k_start=self.vbd_rigid_joint_linear_k_start,
             rigid_joint_angular_k_start=self.vbd_rigid_joint_angular_k_start,
         )
+        self._vbd_body_q_prev_snapshot = wp.zeros_like(self.vbd_solver.body_q_prev)
 
         self.vbd_state_0 = self.vbd_model.state()
         self.vbd_state_1 = self.vbd_model.state()
@@ -2464,6 +2482,7 @@ class Example:
                 t0 = time.perf_counter()
 
             self.vbd_solver.set_rigid_history_update(bool(update_vbd_history))
+            wp.copy(self._vbd_body_q_prev_snapshot, self.vbd_solver.body_q_prev)
             self.vbd_solver.step(vbd_state_0, vbd_state_1, self.vbd_control, self.vbd_contacts, substep_dt)
             vbd_collision_step_counter += 1
 
@@ -2486,7 +2505,7 @@ class Example:
                     and hasattr(self.vbd_solver, "collect_rigid_contact_forces")
                 ):
                     c_b0, c_b1, c_p0w, c_p1w, c_f_b1, c_count = self.vbd_solver.collect_rigid_contact_forces(
-                        vbd_state_1, self.vbd_contacts, substep_dt
+                        vbd_state_1.body_q, self._vbd_body_q_prev_snapshot, self.vbd_contacts, substep_dt
                     )
                     wp.launch(
                         harvest_proxy_wrenches_from_contact_forces_kernel,

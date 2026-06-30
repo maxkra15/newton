@@ -2228,19 +2228,19 @@ class Example:
 
     def test_final(self):
         body_q = self.state_0.body_q.numpy()
-        particle_q = self.state_0.particle_q.numpy()
         joint_q = self.state_0.joint_q.numpy()
 
         assert np.all(np.isfinite(body_q)), "Body transforms contain non-finite values"
-        assert np.all(np.isfinite(particle_q)), "Cable particles contain non-finite values"
         assert np.all(np.isfinite(joint_q)), "Joint coordinates contain non-finite values"
 
-        if particle_q.size:
-            particle_min = np.min(particle_q, axis=0)
-            particle_max = np.max(particle_q, axis=0)
-            bbox_size = np.linalg.norm(particle_max - particle_min)
-            assert bbox_size < 5.0, f"Cable particle bounds exploded: size={bbox_size:.3f}"
-            assert particle_min[2] > 0.0, f"Cable particles fell below the table region: z_min={particle_min[2]:.3f}"
+        cable_body_ids = [body_id for cable_ids in self.cable_all_body_ids for body_id in cable_ids]
+        cable_positions = body_q[cable_body_ids, :3]
+        if cable_positions.size:
+            cable_min = np.min(cable_positions, axis=0)
+            cable_max = np.max(cable_positions, axis=0)
+            bbox_size = np.linalg.norm(cable_max - cable_min)
+            assert bbox_size < 5.0, f"Cable body bounds exploded: size={bbox_size:.3f}"
+            assert cable_min[2] > 0.0, f"Cable bodies fell below the table region: z_min={cable_min[2]:.3f}"
 
         task_idx = self.sm_task_idx.numpy()
         task_count = self.sm_task_schedule.shape[0]
