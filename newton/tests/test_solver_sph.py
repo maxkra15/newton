@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -93,6 +95,80 @@ def test_sph_exports_public_solver(test, device):
     test.assertIsNotNone(solver.render_anisotropy_secondary)
     test.assertIsNotNone(solver.render_anisotropy_tertiary)
     test.assertFalse(solver.render_buffers_valid)
+
+
+def test_sph_neighbor_queries_use_grouped_compatibility_path(test, device):
+    del device
+
+    kernels_path = Path(newton.__file__).parent / "_src" / "solvers" / "sph" / "kernels.py"
+    kernels_tree = ast.parse(kernels_path.read_text())
+    function_nodes = {
+        node.name: node for node in kernels_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    expected_queries = {
+        "compute_sph_density_pressure": ("particle_world", ("world_i",)),
+        "compute_sph_vorticity": ("particle_world", ("world_i",)),
+        "integrate_sph_particles": ("particle_world", ("world_idx",)),
+        "compute_sph_render_particles": ("particle_world", ("world_i", "world_i")),
+        "compute_pbf_lambdas": ("particle_world", ("world_i",)),
+        "solve_pbf_deltas": ("particle_world", ("world_i",)),
+        "smooth_sph_velocities": ("particle_world", ("world_i",)),
+        "update_sph_diffuse_particles": ("fluid_world", ("world_idx",)),
+        "spawn_sph_diffuse_particles": ("fluid_world", ("source_world",)),
+    }
+
+    for function_name, (world_argument, source_worlds) in expected_queries.items():
+        function = function_nodes[function_name]
+        arguments = [argument.arg for argument in function.args.args]
+        world_index = arguments.index(world_argument)
+        test.assertEqual(arguments[world_index + 1], "grouped", function_name)
+
+        calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+        direct_queries = [call for call in calls if ast.unparse(call.func) == "wp.hash_grid_query"]
+        compatibility_queries = [call for call in calls if ast.unparse(call.func) == "particle_grid_query"]
+        test.assertEqual(direct_queries, [], function_name)
+        test.assertEqual(len(compatibility_queries), len(source_worlds), function_name)
+        for query, source_world in zip(compatibility_queries, source_worlds, strict=True):
+            test.assertEqual(len(query.args), 5, function_name)
+            test.assertEqual(ast.unparse(query.args[3]), source_world, function_name)
+            test.assertEqual(ast.unparse(query.args[4]), "grouped", function_name)
+
+    solver_launches = {
+        "solver_sph.py": set(expected_queries),
+        "solver_xpbd.py": {
+            "compute_sph_render_particles",
+            "update_sph_diffuse_particles",
+            "spawn_sph_diffuse_particles",
+        },
+    }
+    for solver_filename, expected_kernels in solver_launches.items():
+        solver_subdir = solver_filename.removeprefix("solver_").removesuffix(".py")
+        solver_path = Path(newton.__file__).parent / "_src" / "solvers" / solver_subdir / solver_filename
+        solver_tree = ast.parse(solver_path.read_text())
+        found_kernels = set()
+        for call in (node for node in ast.walk(solver_tree) if isinstance(node, ast.Call)):
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            kernel = keywords.get("kernel")
+            inputs = keywords.get("inputs")
+            if (
+                not isinstance(kernel, ast.Name)
+                or kernel.id not in expected_kernels
+                or not isinstance(inputs, ast.List)
+            ):
+                continue
+            found_kernels.add(kernel.id)
+            input_names = [ast.unparse(value) for value in inputs.elts]
+            world_index = input_names.index("model.particle_world")
+            test.assertEqual(input_names[world_index + 1], "self._particle_grid_grouped", kernel.id)
+        test.assertEqual(found_kernels, expected_kernels, solver_filename)
+
+    sph_solver_path = Path(newton.__file__).parent / "_src" / "solvers" / "sph" / "solver_sph.py"
+    sph_solver_tree = ast.parse(sph_solver_path.read_text())
+    calls = [node for node in ast.walk(sph_solver_tree) if isinstance(node, ast.Call)]
+    direct_builds = [call for call in calls if ast.unparse(call.func).endswith("particle_grid.build")]
+    grouped_builds = [call for call in calls if ast.unparse(call.func) == "self._build_particle_grid"]
+    test.assertEqual(direct_builds, [])
+    test.assertEqual(len(grouped_builds), 5)
 
 
 def test_sph_computes_positive_density(test, device):
@@ -1329,6 +1405,12 @@ def test_sph_cuda_graph_capture(test, device):
 
 
 devices = get_test_devices(mode="basic")
+add_function_test(
+    TestSolverSPH,
+    "test_sph_neighbor_queries_use_grouped_compatibility_path",
+    test_sph_neighbor_queries_use_grouped_compatibility_path,
+    check_output=False,
+)
 add_function_test(TestSolverSPH, "test_sph_exports_public_solver", test_sph_exports_public_solver, devices=devices)
 add_function_test(
     TestSolverSPH, "test_sph_computes_positive_density", test_sph_computes_positive_density, devices=devices

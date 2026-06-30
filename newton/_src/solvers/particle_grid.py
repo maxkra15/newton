@@ -31,8 +31,8 @@ if _HASH_GRID_GROUPING_SUPPORTED:
         world: wp.int32,
         grouped: wp.bool,
     ):
-        """Query one world from a grouped grid, or all points from a legacy grid."""
-        if grouped:
+        """Query one local world, or all worlds for global and legacy paths."""
+        if grouped and world >= 0:
             return wp.hash_grid_query(grid, position, radius, world)
         return wp.hash_grid_query(grid, position, radius)
 

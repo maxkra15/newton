@@ -432,8 +432,7 @@ class SolverSPH(SolverBase):
 
         with wp.ScopedTimer("simulate", False):
             particle_search_radius = self._particle_neighbor_search_radius()
-            with wp.ScopedDevice(model.device):
-                model.particle_grid.build(state_in.particle_q, radius=particle_search_radius)
+            self._build_particle_grid(state_in.particle_q, particle_search_radius)
 
             wp.launch(
                 kernel=compute_sph_density_pressure,
@@ -444,6 +443,7 @@ class SolverSPH(SolverBase):
                     model.particle_mass,
                     model.particle_flags,
                     model.particle_world,
+                    self._particle_grid_grouped,
                     self.smoothing_length,
                     self.rest_density,
                     self.gas_constant,
@@ -463,6 +463,7 @@ class SolverSPH(SolverBase):
                     model.particle_mass,
                     model.particle_flags,
                     model.particle_world,
+                    self._particle_grid_grouped,
                     self.particle_density,
                     self.smoothing_length,
                     self.particle_vorticity,
@@ -483,6 +484,7 @@ class SolverSPH(SolverBase):
                     model.particle_radius,
                     model.particle_flags,
                     model.particle_world,
+                    self._particle_grid_grouped,
                     model.gravity,
                     self.buoyancy,
                     self.particle_density,
@@ -747,8 +749,7 @@ class SolverSPH(SolverBase):
         assert self.pbf_deltas is not None
 
         for _ in range(self.pbf_iterations):
-            with wp.ScopedDevice(model.device):
-                model.particle_grid.build(state_out.particle_q, radius=self.smoothing_length)
+            self._build_particle_grid(state_out.particle_q, self.smoothing_length)
 
             wp.launch(
                 kernel=compute_pbf_lambdas,
@@ -759,6 +760,7 @@ class SolverSPH(SolverBase):
                     model.particle_mass,
                     model.particle_flags,
                     model.particle_world,
+                    self._particle_grid_grouped,
                     self.smoothing_length,
                     self.rest_density,
                     self.pbf_relaxation_epsilon,
@@ -778,6 +780,7 @@ class SolverSPH(SolverBase):
                     model.particle_inv_mass,
                     model.particle_flags,
                     model.particle_world,
+                    self._particle_grid_grouped,
                     self.pbf_lambdas,
                     self.smoothing_length,
                     self.rest_density,
@@ -828,8 +831,7 @@ class SolverSPH(SolverBase):
         assert model.particle_grid is not None
         assert self.particle_velocity_smooth is not None
 
-        with wp.ScopedDevice(model.device):
-            model.particle_grid.build(fluid_state.particle_q, radius=self.smoothing_length)
+        self._build_particle_grid(fluid_state.particle_q, self.smoothing_length)
 
         wp.launch(
             kernel=smooth_sph_velocities,
@@ -840,6 +842,7 @@ class SolverSPH(SolverBase):
                 fluid_state.particle_qd,
                 model.particle_flags,
                 model.particle_world,
+                self._particle_grid_grouped,
                 model.particle_inv_mass,
                 self.smoothing_length,
                 self.xsph_strength,
@@ -871,8 +874,7 @@ class SolverSPH(SolverBase):
         assert self.render_anisotropy_tertiary is not None
 
         if rebuild_grid:
-            with wp.ScopedDevice(model.device):
-                model.particle_grid.build(fluid_state.particle_q, radius=self.smoothing_length)
+            self._build_particle_grid(fluid_state.particle_q, self.smoothing_length)
 
         wp.launch(
             kernel=compute_sph_render_particles,
@@ -883,6 +885,7 @@ class SolverSPH(SolverBase):
                 fluid_state.particle_qd,
                 model.particle_flags,
                 model.particle_world,
+                self._particle_grid_grouped,
                 self.smoothing_length,
                 self.render_smoothing,
                 self.render_anisotropy_scale,
@@ -909,8 +912,7 @@ class SolverSPH(SolverBase):
         assert self.diffuse_spawn_counter is not None
 
         if rebuild_grid:
-            with wp.ScopedDevice(model.device):
-                model.particle_grid.build(fluid_state.particle_q, radius=self.smoothing_length)
+            self._build_particle_grid(fluid_state.particle_q, self.smoothing_length)
 
         wp.launch(
             kernel=update_sph_diffuse_particles,
@@ -921,6 +923,7 @@ class SolverSPH(SolverBase):
                 fluid_state.particle_qd,
                 model.particle_flags,
                 model.particle_world,
+                self._particle_grid_grouped,
                 model.gravity,
                 self.smoothing_length,
                 self.bounds_lower,
@@ -954,6 +957,7 @@ class SolverSPH(SolverBase):
                 fluid_state.particle_qd,
                 model.particle_flags,
                 model.particle_world,
+                self._particle_grid_grouped,
                 self.particle_density,
                 self.smoothing_length,
                 self.rest_density,

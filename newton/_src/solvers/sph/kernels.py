@@ -25,6 +25,7 @@ from ...geometry.kernels import (
 from ...math import velocity_at_point
 from ...sim import BodyFlags
 from ...utils.heightfield import HeightfieldData
+from ..particle_grid import particle_grid_query
 
 PI = wp.constant(3.141592653589793)
 EPS = wp.constant(1.0e-6)
@@ -483,6 +484,7 @@ def compute_sph_density_pressure(
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     smoothing_length: float,
     rest_density: float,
     gas_constant: float,
@@ -502,7 +504,7 @@ def compute_sph_density_pressure(
     world_i = particle_world[i]
     xi = particle_q[i]
     density = float(0.0)
-    query = wp.hash_grid_query(grid, xi, smoothing_length)
+    query = particle_grid_query(grid, xi, smoothing_length, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -524,6 +526,7 @@ def compute_sph_vorticity(
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     density: wp.array[float],
     smoothing_length: float,
     out_vorticity: wp.array[wp.vec3],
@@ -542,7 +545,7 @@ def compute_sph_vorticity(
     vi = particle_qd[i]
     omega = wp.vec3(0.0)
 
-    query = wp.hash_grid_query(grid, xi, smoothing_length)
+    query = particle_grid_query(grid, xi, smoothing_length, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -569,6 +572,7 @@ def integrate_sph_particles(
     particle_radius: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     gravity: wp.array[wp.vec3],
     buoyancy: float,
     density: wp.array[float],
@@ -627,7 +631,7 @@ def integrate_sph_particles(
         )
 
     contact_radius = wp.max(smoothing_length + particle_collision_margin, smoothing_length)
-    query = wp.hash_grid_query(grid, xi, contact_radius)
+    query = particle_grid_query(grid, xi, contact_radius, world_idx, grouped)
     j = int(0)
     color_normal = wp.vec3(0.0)
     color_laplacian = float(0.0)
@@ -895,6 +899,7 @@ def compute_sph_render_particles(
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     smoothing_length: float,
     render_smoothing: float,
     anisotropy_scale: float,
@@ -926,7 +931,7 @@ def compute_sph_render_particles(
     weight_sum = float(0.0)
     neighbor_count = int(0)
 
-    query = wp.hash_grid_query(grid, xi, h)
+    query = particle_grid_query(grid, xi, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -970,7 +975,7 @@ def compute_sph_render_particles(
         cyz = float(0.0)
         czz = float(0.0)
 
-        query_cov = wp.hash_grid_query(grid, xi, h)
+        query_cov = particle_grid_query(grid, xi, h, world_i, grouped)
         k = int(0)
         while wp.hash_grid_query_next(query_cov, k):
             if not test_world_pair(world_i, particle_world[k]):
@@ -1054,6 +1059,7 @@ def compute_pbf_lambdas(
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     smoothing_length: float,
     rest_density: float,
     relaxation_epsilon: float,
@@ -1077,7 +1083,7 @@ def compute_pbf_lambdas(
     grad_i = wp.vec3(0.0)
     grad_sum = float(0.0)
 
-    query = wp.hash_grid_query(grid, xi, smoothing_length)
+    query = particle_grid_query(grid, xi, smoothing_length, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -1109,6 +1115,7 @@ def solve_pbf_deltas(
     particle_inv_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     lambdas: wp.array[float],
     smoothing_length: float,
     rest_density: float,
@@ -1134,7 +1141,7 @@ def solve_pbf_deltas(
     delta = wp.vec3(0.0)
     w_q = _poly6_kernel(artificial_radius * artificial_radius, smoothing_length)
 
-    query = wp.hash_grid_query(grid, xi, smoothing_length)
+    query = particle_grid_query(grid, xi, smoothing_length, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -1214,6 +1221,7 @@ def smooth_sph_velocities(
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     particle_inv_mass: wp.array[float],
     smoothing_length: float,
     xsph_strength: float,
@@ -1239,7 +1247,7 @@ def smooth_sph_velocities(
     weighted_velocity = wp.vec3(0.0)
     weight_sum = float(0.0)
 
-    query = wp.hash_grid_query(grid, xi, h)
+    query = particle_grid_query(grid, xi, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -1285,6 +1293,7 @@ def update_sph_diffuse_particles(
     fluid_qd: wp.array[wp.vec3],
     fluid_flags: wp.array[wp.int32],
     fluid_world: wp.array[wp.int32],
+    grouped: wp.bool,
     gravity: wp.array[wp.vec3],
     smoothing_length: float,
     bounds_lower: wp.vec3,
@@ -1316,7 +1325,7 @@ def update_sph_diffuse_particles(
     weight_sum = float(0.0)
     neighbors = int(0)
 
-    query = wp.hash_grid_query(grid, x, smoothing_length)
+    query = particle_grid_query(grid, x, smoothing_length, world_idx, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_idx, fluid_world[j]):
@@ -1371,6 +1380,7 @@ def spawn_sph_diffuse_particles(
     fluid_qd: wp.array[wp.vec3],
     fluid_flags: wp.array[wp.int32],
     fluid_world: wp.array[wp.int32],
+    grouped: wp.bool,
     density: wp.array[float],
     smoothing_length: float,
     rest_density: float,
@@ -1402,7 +1412,7 @@ def spawn_sph_diffuse_particles(
     neighbors = int(0)
     separation = wp.vec3(0.0)
 
-    query = wp.hash_grid_query(grid, xi, smoothing_length)
+    query = particle_grid_query(grid, xi, smoothing_length, source_world, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(source_world, fluid_world[j]):
