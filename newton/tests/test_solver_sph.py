@@ -1391,6 +1391,7 @@ def test_sph_cuda_graph_capture(test, device):
         rest_density=200.0,
         gas_constant=20.0,
         viscosity=0.05,
+        particle_collision_margin=0.08,
         bounds_lower=(-1.0, -1.0, 0.0),
         bounds_upper=(1.0, 1.0, 1.0),
         max_velocity=5.0,
@@ -1412,6 +1413,13 @@ def test_sph_cuda_graph_capture(test, device):
     state_0, state_1 = state_1, state_0
     wp.synchronize_device(device)
 
+    # Compare capture against an ordinary step while exercising the two grid
+    # widths used by collision and render-neighbor queries.
+    state_0.clear_forces()
+    solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
+    expected_positions = state_1.particle_q.numpy().copy()
+    expected_velocities = state_1.particle_qd.numpy().copy()
+
     with wp.ScopedCapture(device=device) as capture:
         state_0.clear_forces()
         solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
@@ -1419,6 +1427,8 @@ def test_sph_cuda_graph_capture(test, device):
     wp.capture_launch(capture.graph)
     positions = state_1.particle_q.numpy().reshape(model.world_count, particles_per_world, 3)
     velocities = state_1.particle_qd.numpy().reshape(model.world_count, particles_per_world, 3)
+    np.testing.assert_allclose(positions.reshape(-1, 3), expected_positions, atol=1.0e-6, rtol=1.0e-5)
+    np.testing.assert_allclose(velocities.reshape(-1, 3), expected_velocities, atol=1.0e-6, rtol=1.0e-5)
     test.assertTrue(np.isfinite(positions).all())
     test.assertTrue(np.isfinite(velocities).all())
     test.assertGreater(float(np.linalg.norm(positions - initial_positions)), 1.0e-6)
