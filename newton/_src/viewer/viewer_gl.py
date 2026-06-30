@@ -1262,8 +1262,15 @@ class ViewerGL(ViewerBase):
         anisotropy_secondary: wp.array[wp.vec4] | None = None,
         anisotropy_tertiary: wp.array[wp.vec4] | None = None,
         hidden: bool = False,
+        worlds: wp.array[wp.int32] | None = None,
     ):
-        """Log particles for Flex-style screen-space fluid rendering."""
+        """Log particles for Flex-style screen-space fluid rendering.
+
+        Args:
+            worlds: World index per particle; local worlds receive display
+                offsets and visibility filtering, while world ``-1`` remains
+                unshifted and visible.
+        """
         from .gl.fluid import FluidBatch  # noqa: PLC0415
 
         if points is None:
@@ -1288,7 +1295,17 @@ class ViewerGL(ViewerBase):
         elif isinstance(radii, (int, float)):
             batch.blur_radius_world = float(radii) * 2.0
         batch.shadow_opacity = float(shadow_opacity)
-        batch.update(points, radii, radius_scale, anisotropy, anisotropy_secondary, anisotropy_tertiary)
+        batch.update(
+            points,
+            radii,
+            radius_scale,
+            anisotropy,
+            anisotropy_secondary,
+            anisotropy_tertiary,
+            worlds=worlds,
+            world_offsets=self.world_offsets,
+            visible_worlds_mask=self._visible_worlds_mask,
+        )
 
     def log_fluid_diffuse(
         self,

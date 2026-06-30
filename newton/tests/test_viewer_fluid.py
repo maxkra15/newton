@@ -1,14 +1,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import unittest
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.viewer.gl.fluid import FluidBatch, _pack_fluid_vertices
 from newton.examples.fluid.example_fluid_sph_interactive_tank import Example
+from newton.tests.unittest_utils import add_function_test, get_test_devices
 from newton.viewer import ViewerNull
+
+
+class _FluidGLProbe:
+    """Captures the CPU fluid vertex upload without creating an OpenGL context."""
+
+    GL_ARRAY_BUFFER = 1
+
+    def __init__(self):
+        self.data = None
+
+    def glBindBuffer(self, _target, _buffer):
+        pass
+
+    def glBufferSubData(self, _target, _offset, size, pointer):
+        raw = ctypes.string_at(pointer, size)
+        self.data = np.frombuffer(raw, dtype=np.float32).copy()
+
+
+def _make_cpu_fluid_batch(capacity):
+    batch = FluidBatch.__new__(FluidBatch)
+    batch._gl = _FluidGLProbe()
+    batch.capacity = capacity
+    batch.count = 0
+    batch.vbo = 0
+    batch._ensure_capacity = lambda count: None
+    return batch
 
 
 class _LogFluidProbe(ViewerNull):
@@ -32,6 +61,7 @@ class _LogFluidProbe(ViewerNull):
         anisotropy_secondary=None,
         anisotropy_tertiary=None,
         hidden=False,
+        worlds=None,
     ):
         self.logged_fluid = {
             "name": name,
@@ -43,6 +73,7 @@ class _LogFluidProbe(ViewerNull):
             "blur_radius_world": blur_radius_world,
             "anisotropy": anisotropy,
             "hidden": hidden,
+            "worlds": worlds,
         }
 
     def log_points(self, name, points, radii=None, colors=None, hidden=False):
@@ -80,10 +111,116 @@ class TestViewerFluid(unittest.TestCase):
         self.assertEqual(viewer.logged_fluid["color"], viewer.fluid_color)
         self.assertEqual(viewer.logged_fluid["ior"], viewer.fluid_ior)
         np.testing.assert_allclose(viewer.logged_fluid["points"].numpy()[:, 0], [0.0, 2.0], atol=1.0e-6)
+        self.assertIsNotNone(viewer.logged_fluid["worlds"])
+        np.testing.assert_array_equal(viewer.logged_fluid["worlds"].numpy(), [-1, -1])
         self.assertIsNotNone(viewer.logged_points)
         self.assertEqual(viewer.logged_points["name"], "/model/particles")
         self.assertIsNone(viewer.logged_points["points"])
         self.assertTrue(viewer.logged_points["hidden"])
+
+    def test_show_fluid_preserves_world_alignment_when_compacting_active_particles(self):
+        active = int(newton.ParticleFlags.ACTIVE)
+        local = newton.ModelBuilder()
+        local.add_particle(
+            pos=(1.0, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=0.1,
+            flags=active,
+        )
+        local.add_particle(
+            pos=(2.0, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=0.1,
+            flags=0,
+        )
+
+        scene = newton.ModelBuilder()
+        scene.add_particle(
+            pos=(-1.0, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=1.0,
+            radius=0.1,
+            flags=active,
+        )
+        scene.replicate(local, 2)
+        model = scene.finalize(device="cpu")
+        state = model.state()
+        viewer = _LogFluidProbe()
+
+        viewer.set_model(model)
+        viewer.show_fluid = True
+        viewer.show_particles = False
+        viewer._log_particles(state)
+
+        np.testing.assert_allclose(viewer.logged_fluid["points"].numpy()[:, 0], [-1.0, 1.0, 1.0], atol=1.0e-6)
+        np.testing.assert_array_equal(viewer.logged_fluid["worlds"].numpy(), [-1, 0, 1])
+
+    def test_cpu_fluid_batch_applies_world_offsets_and_visibility(self):
+        batch = _make_cpu_fluid_batch(5)
+        points = np.array(
+            [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [4.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+        worlds = np.array([0, 1, -1, 2, -1], dtype=np.int32)
+        offsets = np.array([[-10.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=np.float32)
+        visible = np.array([1, 0], dtype=np.int32)
+        q1 = wp.array([(1.0, 0.0, 0.0, 1.0)] * 4 + [(1.0, 0.0, 0.0, 0.0)], dtype=wp.vec4, device="cpu")
+        q2 = wp.array([(0.0, 1.0, 0.0, 1.0)] * 5, dtype=wp.vec4, device="cpu")
+        q3 = wp.array([(0.0, 0.0, 1.0, 1.0)] * 5, dtype=wp.vec4, device="cpu")
+
+        batch.update(
+            points,
+            0.1,
+            anisotropy=q1,
+            anisotropy_secondary=q2,
+            anisotropy_tertiary=q3,
+            worlds=worlds,
+            world_offsets=offsets,
+            visible_worlds_mask=visible,
+        )
+
+        data = batch._gl.data.reshape(5, 16)
+        np.testing.assert_allclose(
+            data[:, :3], [[-9.0, 0.0, 0.0], [12.0, 0.0, 0.0], [3.0, 0.0, 0.0], [4.0, 0.0, 0.0], [5.0, 0.0, 0.0]]
+        )
+        np.testing.assert_allclose(data[:, 3], [0.1, 0.0, 0.1, 0.0, 0.0])
+
+    def test_cpu_fluid_batch_ignores_world_state_without_world_ids(self):
+        batch = _make_cpu_fluid_batch(1)
+        points = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+
+        batch.update(
+            points,
+            0.2,
+            world_offsets=np.zeros((1, 2), dtype=np.float32),
+            visible_worlds_mask=np.zeros((1, 2), dtype=np.int32),
+        )
+
+        data = batch._gl.data.reshape(1, 16)
+        np.testing.assert_allclose(data[0, :4], [1.0, 2.0, 3.0, 0.2])
+
+    def test_cpu_fluid_batch_validates_world_array_shapes(self):
+        batch = _make_cpu_fluid_batch(2)
+        points = np.zeros((2, 3), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "worlds must have shape"):
+            batch.update(points, 0.1, worlds=np.array([0], dtype=np.int32))
+        with self.assertRaisesRegex(ValueError, "world_offsets must have shape"):
+            batch.update(
+                points,
+                0.1,
+                worlds=np.array([0, 1], dtype=np.int32),
+                world_offsets=np.zeros((2, 2), dtype=np.float32),
+            )
+        with self.assertRaisesRegex(ValueError, "visible_worlds_mask must be one-dimensional"):
+            batch.update(
+                points,
+                0.1,
+                worlds=np.array([0, 1], dtype=np.int32),
+                visible_worlds_mask=np.ones((2, 1), dtype=np.int32),
+            )
 
     def test_switching_from_fluid_to_particles_hides_fluid_batch(self):
         active = int(newton.ParticleFlags.ACTIVE)
@@ -221,6 +358,78 @@ class TestViewerFluid(unittest.TestCase):
         sinker_bottom = float(body_q[2, 2] - half_z[2])
         self.assertLess(sinker_top, float(box_surface[2]) + 0.02, "dense box did not fully submerge")
         self.assertLess(sinker_bottom, args.bounds_lower[2] + 0.25, "dense box did not sink to the tank floor")
+
+
+def test_fluid_surface_world_offsets_and_visibility(test, device):
+    points = wp.array([(1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0)], dtype=wp.vec3, device=device)
+    worlds = wp.array([0, 1, -1], dtype=wp.int32, device=device)
+    offsets = wp.array([(-10.0, 0.0, 0.0), (10.0, 0.0, 0.0)], dtype=wp.vec3, device=device)
+    visible = wp.array([1, 0], dtype=wp.int32, device=device)
+    radii = wp.array([0.1, 0.1, 0.1], dtype=wp.float32, device=device)
+    dummy4 = wp.empty(0, dtype=wp.vec4, device=device)
+    packed = wp.zeros(3 * 16, dtype=wp.float32, device=device)
+
+    wp.launch(
+        _pack_fluid_vertices,
+        dim=3,
+        inputs=[
+            points,
+            radii,
+            1,
+            0.0,
+            1.0,
+            dummy4,
+            dummy4,
+            dummy4,
+            0,
+            worlds,
+            offsets,
+            visible,
+            1,
+            packed,
+        ],
+        device=device,
+    )
+    data = packed.numpy().reshape(3, 16)
+    np.testing.assert_allclose(data[:, :3], [[-9.0, 0.0, 0.0], [12.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    np.testing.assert_allclose(data[:, 3], [0.1, 0.0, 0.1])
+
+    empty_worlds = wp.empty(0, dtype=wp.int32, device=device)
+    empty_offsets = wp.empty(0, dtype=wp.vec3, device=device)
+    empty_radii = wp.empty(0, dtype=wp.float32, device=device)
+    legacy = wp.zeros(3 * 16, dtype=wp.float32, device=device)
+    wp.launch(
+        _pack_fluid_vertices,
+        dim=3,
+        inputs=[
+            points,
+            empty_radii,
+            0,
+            0.1,
+            1.0,
+            dummy4,
+            dummy4,
+            dummy4,
+            0,
+            empty_worlds,
+            empty_offsets,
+            empty_worlds,
+            0,
+            legacy,
+        ],
+        device=device,
+    )
+    legacy_data = legacy.numpy().reshape(3, 16)
+    np.testing.assert_allclose(legacy_data[:, :3], points.numpy())
+    np.testing.assert_allclose(legacy_data[:, 3], [0.1, 0.1, 0.1])
+
+
+add_function_test(
+    TestViewerFluid,
+    "test_fluid_surface_world_offsets_and_visibility",
+    test_fluid_surface_world_offsets_and_visibility,
+    devices=get_test_devices(mode="basic"),
+)
 
 
 if __name__ == "__main__":
