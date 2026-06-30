@@ -1,0 +1,228 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (49999.632993471314, 0.3459587231642498, -0.29307733070749137)
+                double radius = 0.3920896530151367
+            }
+            dictionary Perspective = {
+                double3 position = (-0.1541702853287177, -0.20568507426936444, -0.4261243126945502)
+                double3 target = (-0.16686185465641468, 0.3697952446815984, -0.3173374615285403)
+            }
+            dictionary Right = {
+                double3 position = (0.002857205786819634, -49999.65441249311, -0.37838216994772844)
+                double radius = 0.12292720079421997
+            }
+            dictionary Top = {
+                double3 position = (-0.2824347961326537, 0.3486839870087249, 49999.706922669284)
+                double radius = 0.4510345458984375
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./cable_SRA_curve02.usda"
+            dictionary locked = {
+            }
+            dictionary muteness = {
+            }
+        }
+        dictionary renderSettings = {
+        }
+        dictionary xrSettings = {
+            string "xrstage:customAnchor" = ""
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def "plug_mesh" (
+        prepend payload = @./plug_mesh.usda@
+    )
+    {
+        float3 xformOp:rotateZYX = (0, -69.63475, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (-0.38398558295159335, 0.3458529237667222, -0.3687468791505112)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZYX", "xformOp:scale"]
+
+        over "World"
+        {
+            def PhysicsFixedJoint "FixedJoint"
+            {
+                rel physics:body0 = </World/cable001>
+                rel physics:body1 = </World/plug_mesh/World>
+                float physics:breakForce = 3.4028235e38
+                float physics:breakTorque = 3.4028235e38
+                point3f physics:localPos0 = (-0.35997847, 0.3458529, -0.37765846)
+                point3f physics:localPos1 = (-1.9007764e-9, 0, -0.024186922)
+                quatf physics:localRot0 = (0.8209761, 0, -0.57096255, 0)
+                quatf physics:localRot1 = (1, 0, 0, 0)
+            }
+        }
+
+        over "plug_mesh"
+        {
+            def PhysicsFixedJoint "FixedJoint"
+            {
+                rel physics:body0 = </World/cable001>
+                rel physics:body1 = </World/plug_mesh/plug_mesh>
+                float physics:breakForce = 3.4028235e38
+                float physics:breakTorque = 3.4028235e38
+                point3f physics:localPos0 = (-0.36011115, 0.3458529, -0.377621)
+                point3f physics:localPos1 = (0, 0, -0.025469359)
+                quatf physics:localRot0 = (0.8209761, 0, -0.57096255, 0)
+                quatf physics:localRot1 = (1, 0, 0, 0)
+            }
+        }
+    }
+
+    def "plug_mesh02" (
+        prepend payload = @./plug_mesh02.usda@
+    )
+    {
+        double3 xformOp:rotateZYX = (-4.547473508864641e-13, 64.0028206446357, 7.105427357601002e-13)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.009218779286349954, 0.345297585025655, -0.374858252159755)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZYX", "xformOp:scale"]
+
+        over "plug_mesh"
+        {
+            def PhysicsFixedJoint "FixedJoint"
+            {
+                rel physics:body0 = </World/cable002>
+                rel physics:body1 = </World/plug_mesh02/plug_mesh>
+                float physics:breakForce = 3.4028235e38
+                float physics:breakTorque = 3.4028235e38
+                point3f physics:localPos0 = (-0.013682049, 0.34529757, -0.3860263)
+                point3f physics:localPos1 = (1.4995728e-9, 4.4964032e-15, -0.025478896)
+                quatf physics:localRot0 = (0.84803504, -9.202742e-17, 0.5299401, 3.1351237e-15)
+                quatf physics:localRot1 = (1, 0, 0, 0)
+            }
+        }
+    }
+
+    def Xform "cable002"
+    {
+        def BasisCurves "curve_0" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            float4[] cable_params = [(0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444)]
+            int2[] connections = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16), (16, 17), (17, 18), (18, 19), (19, 20), (20, 21), (21, 22), (22, 23), (23, 24), (24, 25), (25, 26)]
+            uniform token[] curveType = ["linear"]
+            int[] curveVertexCounts = [27]
+            rel material:binding = </World/plug_mesh02/Looks/OmniPBR> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+            point3f[] points = [(-0.180454, 0.34531567, -0.24754305), (-0.18038532, 0.34531567, -0.25747785), (-0.18041673, 0.34531567, -0.26736706), (-0.18039154, 0.34531567, -0.27720326), (-0.18033208, 0.34531567, -0.28699017), (-0.17992926, 0.34531567, -0.29672012), (-0.17903583, 0.34531567, -0.3063868), (-0.17740461, 0.34531567, -0.31596857), (-0.17481002, 0.34531567, -0.32538188), (-0.17147955, 0.34531567, -0.33455363), (-0.16735464, 0.34531567, -0.34336528), (-0.16249378, 0.34531567, -0.35173982), (-0.15686287, 0.34531567, -0.35955942), (-0.15055877, 0.34531567, -0.36681026), (-0.1435446, 0.34531567, -0.37342867), (-0.135861, 0.34531567, -0.37941766), (-0.12741879, 0.34531567, -0.38461986), (-0.11834732, 0.34531567, -0.3891639), (-0.10855235, 0.34531567, -0.39283457), (-0.098156996, 0.34531567, -0.39576495), (-0.08715232, 0.34531567, -0.3976971), (-0.075640045, 0.34531567, -0.39871424), (-0.06366434, 0.34531567, -0.39870232), (-0.051279604, 0.34531567, -0.3976479), (-0.03856404, 0.34531567, -0.39529735), (-0.02557768, 0.34531567, -0.3915294), (-0.013725683, 0.34531567, -0.38601062)]
+            uniform token type = "linear"
+            int[] fixed_points = [0, 1]
+            float[] widths = [0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006]
+            uniform token wrap = "nonperiodic"
+        }
+    }
+
+    over "OmniPBR"
+    {
+        custom uniform bool paused = 0 (
+            customData = {
+                bool nonpersistant = 1
+            }
+            hidden = true
+        )
+    }
+
+    def Xform "cable001"
+    {
+        float3 xformOp:rotateZYX = (0, 0, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZYX", "xformOp:scale"]
+
+        def BasisCurves "curve_0" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            float4[] cable_params = [(0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444), (0.111, 0.222, 0.333, 0.444)]
+            int2[] connections = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16), (16, 17), (17, 18), (18, 19), (19, 20), (20, 21), (21, 22), (22, 23), (23, 24), (24, 25), (25, 26), (26, 27), (27, 28), (28, 29), (29, 30), (30, 31), (31, 32), (32, 33), (33, 34), (34, 35), (35, 36), (36, 37), (37, 38), (38, 39), (39, 40), (40, 41)]
+            uniform token[] curveType = ["linear"]
+            int[] curveVertexCounts = [42]
+            rel material:binding = </World/plug_mesh/Looks/OmniPBR> (
+                bindMaterialAs = "weakerThanDescendants"
+            )
+            point3f[] points = [(-0.359407, 0.34585932, -0.3782313), (-0.35407624, 0.34585935, -0.3799027), (-0.34865877, 0.34585935, -0.38138986), (-0.3431657, 0.34576187, -0.38268602), (-0.33760798, 0.34566423, -0.38378444), (-0.33199665, 0.34556645, -0.38467833), (-0.32634273, 0.34546876, -0.38536093), (-0.32065725, 0.34537098, -0.3858256), (-0.31495112, 0.34531567, -0.38606557), (-0.30923265, 0.34531567, -0.38607496), (-0.3035061, 0.34531567, -0.38584894), (-0.2977753, 0.34531567, -0.38538295), (-0.29204416, 0.34531567, -0.38467222), (-0.28631663, 0.34531567, -0.3837122), (-0.2805965, 0.34531567, -0.38249817), (-0.2748877, 0.34531567, -0.38102543), (-0.26919425, 0.34531567, -0.37928933), (-0.26352343, 0.34531567, -0.37728402), (-0.25789434, 0.34531567, -0.3749978), (-0.252329, 0.34531567, -0.3724176), (-0.24684939, 0.34531567, -0.3695303), (-0.24147755, 0.34531567, -0.36632285), (-0.23623538, 0.34531567, -0.36278215), (-0.2311448, 0.34531567, -0.35889503), (-0.22622773, 0.34531567, -0.35464835), (-0.2215059, 0.34531567, -0.35003105), (-0.21700522, 0.34531567, -0.34506416), (-0.21275452, 0.34531567, -0.33978984), (-0.20878242, 0.34531567, -0.3342503), (-0.20511758, 0.34531567, -0.32848805), (-0.20178868, 0.34531567, -0.3225455), (-0.19882426, 0.34531567, -0.31646508), (-0.19625284, 0.34531567, -0.3102893), (-0.19410217, 0.34531567, -0.30405942), (-0.1923697, 0.34531567, -0.29780132), (-0.1910067, 0.34531567, -0.2915197), (-0.18996054, 0.34531567, -0.28521743), (-0.18917844, 0.34531567, -0.27889752), (-0.18860771, 0.34531567, -0.27256298), (-0.18822515, 0.34531567, -0.2662169), (-0.18810473, 0.34531567, -0.2598624), (-0.18807559, 0.34531567, -0.24733068)]
+            uniform token type = "linear"
+            int[] fixed_points = [40, 41]
+            float[] widths = [0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006, 0.006]
+            uniform token wrap = "nonperiodic"
+        }
+    }
+}
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OmniverseKit"
+    {
+        def "HydraTextures" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            def RenderProduct "omni_kit_widget_viewport_ViewportTexture_0" (
+                prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
+                hide_in_stage_window = true
+                no_delete = true
+            )
+            {
+                rel camera = </OmniverseKit_Persp>
+                token omni:rtx:background:source:texture:textureMode = "repeatMirrored"
+                token omni:rtx:background:source:type = "domeLight"
+                bool omni:rtx:dlss:frameGeneration = 0
+                bool omni:rtx:material:db:nonVisualMaterialCSV:enabled = 0
+                bool omni:rtx:material:db:syncLoads = 1
+                token omni:rtx:post:dlss:execMode = "performance"
+                bool omni:rtx:post:registeredCompositing:invertColorCorrection = 1
+                bool omni:rtx:post:registeredCompositing:invertToneMap = 1
+                bool omni:rtx:pt:lightcache:cached:dontResolveConflicts = 1
+                int omni:rtx:pt:maxSamplesPerLaunch = 2073600
+                int omni:rtx:pt:mgpu:maxPixelsPerRegionExponent = 12
+                color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
+                bool omni:rtx:rt:demoire = 0
+                bool omni:rtx:rt:ecoMode:enabled
+                bool omni:rtx:rt:lightcache:spatialCache:dontResolveConflicts = 1
+                bool omni:rtx:scene:hydra:materialSyncLoads = 1
+                bool omni:rtx:scene:hydra:mdlMaterialWarmup = 1
+                bool omni:rtx:scene:useViewLightingMode
+                uint omni:rtx:viewTile:limit = 4294967295
+                rel orderedVars = </Render/Vars/LdrColor>
+                custom bool overrideClipRange = 0
+                uniform int2 resolution = (3840, 2160)
+            }
+        }
+    }
+
+    def RenderSettings "OmniverseGlobalRenderSettings" (
+        prepend apiSchemas = ["OmniRtxSettingsGlobalRtAdvancedAPI_1", "OmniRtxSettingsGlobalPtAdvancedAPI_1"]
+        no_delete = true
+    )
+    {
+        rel products = </Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0>
+    }
+
+    def "Vars"
+    {
+        def RenderVar "LdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "LdrColor"
+        }
+    }
+}

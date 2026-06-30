@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
+import inspect
+import math
 from typing import Any
 
+import numpy as np
 import warp as wp
 import warp.fem as fem
 import warp.sparse as wps
@@ -896,7 +900,61 @@ def positive_modn(x: int, n: int):
     return (x % n + n) % n
 
 
-def allocate_by_voxels(particle_q, voxel_size, padding_voxels: int = 0):
+@functools.lru_cache(maxsize=1)
+def supports_rebuildable_volume() -> bool:
+    """Whether the installed Warp exposes graph-capturable rebuildable NanoVDB volumes (Warp >= 1.15)."""
+    try:
+        return "rebuildable" in inspect.signature(wp.Volume.allocate_by_voxels).parameters
+    except (ValueError, TypeError):
+        return False
+
+
+def _rebuild_capacity(particle_q, voxel_size, ratio: float, max_active_voxels: int) -> dict[str, int]:
+    """Estimate rebuildable-volume capacities (active voxels + NanoVDB node counts).
+
+    Active voxels and leaf nodes are bounded by ``max_active_voxels`` (a voxel is
+    active only if it holds a particle, so this is a hard upper bound and the leaf
+    buffer it sizes is cheap). The lower/upper internal nodes each span 16x and
+    32x more cells, so their counts are tiny; they are estimated from one throwaway
+    build of the current particles scaled by ``ratio`` for spreading headroom.
+    """
+    initial = wp.Volume.allocate_by_voxels(voxel_points=particle_q, voxel_size=voxel_size)
+    if initial.get_voxel_count() == 0:
+        return {"max_active_voxels": 1, "max_leaf_nodes": 1, "max_lower_nodes": 1, "max_upper_nodes": 1}
+    ijk = initial.get_voxels().numpy()
+    lower = np.unique(np.floor_divide(ijk, 8 * 16), axis=0).shape[0]
+    upper = np.unique(np.floor_divide(ijk, 8 * 16 * 32), axis=0).shape[0]
+    return {
+        "max_active_voxels": max_active_voxels,
+        "max_leaf_nodes": max_active_voxels,
+        "max_lower_nodes": min(max_active_voxels, max(8, math.ceil(lower * ratio))),
+        "max_upper_nodes": min(max_active_voxels, max(4, math.ceil(upper * ratio))),
+    }
+
+
+def allocate_by_voxels(
+    particle_q,
+    voxel_size,
+    padding_voxels: int = 0,
+    rebuildable: bool = False,
+    max_active_voxels: int | None = None,
+    capacity_ratio: float = 16.0,
+    status=None,
+):
+    if rebuildable:
+        # Persistent capacity-sized volume refreshed in place each step (Warp >= 1.15) so
+        # the sparse grid build is CUDA-graph-capturable. Padding is unsupported here.
+        capacity = max_active_voxels if max_active_voxels and max_active_voxels > 0 else particle_q.shape[0]
+        kwargs = _rebuild_capacity(particle_q, voxel_size, capacity_ratio, capacity)
+        if status is not None:
+            kwargs["status"] = status
+        return wp.Volume.allocate_by_voxels(
+            voxel_points=particle_q,
+            voxel_size=voxel_size,
+            rebuildable=True,
+            **kwargs,
+        )
+
     volume = wp.Volume.allocate_by_voxels(
         voxel_points=particle_q.flatten(),
         voxel_size=voxel_size,

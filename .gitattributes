@@ -1,2 +1,8 @@
 *.jpg !text !filter !merge !diff
 CHANGELOG.md merge=union
+newton/examples/cable_robot/assets/**/*.dae filter=lfs diff=lfs merge=lfs -text
+newton/examples/cable_robot/assets/**/*.obj filter=lfs diff=lfs merge=lfs -text
+newton/examples/cable_robot/assets/**/*.png filter=lfs diff=lfs merge=lfs -text
+newton/examples/cable_robot/assets/**/*.stl filter=lfs diff=lfs merge=lfs -text
+newton/examples/cable_robot/assets/**/*.tar.gz filter=lfs diff=lfs merge=lfs -text
+newton/examples/cable_robot/assets/Cable008/Cable008_Body.usda filter=lfs diff=lfs merge=lfs -text
