@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root" (
+    prepend apiSchemas = ["PhysicsCollisionAPI"]
+    references = @fridge.usda@</root>
+)
+{
+    bool physics:collisionEnabled = false
+
+    over "Collisions" (
+        active = false
+    )
+    {
+        bool physics:collisionEnabled = false
+    }
+
+    over "Cable008"
+    {
+        # The 245 per-fragment convex housing hulls under Collisions/ are DISABLED. The robot now
+        # collides the connector housing through the single welded mesh under BodyCollision/ (active in
+        # fridge.usda), routed to the MJWarp entry which -- with use_mujoco_contacts=False -- runs
+        # Newton's collision pipeline directly against that one concave mesh. Collapsing the hulls to
+        # one shape removes the O(hulls^2) collision-pair enumeration and the ~hulls^2 self-collision
+        # filter set that dominated startup. Re-activate this scope only to restore the legacy hull set.
+        over "Collisions" (
+            active = false
+        )
+        {
+        }
+
+        over "SocketCollision"
+        {
+            bool physics:collisionEnabled = true
+
+            # Plain triangle-mesh (BVH) collider for the socket bore. The texture-SDF is NOT baked
+            # here -- it is applied at spawn time by ``spawn_fridge_with_socket_sdf`` only when
+            # ``WATERHOSE_SOCKET_SDF`` is enabled, so that flag is the single source of truth for
+            # SDF-vs-mesh collision (previously the SDF was authored here AND in code, so the flag
+            # could not actually turn it off).
+            over "Cable008_SocketCollision" (
+                prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonCollisionAPI"]
+            )
+            {
+                bool physics:collisionEnabled = true
+                uniform token physics:approximation = "none"
+            }
+        }
+    }
+
+    over "Cable008_Prop001"
+    {
+        over "Collisions" (
+            active = false
+        )
+        {
+            bool physics:collisionEnabled = false
+        }
+    }
+
+    over "Cable008_Prop002"
+    {
+        over "Collisions" (
+            active = false
+        )
+        {
+            bool physics:collisionEnabled = false
+        }
+    }
+}

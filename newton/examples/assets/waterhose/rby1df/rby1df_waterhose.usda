@@ -1,0 +1,326 @@
+#usda 1.0
+(
+    defaultPrim = "rby1_dfactorybot"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+over "Flattened_Prototype_1"
+{
+    over "LINK_1"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_2"
+{
+    over "HAND_CAMERA_BRACKET"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_3"
+{
+    over "LINK_10"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_4"
+{
+    over "tn__LINK_20_v11_ZH"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_8"
+{
+    over "LINK_4"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_10"
+{
+    over "EE_BODY"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_14"
+{
+    over "LINK_8"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_15"
+{
+    over "LINK_15"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_16"
+{
+    over "LINK_6"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_17"
+{
+    over "EE_FINGER"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_19"
+{
+    over "LINK_14"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_21"
+{
+    over "LINK_18"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_22"
+{
+    over "LINK_3"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_24"
+{
+    over "LINK_11"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_26"
+{
+    over "tn__LINK_19_v11_ZH"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_28"
+{
+    over "LINK_9"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_30"
+{
+    over "NECK_1"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_35"
+{
+    over "LINK_2"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_36"
+{
+    over "NECK_0"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_39"
+{
+    over "NECK_2"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_40"
+{
+    over "tn__LINK_13_v11_ZH"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_45"
+{
+    over "tn__LINK_12_v11_ZH"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_50"
+{
+    over "LINK_5"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_51"
+{
+    over "LINK_16"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_52"
+{
+    over "dfactory_head_mount"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_53"
+{
+    over "LINK_17"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+over "Flattened_Prototype_55"
+{
+    over "LINK_7"
+    {
+        bool physics:collisionEnabled = false
+    }
+}
+
+def Xform "rby1_dfactorybot" (
+    prepend apiSchemas = ["PhysicsCollisionAPI"]
+    references = @rby1df.usda@</rby1_dfactorybot>
+)
+{
+    bool physics:collisionEnabled = false
+
+    over "Geometry"
+    {
+        over "origin"
+        {
+            over "torso_mobile"
+            {
+                over "torso_anckle_roll"
+                {
+                    over "torso_anckle_pitch"
+                    {
+                        over "torso_knee_pitch"
+                        {
+                            over "torso_hip_pitch"
+                            {
+                                over "torso_hip_roll"
+                                {
+                                    over "torso_hip_yaw"
+                                    {
+                                        over "right_arm_shoulder_pitch"
+                                        {
+                                            over "right_arm_shoulder_roll"
+                                            {
+                                                over "right_arm_shoulder_yaw"
+                                                {
+                                                    over "right_arm_elbow_pitch"
+                                                    {
+                                                        over "right_arm_wrist_yaw"
+                                                        {
+                                                            over "right_arm_wrist_pitch"
+                                                            {
+                                                                over "right_arm_tool_flange"
+                                                                {
+                                                                    over "right_gripper_base"
+                                                                    {
+                                                                        over "right_gripper_leftfinger"
+                                                                        {
+                                                                            over "right_gripper_leftfinger_collision" (
+                                                                                instanceable = false
+                                                                            )
+                                                                            {
+                                                                                over "EE_FINGER" (
+                                                                                    prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonCollisionAPI", "NewtonSDFCollisionAPI"]
+                                                                                )
+                                                                                {
+                                                                                    bool physics:collisionEnabled = true
+                                                                                    uniform token physics:approximation = "none"
+                                                                                    int newton:sdfMaxResolution = 64
+                                                                                    float newton:sdfNarrowBandInner = 0.002
+                                                                                    float newton:sdfNarrowBandOuter = 0.006
+                                                                                    token newton:sdfTextureFormat = "float32"
+                                                                                    float newton:sdfPadding = 0.001
+                                                                                    bool newton:hydroelasticEnabled = false
+                                                                                }
+                                                                            }
+                                                                        }
+
+                                                                        over "right_gripper_rightfinger"
+                                                                        {
+                                                                            over "right_gripper_rightfinger" (
+                                                                                instanceable = false
+                                                                            )
+                                                                            {
+                                                                                over "EE_FINGER" (
+                                                                                    prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonCollisionAPI", "NewtonSDFCollisionAPI"]
+                                                                                )
+                                                                                {
+                                                                                    bool physics:collisionEnabled = true
+                                                                                    uniform token physics:approximation = "none"
+                                                                                    int newton:sdfMaxResolution = 64
+                                                                                    float newton:sdfNarrowBandInner = 0.002
+                                                                                    float newton:sdfNarrowBandOuter = 0.006
+                                                                                    token newton:sdfTextureFormat = "float32"
+                                                                                    float newton:sdfPadding = 0.001
+                                                                                    bool newton:hydroelasticEnabled = false
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
