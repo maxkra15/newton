@@ -15,6 +15,7 @@ from ...math import (
 )
 from ...sim import BodyFlags, JointType
 from ...sim.contacts import contact_surface_point, contact_surface_separation
+from ..particle_grid import particle_grid_query
 
 
 @wp.kernel
@@ -238,6 +239,7 @@ def solve_particle_particle_contacts(
     particle_radius: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -264,7 +266,7 @@ def solve_particle_particle_contacts(
     world_i = particle_world[i]
 
     # particle contact
-    query = wp.hash_grid_query(grid, x, radius + max_radius + k_cohesion)
+    query = particle_grid_query(grid, x, radius + max_radius + k_cohesion, world_i, grouped)
     index = int(0)
 
     delta = wp.vec3(0.0)

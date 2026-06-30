@@ -14,6 +14,7 @@ import warp as wp
 
 from ...geometry import ParticleFlags
 from ...geometry.broad_phase_common import test_world_pair
+from ..particle_grid import particle_grid_query
 
 PI = wp.constant(3.141592653589793)
 
@@ -96,6 +97,7 @@ def compute_fluid_lambdas(
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     smoothing_length: float,
     rest_density: float,
     relaxation_epsilon: float,
@@ -142,7 +144,7 @@ def compute_fluid_lambdas(
     # warp. Capping above the bulk count leaves normal fluid untouched while
     # bounding that tail. ``max_neighbors <= 0`` disables the cap.
     n_acc = int(0)
-    query = wp.hash_grid_query(grid, x, h)
+    query = particle_grid_query(grid, x, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -185,6 +187,7 @@ def solve_fluid_deltas(
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     fluid_lambda: wp.array[float],
     smoothing_length: float,
     rest_density: float,
@@ -235,7 +238,7 @@ def solve_fluid_deltas(
     separation = wp.vec3(0.0)
     num_neighbors = int(0)
 
-    query = wp.hash_grid_query(grid, x, h)
+    query = particle_grid_query(grid, x, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -312,6 +315,7 @@ def compute_fluid_vorticity(
     particle_mass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     fluid_density: wp.array[float],
     smoothing_length: float,
     # outputs
@@ -332,7 +336,7 @@ def compute_fluid_vorticity(
     omega = wp.vec3(0.0)
     world_i = particle_world[i]
 
-    query = wp.hash_grid_query(grid, x, h)
+    query = particle_grid_query(grid, x, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):
@@ -362,6 +366,7 @@ def solve_fluid_velocities(
     particle_invmass: wp.array[float],
     particle_flags: wp.array[wp.int32],
     particle_world: wp.array[wp.int32],
+    grouped: wp.bool,
     fluid_density: wp.array[float],
     fluid_vorticity: wp.array[wp.vec3],
     smoothing_length: float,
@@ -396,7 +401,7 @@ def solve_fluid_velocities(
     v_weighted = v * weight_sum
     eta = wp.vec3(0.0)
 
-    query = wp.hash_grid_query(grid, x, h)
+    query = particle_grid_query(grid, x, h, world_i, grouped)
     j = int(0)
     while wp.hash_grid_query_next(query, j):
         if not test_world_pair(world_i, particle_world[j]):

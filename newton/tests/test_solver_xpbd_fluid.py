@@ -10,7 +10,7 @@ import numpy as np
 import warp as wp
 
 import newton
-import newton._src.solvers.solver as solver_module
+import newton._src.solvers.particle_grid as particle_grid_module
 from newton._src.solvers.xpbd.fluid_kernels import compute_fluid_lambdas
 from newton._src.solvers.xpbd.kernels import apply_particle_deltas, clamp_body_velocities
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -32,7 +32,13 @@ def _count_exact_particle_grid_neighbors(
 ):
     tid = wp.tid()
     count = int(0)
-    for _index in wp.hash_grid_query(grid, positions[tid], radius, worlds[tid]):
+    for _index in particle_grid_module.particle_grid_query(
+        grid,
+        positions[tid],
+        radius,
+        worlds[tid],
+        True,
+    ):
         count += 1
     counts[tid] = count
 
@@ -113,7 +119,7 @@ def test_particle_grid_grouping_requires_multiple_local_particles(test, device):
         test,
         device,
         (1, 1),
-        expected=solver_module._HASH_GRID_GROUPING_SUPPORTED,
+        expected=particle_grid_module._HASH_GRID_GROUPING_SUPPORTED,
     )
     _assert_particle_grid_grouping(test, device, (2,), expected=False)
     _assert_particle_grid_grouping(test, device, (0, 0), expected=False)
@@ -129,12 +135,12 @@ def test_particle_grid_grouping_allows_empty_local_world(test, device):
         test,
         device,
         (2, 0),
-        expected=solver_module._HASH_GRID_GROUPING_SUPPORTED,
+        expected=particle_grid_module._HASH_GRID_GROUPING_SUPPORTED,
     )
 
 
 def test_particle_grid_grouping_refreshes_world_ids(test, device):
-    if not solver_module._HASH_GRID_GROUPING_SUPPORTED:
+    if not particle_grid_module._HASH_GRID_GROUPING_SUPPORTED:
         test.skipTest("Warp grouped HashGrid API is unavailable")
 
     for solver_name, model, solver in _particle_grouping_solvers(device, (1, 1)):
@@ -150,7 +156,7 @@ def test_particle_grid_grouping_refreshes_world_ids(test, device):
 
 
 def test_particle_grid_grouping_builds_exact_worlds(test, device):
-    if not solver_module._HASH_GRID_GROUPING_SUPPORTED:
+    if not particle_grid_module._HASH_GRID_GROUPING_SUPPORTED:
         test.skipTest("Warp grouped HashGrid API is unavailable")
 
     for solver_name, model, solver in _particle_grouping_solvers(device, (1, 1)):
@@ -181,7 +187,7 @@ def test_particle_grid_grouping_falls_back_without_warp_support(test, device):
         return original_build(grid, points, radius)
 
     with (
-        mock.patch.object(solver_module, "_HASH_GRID_GROUPING_SUPPORTED", False),
+        mock.patch.object(particle_grid_module, "_HASH_GRID_GROUPING_SUPPORTED", False),
         mock.patch.object(wp.HashGrid, "reserve", legacy_reserve),
         mock.patch.object(wp.HashGrid, "build", legacy_build),
     ):
@@ -214,7 +220,7 @@ def test_sph_particle_grid_recreated_during_step(test, device):
     solver.step(model.state(), model.state(), control=None, contacts=None, dt=1.0 / 120.0)
 
     test.assertIsNotNone(model.particle_grid)
-    test.assertEqual(solver._particle_grid_grouped, solver_module._HASH_GRID_GROUPING_SUPPORTED)
+    test.assertEqual(solver._particle_grid_grouped, particle_grid_module._HASH_GRID_GROUPING_SUPPORTED)
 
 
 def test_sph_missing_particle_grid_rejected_during_capture(test, device):
@@ -629,6 +635,7 @@ def test_fluid_max_neighbors_truncates_density(test, device):
                 model.particle_inv_mass,
                 model.particle_flags,
                 model.particle_world,
+                solver._particle_grid_grouped,
                 h,
                 solver._fluid_rest_density_eff,
                 solver._fluid_eps,

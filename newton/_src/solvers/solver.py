@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-import inspect
-
 import warp as wp
 
 from ..geometry import ParticleFlags
 from ..sim import BodyFlags, Contacts, Control, Model, ModelBuilder, ModelFlags, State, StateFlags
-
-_HASH_GRID_GROUPING_SUPPORTED = (
-    "grouped" in inspect.signature(wp.HashGrid.reserve).parameters
-    and "groups" in inspect.signature(wp.HashGrid.build).parameters
-)
+from . import particle_grid
 
 
 @wp.kernel
@@ -197,9 +191,8 @@ class SolverBase:
     def _configure_particle_grid(self) -> None:
         """Select and reserve the particle grid path for the current model.
 
-        This reads particle world IDs back to the host and therefore must only
-        run during solver setup or a model-change notification, outside graph
-        capture.
+        This reads particle world IDs back to the host and must run outside
+        graph capture, during solver setup or a model-change notification.
         """
         model = self.model
         grid = model.particle_grid
@@ -211,7 +204,7 @@ class SolverBase:
             assert particle_world.device == model.device, "particle worlds must live on the model device"
 
         self._particle_grid_grouped = bool(
-            _HASH_GRID_GROUPING_SUPPORTED
+            particle_grid._HASH_GRID_GROUPING_SUPPORTED
             and model.world_count > 1
             and model.particle_count > 1
             and grid is not None
@@ -221,7 +214,7 @@ class SolverBase:
 
         if model.particle_count > 0 and grid is not None:
             with wp.ScopedDevice(model.device):
-                if _HASH_GRID_GROUPING_SUPPORTED:
+                if particle_grid._HASH_GRID_GROUPING_SUPPORTED:
                     grid.reserve(model.particle_count, grouped=self._particle_grid_grouped)
                 else:
                     grid.reserve(model.particle_count)

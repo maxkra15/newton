@@ -559,8 +559,7 @@ class SolverXPBD(SolverBase):
             self.render_anisotropy_tertiary = wp.zeros(n, dtype=wp.vec4, device=model.device)
 
         h = self._fluid_h if self._has_fluid else 2.0 * model.particle_max_radius
-        with wp.ScopedDevice(model.device):
-            model.particle_grid.build(state.particle_q, radius=h)
+        self._build_particle_grid(state.particle_q, h)
 
         wp.launch(
             kernel=compute_sph_render_particles,
@@ -622,8 +621,7 @@ class SolverXPBD(SolverBase):
         bounds_lower = wp.vec3(-1.0e9, -1.0e9, -1.0e9)
         bounds_upper = wp.vec3(1.0e9, 1.0e9, 1.0e9)
 
-        with wp.ScopedDevice(model.device):
-            model.particle_grid.build(state_out.particle_q, radius=h)
+        self._build_particle_grid(state_out.particle_q, h)
 
         wp.launch(
             kernel=update_sph_diffuse_particles,
@@ -911,8 +909,7 @@ class SolverXPBD(SolverBase):
                     search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
                     if self._has_fluid:
                         search_radius = max(search_radius, self._fluid_h)
-                    with wp.ScopedDevice(model.device):
-                        model.particle_grid.build(state_out.particle_q, radius=search_radius)
+                    self._build_particle_grid(state_out.particle_q, search_radius)
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -1039,6 +1036,7 @@ class SolverXPBD(SolverBase):
                                     model.particle_radius,
                                     model.particle_flags,
                                     model.particle_world,
+                                    self._particle_grid_grouped,
                                     model.particle_mu,
                                     model.particle_cohesion,
                                     model.particle_max_radius,
@@ -1061,6 +1059,7 @@ class SolverXPBD(SolverBase):
                                     model.particle_inv_mass,
                                     model.particle_flags,
                                     model.particle_world,
+                                    self._particle_grid_grouped,
                                     self._fluid_h,
                                     self._fluid_rest_density_eff,
                                     self._fluid_eps,
@@ -1080,6 +1079,7 @@ class SolverXPBD(SolverBase):
                                     model.particle_inv_mass,
                                     model.particle_flags,
                                     model.particle_world,
+                                    self._particle_grid_grouped,
                                     self._fluid_lambda,
                                     self._fluid_h,
                                     self._fluid_rest_density_eff,
@@ -1301,6 +1301,7 @@ class SolverXPBD(SolverBase):
                             model.particle_mass,
                             model.particle_flags,
                             model.particle_world,
+                            self._particle_grid_grouped,
                             self._fluid_density,
                             self._fluid_h,
                         ],
@@ -1319,6 +1320,7 @@ class SolverXPBD(SolverBase):
                         model.particle_inv_mass,
                         model.particle_flags,
                         model.particle_world,
+                        self._particle_grid_grouped,
                         self._fluid_density,
                         self._fluid_vorticity,
                         self._fluid_h,
