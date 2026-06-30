@@ -8,7 +8,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.viewer.gl.fluid import FluidBatch, _pack_fluid_vertices
+from newton._src.viewer.gl.fluid import DiffuseBatch, FluidBatch, _pack_fluid_vertices
+from newton._src.viewer.viewer_gl import ViewerGL
 from newton.examples.fluid.example_fluid_sph_interactive_tank import Example
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from newton.viewer import ViewerNull
@@ -30,6 +31,55 @@ class _FluidGLProbe:
         self.data = np.frombuffer(raw, dtype=np.float32).copy()
 
 
+class _DiffuseGLProbe:
+    """Minimal OpenGL stand-in for diffuse buffer growth and uploads."""
+
+    GL_ARRAY_BUFFER = 1
+    GL_DYNAMIC_DRAW = 2
+    GL_FLOAT = 3
+    GL_FALSE = 0
+    GLuint = ctypes.c_uint
+
+    def __init__(self):
+        self._next_name = 1
+        self.uploads = []
+
+    def _generate_name(self, name):
+        name.value = self._next_name
+        self._next_name += 1
+
+    def glGenVertexArrays(self, _count, name):
+        self._generate_name(name)
+
+    def glGenBuffers(self, _count, name):
+        self._generate_name(name)
+
+    def glBindVertexArray(self, _array):
+        pass
+
+    def glBindBuffer(self, _target, _buffer):
+        pass
+
+    def glBufferData(self, _target, _size, _data, _usage):
+        pass
+
+    def glVertexAttribPointer(self, _index, _size, _type, _normalized, _stride, _pointer):
+        pass
+
+    def glEnableVertexAttribArray(self, _index):
+        pass
+
+    def glDeleteVertexArrays(self, _count, _array):
+        pass
+
+    def glDeleteBuffers(self, _count, _buffer):
+        pass
+
+    def glBufferSubData(self, _target, _offset, size, pointer):
+        raw = ctypes.string_at(pointer, size)
+        self.uploads.append(np.frombuffer(raw, dtype=np.float32).copy().reshape(-1, 4))
+
+
 def _make_cpu_fluid_batch(capacity):
     batch = FluidBatch.__new__(FluidBatch)
     batch._gl = _FluidGLProbe()
@@ -38,6 +88,28 @@ def _make_cpu_fluid_batch(capacity):
     batch.vbo = 0
     batch._ensure_capacity = lambda count: None
     return batch
+
+
+def _make_diffuse_batch():
+    """Create a diffuse batch without allocating OpenGL resources."""
+    batch = DiffuseBatch.__new__(DiffuseBatch)
+    batch._host_positions = np.zeros((0, 4), dtype=np.float32)
+    batch._host_velocities = np.zeros((0, 4), dtype=np.float32)
+    batch._ensure_capacity = lambda count: None
+    batch._upload = lambda: None
+    return batch
+
+
+class _DiffuseBatchProbe:
+    """Captures ViewerGL diffuse updates without creating an OpenGL context."""
+
+    def __init__(self):
+        self.update_args = None
+        self.update_kwargs = None
+
+    def update(self, *args, **kwargs):
+        self.update_args = args
+        self.update_kwargs = kwargs
 
 
 class _LogFluidProbe(ViewerNull):
@@ -221,6 +293,151 @@ class TestViewerFluid(unittest.TestCase):
                 worlds=np.array([0, 1], dtype=np.int32),
                 visible_worlds_mask=np.ones((2, 1), dtype=np.int32),
             )
+
+    def test_diffuse_world_offsets_visibility_and_alignment(self):
+        batch = _make_diffuse_batch()
+        positions = np.array(
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [2.0, 0.0, 0.0, 1.0],
+                [3.0, 0.0, 0.0, 1.0],
+                [4.0, 0.0, 0.0, 1.0],
+                [5.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        original_positions = positions.copy()
+        velocities = np.array(
+            [
+                [10.0, 0.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0, 0.0],
+                [40.0, 0.0, 0.0, 0.0],
+                [50.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        worlds = np.array([0, 1, 2, -1, 0], dtype=np.int32)
+        offsets = np.array([[-10.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=np.float32)
+        visible = np.array([1, 0], dtype=np.int32)
+
+        batch.update(
+            positions,
+            velocities,
+            worlds=worlds,
+            world_offsets=offsets,
+            visible_worlds_mask=visible,
+        )
+
+        self.assertEqual(batch.count, 2)
+        np.testing.assert_allclose(
+            batch._host_positions,
+            [[-9.0, 0.0, 0.0, 1.0], [4.0, 0.0, 0.0, 1.0]],
+        )
+        np.testing.assert_allclose(
+            batch._host_velocities,
+            [[10.0, 0.0, 0.0, 0.0], [40.0, 0.0, 0.0, 0.0]],
+        )
+        np.testing.assert_array_equal(positions, original_positions)
+
+    def test_diffuse_empty_visibility_mask_keeps_all_live_particles(self):
+        batch = _make_diffuse_batch()
+        positions = np.array(
+            [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 1.0], [3.0, 0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+
+        batch.update(
+            positions,
+            None,
+            worlds=np.array([0, 2, -1], dtype=np.int32),
+            world_offsets=np.array([[5.0, 0.0, 0.0]], dtype=np.float32),
+            visible_worlds_mask=np.empty(0, dtype=np.int32),
+        )
+
+        self.assertEqual(batch.count, 3)
+        np.testing.assert_allclose(
+            batch._host_positions[:, :3],
+            [[6.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        )
+        np.testing.assert_array_equal(batch._host_velocities, np.zeros_like(positions))
+
+    def test_diffuse_legacy_update_filters_only_dead_particles(self):
+        batch = _make_diffuse_batch()
+        positions = np.array(
+            [[1.0, 2.0, 3.0, 1.0], [4.0, 5.0, 6.0, 0.0], [7.0, 8.0, 9.0, 0.5]],
+            dtype=np.float32,
+        )
+        velocities = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+        batch.update(positions, velocities)
+
+        self.assertEqual(batch.count, 2)
+        np.testing.assert_array_equal(batch._host_positions, positions[[0, 2]])
+        np.testing.assert_array_equal(batch._host_velocities, velocities[[0, 2]])
+
+    def test_diffuse_growth_preserves_filtered_data_and_hidden_state(self):
+        gl = _DiffuseGLProbe()
+        batch = DiffuseBatch(gl, capacity=1)
+        batch.hidden = True
+        positions = np.array(
+            [[1.0, 2.0, 3.0, 1.0], [4.0, 5.0, 6.0, 0.0], [7.0, 8.0, 9.0, 0.5]],
+            dtype=np.float32,
+        )
+        velocities = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+        batch.update(positions, velocities)
+
+        self.assertEqual(batch.capacity, 2)
+        self.assertEqual(batch.count, 2)
+        self.assertTrue(batch.hidden)
+        self.assertEqual(len(gl.uploads), 2)
+        np.testing.assert_array_equal(gl.uploads[0], positions[[0, 2]])
+        np.testing.assert_array_equal(gl.uploads[1], velocities[[0, 2]])
+
+    def test_diffuse_update_validates_indexed_arrays(self):
+        batch = _make_diffuse_batch()
+        positions = np.zeros((2, 4), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "positions must have shape"):
+            batch.update(np.zeros((2, 3), dtype=np.float32), None)
+        with self.assertRaisesRegex(ValueError, "velocities must have shape"):
+            batch.update(positions, np.zeros((1, 4), dtype=np.float32))
+        with self.assertRaisesRegex(ValueError, "worlds must have shape"):
+            batch.update(positions, None, worlds=np.array([0], dtype=np.int32))
+        with self.assertRaisesRegex(TypeError, "worlds must use an integer dtype"):
+            batch.update(positions, None, worlds=np.array([0.0, 1.0], dtype=np.float32))
+        with self.assertRaisesRegex(ValueError, "world_offsets must have shape"):
+            batch.update(
+                positions,
+                None,
+                worlds=np.array([0, 1], dtype=np.int32),
+                world_offsets=np.zeros((2, 2), dtype=np.float32),
+            )
+        with self.assertRaisesRegex(ValueError, "visible_worlds_mask must be one-dimensional"):
+            batch.update(
+                positions,
+                None,
+                worlds=np.array([0, 1], dtype=np.int32),
+                visible_worlds_mask=np.ones((2, 1), dtype=np.int32),
+            )
+
+    def test_viewer_gl_forwards_diffuse_world_state(self):
+        batch = _DiffuseBatchProbe()
+        viewer = ViewerGL.__new__(ViewerGL)
+        viewer.fluid_diffuse = {"diffuse": batch}
+        viewer.world_offsets = object()
+        viewer._visible_worlds_mask = object()
+        positions = np.zeros((1, 4), dtype=np.float32)
+        velocities = np.ones((1, 4), dtype=np.float32)
+        worlds = np.array([0], dtype=np.int32)
+
+        viewer.log_fluid_diffuse("diffuse", positions, velocities, worlds=worlds)
+
+        self.assertEqual(batch.update_args, (positions, velocities))
+        self.assertIs(batch.update_kwargs["worlds"], worlds)
+        self.assertIs(batch.update_kwargs["world_offsets"], viewer.world_offsets)
+        self.assertIs(batch.update_kwargs["visible_worlds_mask"], viewer._visible_worlds_mask)
 
     def test_switching_from_fluid_to_particles_hides_fluid_batch(self):
         active = int(newton.ParticleFlags.ACTIVE)

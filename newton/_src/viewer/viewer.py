@@ -2533,6 +2533,7 @@ class ViewerBase(ABC):
         lifetime: float = 2.0,
         surface_bias: float = 0.05,
         hidden: bool = False,
+        worlds: wp.array[wp.int32] | None = None,
     ):
         """Log diffuse spray/foam particles (no-op for non-fluid backends).
 
@@ -2549,8 +2550,23 @@ class ViewerBase(ABC):
             surface_bias: Camera-ward offset [m] so surface-riding foam passes
                 the depth test against the rendered water skin.
             hidden: Whether the diffuse batch should be hidden.
+            worlds: World index per particle; local worlds receive display
+                offsets and visibility filtering, while world ``-1`` remains
+                unshifted and visible.
         """
-        del name, positions, velocities, radius, color, motion_blur_scale, diffusion, lifetime, surface_bias, hidden
+        del (
+            name,
+            positions,
+            velocities,
+            radius,
+            color,
+            motion_blur_scale,
+            diffusion,
+            lifetime,
+            surface_bias,
+            hidden,
+            worlds,
+        )
 
     def _log_particles(self, state: newton.State):
         if self.model.particle_count:

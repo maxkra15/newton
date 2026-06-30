@@ -1319,8 +1319,15 @@ class ViewerGL(ViewerBase):
         lifetime: float = 2.0,
         surface_bias: float = 0.05,
         hidden: bool = False,
+        worlds: wp.array[wp.int32] | None = None,
     ):
-        """Log Flex-style diffuse spray/foam particles."""
+        """Log Flex-style diffuse spray/foam particles.
+
+        Args:
+            worlds: World index per particle; local worlds receive display
+                offsets and visibility filtering, while world ``-1`` remains
+                unshifted and visible.
+        """
         from .gl.fluid import DiffuseBatch  # noqa: PLC0415
 
         if positions is None:
@@ -1339,7 +1346,13 @@ class ViewerGL(ViewerBase):
         batch.diffusion = float(diffusion)
         batch.lifetime = float(max(lifetime, 1.0e-3))
         batch.surface_bias = float(surface_bias)
-        batch.update(positions, velocities)
+        batch.update(
+            positions,
+            velocities,
+            worlds=worlds,
+            world_offsets=self.world_offsets,
+            visible_worlds_mask=self._visible_worlds_mask,
+        )
 
     def log_points(
         self,

@@ -1248,30 +1248,87 @@ class DiffuseBatch:
     def _ensure_capacity(self, count: int):
         if count <= self.capacity:
             return
-        material = (self.radius, self.color, self.motion_blur_scale, self.diffusion, self.lifetime, self.surface_bias)
+        state = (
+            self.radius,
+            self.color,
+            self.motion_blur_scale,
+            self.diffusion,
+            self.lifetime,
+            self.surface_bias,
+            self.hidden,
+        )
         self.destroy()
         self.__init__(self._gl, max(count, self.capacity * 2))
-        self.radius, self.color, self.motion_blur_scale, self.diffusion, self.lifetime, self.surface_bias = material
+        (
+            self.radius,
+            self.color,
+            self.motion_blur_scale,
+            self.diffusion,
+            self.lifetime,
+            self.surface_bias,
+            self.hidden,
+        ) = state
 
-    def update(self, positions, velocities):
+    def update(self, positions, velocities, worlds=None, world_offsets=None, visible_worlds_mask=None):
         if positions is None:
             self.count = 0
             return
 
-        host_positions = positions.numpy() if isinstance(positions, wp.array) else np.asarray(positions)
-        host_positions = host_positions.astype(np.float32, copy=False)
+        source_positions = positions.numpy() if isinstance(positions, wp.array) else np.asarray(positions)
+        if source_positions.ndim != 2 or source_positions.shape[1] != 4:
+            raise ValueError(f"positions must have shape [count, 4], got {source_positions.shape}")
+        host_positions = np.array(source_positions, dtype=np.float32, copy=True)
+        count = len(host_positions)
+
         if velocities is None:
             host_velocities = np.zeros_like(host_positions)
         else:
-            host_velocities = velocities.numpy() if isinstance(velocities, wp.array) else np.asarray(velocities)
-            host_velocities = host_velocities.astype(np.float32, copy=False)
+            source_velocities = velocities.numpy() if isinstance(velocities, wp.array) else np.asarray(velocities)
+            if source_velocities.shape != host_positions.shape:
+                raise ValueError(f"velocities must have shape {host_positions.shape}, got {source_velocities.shape}")
+            host_velocities = np.asarray(source_velocities, dtype=np.float32)
 
         live = host_positions[:, 3] > 0.0
-        self._host_positions = np.ascontiguousarray(host_positions[live])
-        self._host_velocities = np.ascontiguousarray(host_velocities[live])
-        count = int(self._host_positions.shape[0])
-        self._ensure_capacity(count)
-        self.count = count
+        if worlds is not None:
+            host_worlds = worlds.numpy() if isinstance(worlds, wp.array) else np.asarray(worlds)
+            if host_worlds.shape != (count,):
+                raise ValueError(f"worlds must have shape ({count},), got {host_worlds.shape}")
+            if not np.issubdtype(host_worlds.dtype, np.integer):
+                raise TypeError(f"worlds must use an integer dtype, got {host_worlds.dtype}")
+
+            local = host_worlds >= 0
+            if world_offsets is not None:
+                source_offsets = (
+                    world_offsets.numpy() if isinstance(world_offsets, wp.array) else np.asarray(world_offsets)
+                )
+                if source_offsets.ndim != 2 or source_offsets.shape[1] != 3:
+                    raise ValueError(f"world_offsets must have shape [world_count, 3], got {source_offsets.shape}")
+                host_offsets = np.asarray(source_offsets, dtype=np.float32)
+                valid_offset = local & (host_worlds < len(host_offsets))
+                host_positions[valid_offset, :3] += host_offsets[host_worlds[valid_offset]]
+
+            if visible_worlds_mask is not None:
+                source_visible = (
+                    visible_worlds_mask.numpy()
+                    if isinstance(visible_worlds_mask, wp.array)
+                    else np.asarray(visible_worlds_mask)
+                )
+                if source_visible.ndim != 1:
+                    raise ValueError(f"visible_worlds_mask must be one-dimensional, got shape {source_visible.shape}")
+                host_visible = np.asarray(source_visible, dtype=np.int32)
+                if len(host_visible) > 0:
+                    valid_world = local & (host_worlds < len(host_visible))
+                    world_visible = np.zeros(count, dtype=bool)
+                    world_visible[valid_world] = host_visible[host_worlds[valid_world]] != 0
+                    live &= ~local | world_visible
+
+        filtered_positions = np.ascontiguousarray(host_positions[live])
+        filtered_velocities = np.ascontiguousarray(host_velocities[live])
+        live_count = int(filtered_positions.shape[0])
+        self._ensure_capacity(live_count)
+        self._host_positions = filtered_positions
+        self._host_velocities = filtered_velocities
+        self.count = live_count
         self._upload()
 
     def _upload(self):
