@@ -315,6 +315,7 @@ class Example:
             anisotropy_secondary=self.solver.render_anisotropy_secondary,
             anisotropy_tertiary=self.solver.render_anisotropy_tertiary,
             hidden=False,
+            worlds=self.model.particle_world,
         )
         if getattr(self.viewer, "show_fluid_diffuse", False) and self.solver.diffuse_positions is not None:
             self.viewer.log_fluid_diffuse(
@@ -329,6 +330,7 @@ class Example:
                 # (splat radius + blur) or the depth test hides all the foam
                 surface_bias=0.045,
                 hidden=False,
+                worlds=self.solver.diffuse_worlds,
             )
 
     @staticmethod

@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import ctypes
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -153,6 +155,52 @@ class _LogFluidProbe(ViewerNull):
 
 
 class TestViewerFluid(unittest.TestCase):
+    def test_fluid_examples_route_world_arrays(self):
+        examples = {
+            "example_fluid_sph_cup_transfer.py": "solver.diffuse_worlds",
+            "example_fluid_sph_dam_break.py": "self.solver.diffuse_worlds",
+            "example_fluid_sph_interactive_tank.py": "self.sph_solver.diffuse_worlds",
+            "example_fluid_sph_wave_pool.py": "self.sph_solver.diffuse_worlds",
+            "example_fluid_xpbd_cereal_bowl.py": None,
+            "example_fluid_xpbd_cup.py": None,
+            "example_fluid_xpbd_cup_transfer.py": "self.solver.diffuse_worlds",
+            "example_fluid_xpbd_dam_break.py": "self.solver.diffuse_worlds",
+            "example_fluid_xpbd_interactive_tank.py": "self.solver.diffuse_worlds",
+            "example_fluid_xpbd_wave_pool.py": "self.solver.diffuse_worlds",
+        }
+        fluid_dir = Path(__file__).parents[1] / "examples" / "fluid"
+
+        for filename, diffuse_worlds in examples.items():
+            source = (fluid_dir / filename).read_text(encoding="utf-8")
+            calls = [
+                node
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"log_fluid", "log_fluid_diffuse"}
+            ]
+            self.assertTrue(calls, filename)
+
+            for call in calls:
+                with self.subTest(filename=filename, line=call.lineno, method=call.func.attr):
+                    positions_name = "points" if call.func.attr == "log_fluid" else "positions"
+                    positions = (
+                        call.args[1]
+                        if len(call.args) > 1
+                        else next((keyword.value for keyword in call.keywords if keyword.arg == positions_name), None)
+                    )
+                    worlds = next((keyword.value for keyword in call.keywords if keyword.arg == "worlds"), None)
+                    self.assertIsNotNone(positions)
+                    if isinstance(positions, ast.Constant) and positions.value is None:
+                        self.assertIsNone(worlds)
+                    elif call.func.attr == "log_fluid":
+                        self.assertIsNotNone(worlds)
+                        self.assertEqual(ast.unparse(worlds), "self.model.particle_world")
+                    else:
+                        self.assertIsNotNone(diffuse_worlds)
+                        self.assertIsNotNone(worlds)
+                        self.assertEqual(ast.unparse(worlds), diffuse_worlds)
+
     @staticmethod
     def _build_model(flags_list):
         builder = newton.ModelBuilder()

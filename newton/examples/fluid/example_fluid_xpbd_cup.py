@@ -306,6 +306,7 @@ class Example:
             anisotropy_secondary=self.solver.render_anisotropy_secondary,
             anisotropy_tertiary=self.solver.render_anisotropy_tertiary,
             hidden=False,
+            worlds=self.model.particle_world,
         )
 
     @staticmethod

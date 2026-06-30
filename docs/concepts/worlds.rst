@@ -214,6 +214,15 @@ While :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.e
    offsets (e.g. ``viewer.set_world_offsets()``) while keeping ``spacing=(0, 0, 0)`` so that all
    worlds remain at the origin in the physics simulation.
 
+.. note::
+   :class:`~newton.solvers.SolverXPBD` and :class:`~newton.solvers.SolverSPH`
+   isolate particle-neighbor interactions by :attr:`~newton.Model.particle_world`.
+   Models with more than one world and only non-negative particle world IDs use
+   grouped hash-grid queries when the installed Warp exposes the grouped
+   :class:`~warp.HashGrid` API. Otherwise, or if any particle is global (world
+   ``-1``), the solvers use the correctness-filtered fallback. Global particles
+   can still interact with every local world.
+
 .. testcode::
 
    import newton

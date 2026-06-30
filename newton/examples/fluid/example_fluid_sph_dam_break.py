@@ -253,6 +253,7 @@ class Example:
             anisotropy_secondary=self.solver.render_anisotropy_secondary,
             anisotropy_tertiary=self.solver.render_anisotropy_tertiary,
             hidden=False,
+            worlds=self.model.particle_world,
         )
 
     def _log_diffuse_particles(self):
@@ -267,6 +268,7 @@ class Example:
             radius=self.foam_radius,
             color=self.foam_color,
             motion_blur_scale=self.foam_motion_blur,
+            worlds=self.solver.diffuse_worlds,
             lifetime=self.foam_lifetime,
             hidden=False,
         )
