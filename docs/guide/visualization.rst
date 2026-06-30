@@ -620,6 +620,27 @@ When visualizing multiple worlds, use :meth:`~newton.viewer.ViewerBase.set_world
 
     viewer.set_world_offsets(spacing=(5.0, 5.0, 0.0))
 
+Fluid batches need their world array when they are logged directly so ViewerGL
+can apply the same display-only offsets and visible-world filter:
+
+.. code-block:: python
+
+    viewer.log_fluid(
+        "/model/fluid",
+        solver.render_positions,
+        radii=model.particle_radius,
+        worlds=model.particle_world,
+    )
+    viewer.log_fluid_diffuse(
+        "/model/fluid/diffuse",
+        solver.diffuse_positions,
+        solver.diffuse_velocities,
+        worlds=solver.diffuse_worlds,
+    )
+
+Global particles (world ``-1``) remain unshifted and visible. The built-in
+particle logger supplies ``model.particle_world`` automatically.
+
 Choosing the Right Viewer
 -------------------------
 

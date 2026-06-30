@@ -389,6 +389,7 @@ class Example:
             anisotropy_secondary=solver.render_anisotropy_secondary,
             anisotropy_tertiary=solver.render_anisotropy_tertiary,
             hidden=False,
+            worlds=self.model.particle_world,
         )
         if self.viewer.show_fluid_diffuse and solver.diffuse_positions is not None:
             self.viewer.log_fluid_diffuse(
@@ -399,6 +400,7 @@ class Example:
                 lifetime=1.5,
                 surface_bias=0.02,
                 hidden=False,
+                worlds=solver.diffuse_worlds,
             )
 
     def gui(self, ui):
