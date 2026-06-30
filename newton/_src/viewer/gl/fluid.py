@@ -41,6 +41,10 @@ def _pack_fluid_vertices(
     anisotropy_secondary: wp.array[wp.vec4],
     anisotropy_tertiary: wp.array[wp.vec4],
     use_anisotropy: int,
+    worlds: wp.array[wp.int32],
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    use_worlds: int,
     dest: wp.array[float],
 ):
     tid = wp.tid()
@@ -49,6 +53,14 @@ def _pack_fluid_vertices(
     if use_radii != 0:
         r = radii[tid]
     r *= radius_scale
+
+    if use_worlds != 0:
+        world = worlds[tid]
+        if world >= 0:
+            if world_offsets and world < world_offsets.shape[0]:
+                p += world_offsets[world]
+            if visible_worlds_mask and (world >= visible_worlds_mask.shape[0] or visible_worlds_mask[world] == 0):
+                r = 0.0
 
     a1 = wp.vec4(1.0, 0.0, 0.0, 1.0)
     a2 = wp.vec4(0.0, 1.0, 0.0, 1.0)
@@ -946,6 +958,11 @@ class FluidBatch:
 
         self._packed_gpu = None
         self._dummy_radii = None
+        self._dummy_vec4 = None
+        self._dummy_worlds = None
+        self._dummy_world_offsets = None
+        self._dummy_visible_worlds_mask = None
+        self._dummy_device = None
         self._cuda_vbo = None
         self._interop_failed = False
 
@@ -959,6 +976,11 @@ class FluidBatch:
             self.vbo = None
         self._packed_gpu = None
         self._dummy_radii = None
+        self._dummy_vec4 = None
+        self._dummy_worlds = None
+        self._dummy_world_offsets = None
+        self._dummy_visible_worlds_mask = None
+        self._dummy_device = None
 
     def _ensure_capacity(self, count: int):
         if count <= self.capacity:
@@ -969,8 +991,53 @@ class FluidBatch:
         for attr, value in material.items():
             setattr(self, attr, value)
 
+    @staticmethod
+    def _validate_array(name, value, count, *, dtype=None, components=None, device=None):
+        if value is None:
+            return
+        if isinstance(value, wp.array):
+            if dtype is not None and value.dtype != dtype:
+                raise TypeError(f"{name} must have dtype {dtype}, got {value.dtype}")
+            if value.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional, got shape {value.shape}")
+            if count is not None and len(value) != count:
+                raise ValueError(f"{name} must contain {count} entries, got {len(value)}")
+            if device is not None and value.device != device:
+                raise ValueError(f"{name} must be on device {device}, got {value.device}")
+            return
+
+        array = np.asarray(value)
+        expected_shape = (count,) if components is None else (count, components)
+        if count is None:
+            if components is None:
+                if array.ndim != 1:
+                    raise ValueError(f"{name} must be one-dimensional, got shape {array.shape}")
+            elif array.ndim != 2 or array.shape[1] != components:
+                raise ValueError(f"{name} must have shape [count, {components}], got {array.shape}")
+        elif array.shape != expected_shape:
+            raise ValueError(f"{name} must have shape {expected_shape}, got {array.shape}")
+
+    def _ensure_dummy_arrays(self, device):
+        if self._dummy_device == device:
+            return
+        self._dummy_radii = wp.empty(0, dtype=wp.float32, device=device)
+        self._dummy_vec4 = wp.empty(0, dtype=wp.vec4, device=device)
+        self._dummy_worlds = wp.empty(0, dtype=wp.int32, device=device)
+        self._dummy_world_offsets = wp.empty(0, dtype=wp.vec3, device=device)
+        self._dummy_visible_worlds_mask = wp.empty(0, dtype=wp.int32, device=device)
+        self._dummy_device = device
+
     def update(
-        self, points, radii, radius_scale=1.0, anisotropy=None, anisotropy_secondary=None, anisotropy_tertiary=None
+        self,
+        points,
+        radii,
+        radius_scale=1.0,
+        anisotropy=None,
+        anisotropy_secondary=None,
+        anisotropy_tertiary=None,
+        worlds=None,
+        world_offsets=None,
+        visible_worlds_mask=None,
     ):
         """Pack particle data into the vertex buffer (device path when possible)."""
         gl = self._gl
@@ -987,10 +1054,21 @@ class FluidBatch:
         scalar_radius = radii is None or isinstance(radii, (int, float, np.integer, np.floating))
         use_aniso = anisotropy is not None and anisotropy_secondary is not None and anisotropy_tertiary is not None
 
+        points_device = points.device if isinstance(points, wp.array) else None
+        if worlds is not None:
+            self._validate_array("worlds", worlds, count, dtype=wp.int32, device=points_device)
+            if world_offsets is not None:
+                self._validate_array(
+                    "world_offsets", world_offsets, None, dtype=wp.vec3, components=3, device=points_device
+                )
+            if visible_worlds_mask is not None:
+                self._validate_array(
+                    "visible_worlds_mask", visible_worlds_mask, None, dtype=wp.int32, device=points_device
+                )
+
         if isinstance(points, wp.array) and points.device.is_cuda:
             device = points.device
-            if self._dummy_radii is None:
-                self._dummy_radii = wp.zeros(1, dtype=float, device=device)
+            self._ensure_dummy_arrays(device)
             if scalar_radius:
                 radii_array = self._dummy_radii
                 uniform_radius = 0.1 if radii is None else float(radii)
@@ -999,7 +1077,7 @@ class FluidBatch:
                 radii_array = radii
                 uniform_radius = 0.0
                 use_radii = 1
-            dummy4 = anisotropy if use_aniso else wp.zeros(1, dtype=wp.vec4, device=device)
+            dummy4 = anisotropy if use_aniso else self._dummy_vec4
 
             # CUDA-GL interop: pack straight into the mapped vertex buffer.
             # This avoids a per-frame device-to-host copy of the packed data
@@ -1034,6 +1112,12 @@ class FluidBatch:
                     anisotropy_secondary if use_aniso else dummy4,
                     anisotropy_tertiary if use_aniso else dummy4,
                     1 if use_aniso else 0,
+                    worlds if worlds is not None else self._dummy_worlds,
+                    world_offsets if worlds is not None and world_offsets is not None else self._dummy_world_offsets,
+                    visible_worlds_mask
+                    if worlds is not None and visible_worlds_mask is not None
+                    else self._dummy_visible_worlds_mask,
+                    1 if worlds is not None else 0,
                     dest,
                 ],
                 device=device,
@@ -1058,6 +1142,29 @@ class FluidBatch:
             data = np.zeros((count, 16), dtype=np.float32)
             data[:, :3] = host_points
             data[:, 3] = r
+
+            if worlds is not None:
+                host_worlds = worlds.numpy() if isinstance(worlds, wp.array) else np.asarray(worlds)
+                host_worlds = host_worlds.astype(np.int32, copy=False)
+                local = host_worlds >= 0
+                if world_offsets is not None:
+                    host_offsets = (
+                        world_offsets.numpy() if isinstance(world_offsets, wp.array) else np.asarray(world_offsets)
+                    )
+                    host_offsets = host_offsets.astype(np.float32, copy=False)
+                    valid_offsets = local & (host_worlds < len(host_offsets))
+                    data[valid_offsets, :3] += host_offsets[host_worlds[valid_offsets]]
+                if visible_worlds_mask is not None and len(visible_worlds_mask) > 0:
+                    host_visible = (
+                        visible_worlds_mask.numpy()
+                        if isinstance(visible_worlds_mask, wp.array)
+                        else np.asarray(visible_worlds_mask)
+                    )
+                    host_visible = host_visible.astype(np.int32, copy=False)
+                    hidden = local & (host_worlds >= len(host_visible))
+                    in_range = local & (host_worlds < len(host_visible))
+                    hidden[in_range] |= host_visible[host_worlds[in_range]] == 0
+                    data[hidden, 3] = 0.0
             if use_aniso:
                 q1 = anisotropy.numpy().astype(np.float32, copy=False)
                 q2 = anisotropy_secondary.numpy().astype(np.float32, copy=False)

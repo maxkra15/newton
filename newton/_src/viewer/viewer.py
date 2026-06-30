@@ -2471,6 +2471,7 @@ class ViewerBase(ABC):
         anisotropy_secondary=None,
         anisotropy_tertiary=None,
         hidden: bool = False,
+        worlds: wp.array[wp.int32] | None = None,
     ):
         """Log particle samples as a fluid surface.
 
@@ -2514,6 +2515,9 @@ class ViewerBase(ABC):
             anisotropy_secondary: Secondary ellipsoid axis and scale.
             anisotropy_tertiary: Tertiary ellipsoid axis and scale.
             hidden: Whether the fluid batch should be hidden.
+            worlds: World index per particle; local worlds receive display
+                offsets and visibility filtering, while world ``-1`` remains
+                unshifted and visible.
         """
         self.log_points(name=name, points=points, radii=radii, hidden=hidden)
 
@@ -2552,6 +2556,7 @@ class ViewerBase(ABC):
         if self.model.particle_count:
             points = state.particle_q
             radii = self.model.particle_radius
+            worlds = self.model.particle_world
 
             # Filter out inactive particles so emitters/culled particles are not rendered.
             # Uses Warp stream compaction to stay on device and avoid GPU→CPU→GPU roundtrips.
@@ -2577,6 +2582,10 @@ class ViewerBase(ABC):
                         radii_out = wp.empty(active_count, dtype=wp.float32, device=self.device)
                         wp.launch(compact, dim=n, inputs=[radii, mask, offsets, radii_out], device=self.device)
                         radii = radii_out
+                    if worlds is not None:
+                        worlds_out = wp.empty(active_count, dtype=wp.int32, device=self.device)
+                        wp.launch(compact, dim=n, inputs=[worlds, mask, offsets, worlds_out], device=self.device)
+                        worlds = worlds_out
 
             if self.model_changed:
                 colors = wp.full(shape=len(points), value=wp.vec3(0.7, 0.6, 0.4), device=self.device)
@@ -2591,6 +2600,7 @@ class ViewerBase(ABC):
                     color=self.fluid_color,
                     ior=self.fluid_ior,
                     hidden=False,
+                    worlds=worlds,
                 )
                 self.log_points(name="/model/particles", points=None, hidden=True)
                 return
