@@ -39,6 +39,9 @@ class ModelFlags(IntEnum):
     ACTUATOR_PROPERTIES = 1 << 8
     """Indicates actuator property updates: gains, biases, limits, etc."""
 
+    PARTICLE_PROPERTIES = 1 << 9
+    """Indicates particle property updates: masses, radii, flags, or world assignments."""
+
     ALL = (
         JOINT_PROPERTIES
         | JOINT_DOF_PROPERTIES
@@ -49,6 +52,7 @@ class ModelFlags(IntEnum):
         | CONSTRAINT_PROPERTIES
         | TENDON_PROPERTIES
         | ACTUATOR_PROPERTIES
+        | PARTICLE_PROPERTIES
     )
     """Indicates all property updates."""
 

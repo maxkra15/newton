@@ -4,11 +4,13 @@
 """Tests for the position-based fluid (PBF) support in the XPBD solver."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 import newton
+import newton._src.solvers.solver as solver_module
 from newton._src.solvers.xpbd.fluid_kernels import compute_fluid_lambdas
 from newton._src.solvers.xpbd.kernels import apply_particle_deltas, clamp_body_velocities
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -18,6 +20,236 @@ RADIUS = 0.025
 REST_DENSITY = 1000.0
 PARTICLE_MASS = REST_DENSITY * SPACING**3
 FLUID_FLAGS = newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID
+
+
+@wp.kernel
+def _count_exact_particle_grid_neighbors(
+    grid: wp.uint64,
+    positions: wp.array[wp.vec3],
+    worlds: wp.array[wp.int32],
+    radius: float,
+    counts: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    count = int(0)
+    for _index in wp.hash_grid_query(grid, positions[tid], radius, worlds[tid]):
+        count += 1
+    counts[tid] = count
+
+
+def _build_particle_grouping_model(
+    device,
+    world_particle_counts: tuple[int, ...],
+    global_particle_count: int = 0,
+):
+    scene = newton.ModelBuilder(gravity=0.0)
+    for particle_index in range(global_particle_count):
+        scene.add_particle(
+            pos=(particle_index * SPACING, 0.0, 0.0),
+            vel=(0.0, 0.0, 0.0),
+            mass=PARTICLE_MASS,
+            radius=RADIUS,
+            flags=FLUID_FLAGS,
+        )
+
+    for particle_count in world_particle_counts:
+        world = newton.ModelBuilder(gravity=0.0)
+        for particle_index in range(particle_count):
+            world.add_particle(
+                pos=(particle_index * SPACING, 0.0, 0.0),
+                vel=(0.0, 0.0, 0.0),
+                mass=PARTICLE_MASS,
+                radius=RADIUS,
+                flags=FLUID_FLAGS,
+            )
+        scene.add_world(world)
+
+    return scene.finalize(device=device)
+
+
+def _particle_grouping_solvers(device, world_particle_counts, global_particle_count=0):
+    xpbd_model = _build_particle_grouping_model(device, world_particle_counts, global_particle_count)
+    sph_model = _build_particle_grouping_model(device, world_particle_counts, global_particle_count)
+    return (
+        (
+            "XPBD",
+            xpbd_model,
+            newton.solvers.SolverXPBD(xpbd_model, fluid_rest_distance=SPACING),
+        ),
+        (
+            "SPH",
+            sph_model,
+            newton.solvers.SolverSPH(sph_model, smoothing_length=2.2 * RADIUS),
+        ),
+    )
+
+
+def _assert_particle_grid_grouping(
+    test,
+    device,
+    world_particle_counts: tuple[int, ...],
+    expected: bool,
+    global_particle_count: int = 0,
+):
+    for solver_name, model, solver in _particle_grouping_solvers(device, world_particle_counts, global_particle_count):
+        test.assertEqual(
+            solver._particle_grid_grouped,
+            expected,
+            f"unexpected grouped-grid eligibility for {solver_name}",
+        )
+        if expected:
+            test.assertIsNotNone(model.particle_grid)
+            test.assertEqual(model.particle_grid.device, model.device)
+
+
+def test_particle_grid_grouping_model_flag(test, device):
+    del device
+    test.assertEqual(newton.ModelFlags.PARTICLE_PROPERTIES, 1 << 9)
+    test.assertTrue(newton.ModelFlags.ALL & newton.ModelFlags.PARTICLE_PROPERTIES)
+
+
+def test_particle_grid_grouping_requires_multiple_local_particles(test, device):
+    _assert_particle_grid_grouping(
+        test,
+        device,
+        (1, 1),
+        expected=solver_module._HASH_GRID_GROUPING_SUPPORTED,
+    )
+    _assert_particle_grid_grouping(test, device, (2,), expected=False)
+    _assert_particle_grid_grouping(test, device, (0, 0), expected=False)
+
+
+def test_particle_grid_grouping_rejects_global_particles(test, device):
+    _assert_particle_grid_grouping(test, device, (0, 0), expected=False, global_particle_count=2)
+    _assert_particle_grid_grouping(test, device, (1, 1), expected=False, global_particle_count=1)
+
+
+def test_particle_grid_grouping_allows_empty_local_world(test, device):
+    _assert_particle_grid_grouping(
+        test,
+        device,
+        (2, 0),
+        expected=solver_module._HASH_GRID_GROUPING_SUPPORTED,
+    )
+
+
+def test_particle_grid_grouping_refreshes_world_ids(test, device):
+    if not solver_module._HASH_GRID_GROUPING_SUPPORTED:
+        test.skipTest("Warp grouped HashGrid API is unavailable")
+
+    for solver_name, model, solver in _particle_grouping_solvers(device, (1, 1)):
+        test.assertTrue(solver._particle_grid_grouped, solver_name)
+
+        model.particle_world.assign([-1, 1])
+        solver.notify_model_changed(newton.ModelFlags.PARTICLE_PROPERTIES)
+        test.assertFalse(solver._particle_grid_grouped, solver_name)
+
+        model.particle_world.assign([0, 1])
+        solver.notify_model_changed(newton.ModelFlags.PARTICLE_PROPERTIES)
+        test.assertTrue(solver._particle_grid_grouped, solver_name)
+
+
+def test_particle_grid_grouping_builds_exact_worlds(test, device):
+    if not solver_module._HASH_GRID_GROUPING_SUPPORTED:
+        test.skipTest("Warp grouped HashGrid API is unavailable")
+
+    for solver_name, model, solver in _particle_grouping_solvers(device, (1, 1)):
+        solver._build_particle_grid(model.particle_q, radius=2.0 * RADIUS)
+        counts = wp.zeros(model.particle_count, dtype=wp.int32, device=device)
+        wp.launch(
+            _count_exact_particle_grid_neighbors,
+            dim=model.particle_count,
+            inputs=[model.particle_grid.id, model.particle_q, model.particle_world, 2.0 * RADIUS],
+            outputs=[counts],
+            device=device,
+        )
+        test.assertTrue(np.array_equal(counts.numpy(), [1, 1]), solver_name)
+
+
+def test_particle_grid_grouping_falls_back_without_warp_support(test, device):
+    original_reserve = wp.HashGrid.reserve
+    original_build = wp.HashGrid.build
+    reserve_calls = []
+    build_calls = []
+
+    def legacy_reserve(grid, point_count):
+        reserve_calls.append(point_count)
+        return original_reserve(grid, point_count)
+
+    def legacy_build(grid, points, radius):
+        build_calls.append(len(points))
+        return original_build(grid, points, radius)
+
+    with (
+        mock.patch.object(solver_module, "_HASH_GRID_GROUPING_SUPPORTED", False),
+        mock.patch.object(wp.HashGrid, "reserve", legacy_reserve),
+        mock.patch.object(wp.HashGrid, "build", legacy_build),
+    ):
+        solvers = _particle_grouping_solvers(device, (1, 1))
+        for solver_name, model, solver in solvers:
+            test.assertFalse(solver._particle_grid_grouped, solver_name)
+            solver._build_particle_grid(model.particle_q, radius=2.0 * RADIUS)
+
+    test.assertEqual(reserve_calls, [2, 2])
+    test.assertEqual(build_calls, [2, 2])
+
+
+def test_xpbd_particle_notification_resets_all_fluid(test, device):
+    model = _build_particle_grouping_model(device, (2,))
+    solver = newton.solvers.SolverXPBD(model, fluid_rest_distance=SPACING)
+    test.assertTrue(solver._all_fluid)
+
+    model.particle_flags.assign([int(newton.ParticleFlags.ACTIVE)] * model.particle_count)
+    solver.notify_model_changed(newton.ModelFlags.PARTICLE_PROPERTIES)
+
+    test.assertFalse(solver._has_fluid)
+    test.assertFalse(solver._all_fluid)
+
+
+def test_sph_particle_grid_recreated_during_step(test, device):
+    model = _build_particle_grouping_model(device, (1, 1))
+    solver = newton.solvers.SolverSPH(model, smoothing_length=2.2 * RADIUS)
+    model.particle_grid = None
+
+    solver.step(model.state(), model.state(), control=None, contacts=None, dt=1.0 / 120.0)
+
+    test.assertIsNotNone(model.particle_grid)
+    test.assertEqual(solver._particle_grid_grouped, solver_module._HASH_GRID_GROUPING_SUPPORTED)
+
+
+def test_sph_missing_particle_grid_rejected_during_capture(test, device):
+    model = _build_particle_grouping_model(device, (1, 1))
+    solver = newton.solvers.SolverSPH(model, smoothing_length=2.2 * RADIUS)
+    state_in = model.state()
+    state_out = model.state()
+    density = solver.particle_density
+    model.particle_grid = None
+
+    with (
+        mock.patch.object(type(model.device), "is_capturing", new_callable=mock.PropertyMock, return_value=True),
+        test.assertRaisesRegex(RuntimeError, "End graph capture.*notify_model_changed.*recapture"),
+    ):
+        solver.step(state_in, state_out, control=None, contacts=None, dt=1.0 / 120.0)
+
+    test.assertIsNone(model.particle_grid)
+    test.assertIs(solver.particle_density, density)
+
+
+def test_sph_particle_storage_resize_rejected_during_capture(test, device):
+    model = _build_particle_grouping_model(device, (1, 1))
+    solver = newton.solvers.SolverSPH(model, smoothing_length=2.2 * RADIUS)
+    state_in = model.state()
+    state_out = model.state()
+    density = solver.particle_density
+    solver._capacity -= 1
+
+    with (
+        mock.patch.object(type(model.device), "is_capturing", new_callable=mock.PropertyMock, return_value=True),
+        test.assertRaisesRegex(RuntimeError, "End graph capture.*notify_model_changed.*recapture"),
+    ):
+        solver.step(state_in, state_out, control=None, contacts=None, dt=1.0 / 120.0)
+
+    test.assertIs(solver.particle_density, density)
 
 
 def _build_fluid_grid(device, dims=(6, 6, 6), spacing=SPACING, gravity=0.0, ground=False, z0=0.0, fluid=True):
@@ -565,6 +797,17 @@ class TestSolverXPBDFluid(unittest.TestCase):
 
 
 for _name in (
+    "test_particle_grid_grouping_model_flag",
+    "test_particle_grid_grouping_requires_multiple_local_particles",
+    "test_particle_grid_grouping_rejects_global_particles",
+    "test_particle_grid_grouping_allows_empty_local_world",
+    "test_particle_grid_grouping_refreshes_world_ids",
+    "test_particle_grid_grouping_builds_exact_worlds",
+    "test_particle_grid_grouping_falls_back_without_warp_support",
+    "test_xpbd_particle_notification_resets_all_fluid",
+    "test_sph_particle_grid_recreated_during_step",
+    "test_sph_missing_particle_grid_rejected_during_capture",
+    "test_sph_particle_storage_resize_rejected_during_capture",
     "test_fluid_rest_lattice_stays_at_rest",
     "test_fluid_rest_lattice_exact_without_cohesion",
     "test_fluid_compressed_block_decompresses",

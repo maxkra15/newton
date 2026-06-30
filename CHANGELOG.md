@@ -25,6 +25,7 @@
 - Add `ModelBuilder.ShapeConfig.sdf_padding` and `ModelBuilder.shape_sdf_padding` for setting the per-shape SDF AABB padding [m] used when building primitive texture SDFs and deferred mesh SDFs
 - Add material controls to `Viewer.log_fluid()` for rendering arbitrary liquids: per-channel Beer-Lambert `absorption`, Fresnel `reflectance`, and `specular_intensity` / `specular_power`, with the color alpha acting as transmittance (1 = clear water, 0 = opaque scattering body), so milk, honey, or sauces render alongside clear water in `ViewerGL`
 - Add an optional `kernel_block_dim` argument to `SensorTiledCamera.update()` for tuning the Warp ray-tracer's `render_megakernel` launch shape.
+- Add `ModelFlags.PARTICLE_PROPERTIES` for notifying solvers after particle masses, radii, flags, or world assignments change
 - Add `model.mujoco.equality_constraint_objtype`, `_target_kind`, and `_target` fields, recording the object kind a MuJoCo equality references and whether it was projected onto a native loop joint or mimic constraint for solver portability
 - Add `contact_reduction_hashtable_size_factor` to `CollisionPipeline`, `NarrowPhase`, and `HydroelasticSDF.Config` for increasing contact reduction hashtable capacity when fill/failure warnings appear.
 - Add `rec_id` parameter to `ViewerRerun` for specifying the recording ID, enabling multiple processes to share a single Rerun recording

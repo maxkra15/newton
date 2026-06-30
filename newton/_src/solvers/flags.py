@@ -47,6 +47,7 @@ class SolverNotifyFlags(IntEnum, metaclass=_DeprecatedSolverNotifyFlagsMeta):
     CONSTRAINT_PROPERTIES = ModelFlags.CONSTRAINT_PROPERTIES.value
     TENDON_PROPERTIES = ModelFlags.TENDON_PROPERTIES.value
     ACTUATOR_PROPERTIES = ModelFlags.ACTUATOR_PROPERTIES.value
+    PARTICLE_PROPERTIES = ModelFlags.PARTICLE_PROPERTIES.value
     ALL = ModelFlags.ALL.value
 
 

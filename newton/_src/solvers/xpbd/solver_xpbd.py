@@ -329,10 +329,7 @@ class SolverXPBD(SolverBase):
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
-        if model.particle_count > 1 and model.particle_grid is not None:
-            # reserve space for the particle hash grid
-            with wp.ScopedDevice(model.device):
-                model.particle_grid.reserve(model.particle_count)
+        self._configure_particle_grid()
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
@@ -340,11 +337,13 @@ class SolverXPBD(SolverBase):
             self._refresh_kinematic_state()
         if flags & ModelFlags.PARTICLE_PROPERTIES:
             self._update_fluid_settings()
+            self._configure_particle_grid()
 
     def _update_fluid_settings(self) -> None:
         """Resolve fluid parameters and allocate fluid buffers if the model contains fluid particles."""
         model = self.model
         self._has_fluid = False
+        self._all_fluid = False
         if model.particle_count == 0 or model.particle_flags is None:
             return
 

@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+
 import warp as wp
 
 from ..geometry import ParticleFlags
 from ..sim import BodyFlags, Contacts, Control, Model, ModelBuilder, ModelFlags, State, StateFlags
+
+_HASH_GRID_GROUPING_SUPPORTED = (
+    "grouped" in inspect.signature(wp.HashGrid.reserve).parameters
+    and "groups" in inspect.signature(wp.HashGrid.build).parameters
+)
 
 
 @wp.kernel
@@ -185,6 +192,55 @@ class SolverBase:
 
     def __init__(self, model: Model):
         self.model = model
+        self._particle_grid_grouped = False
+
+    def _configure_particle_grid(self) -> None:
+        """Select and reserve the particle grid path for the current model.
+
+        This reads particle world IDs back to the host and therefore must only
+        run during solver setup or a model-change notification, outside graph
+        capture.
+        """
+        model = self.model
+        grid = model.particle_grid
+        particle_world = model.particle_world
+
+        if grid is not None:
+            assert grid.device == model.device, "particle grid must live on the model device"
+        if particle_world is not None:
+            assert particle_world.device == model.device, "particle worlds must live on the model device"
+
+        self._particle_grid_grouped = bool(
+            _HASH_GRID_GROUPING_SUPPORTED
+            and model.world_count > 1
+            and model.particle_count > 1
+            and grid is not None
+            and particle_world is not None
+            and all(int(world) >= 0 for world in particle_world.numpy())
+        )
+
+        if model.particle_count > 0 and grid is not None:
+            with wp.ScopedDevice(model.device):
+                if _HASH_GRID_GROUPING_SUPPORTED:
+                    grid.reserve(model.particle_count, grouped=self._particle_grid_grouped)
+                else:
+                    grid.reserve(model.particle_count)
+
+    def _build_particle_grid(self, points: wp.array[wp.vec3], radius: float) -> None:
+        """Build the particle grid using the configured grouping mode."""
+        model = self.model
+        grid = model.particle_grid
+        assert grid is not None, "particle grid must be configured before it is built"
+        assert grid.device == model.device, "particle grid must live on the model device"
+        assert points.device == model.device, "particle positions must live on the model device"
+
+        with wp.ScopedDevice(model.device):
+            if self._particle_grid_grouped:
+                assert model.particle_world is not None
+                assert model.particle_world.device == model.device, "particle worlds must live on the model device"
+                grid.build(points, radius=radius, groups=model.particle_world)
+            else:
+                grid.build(points, radius=radius)
 
     @property
     def device(self) -> wp.Device:
@@ -370,6 +426,8 @@ class SolverBase:
           properties have changed.
         * ``ModelFlags.ACTUATOR_PROPERTIES``: Actuator gains, biases, limits,
           or force properties have changed.
+        * ``ModelFlags.PARTICLE_PROPERTIES``: Particle masses, radii, flags,
+          or world assignments have changed.
 
         Args:
             flags: Bit-mask of :class:`~newton.ModelFlags` or custom ``int``

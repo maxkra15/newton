@@ -290,6 +290,7 @@ class SolverSPH(SolverBase):
         self.diffuse_spawn_counter: wp.array[wp.int32] | None = None
         self.diffuse_frame_seed: wp.array[wp.int32] | None = None
         self._ensure_particle_storage()
+        self._configure_particle_grid()
         self._ensure_diffuse_storage()
 
     def _particle_neighbor_search_radius(self) -> float:
@@ -305,32 +306,53 @@ class SolverSPH(SolverBase):
             return self.boundary_damping
         return self.shape_restitution
 
-    def _ensure_particle_storage(self) -> None:
+    def _ensure_particle_storage(self) -> bool:
+        """Ensure particle buffers and grid exist.
+
+        Storage recovery may allocate buffers and reconfigure the particle
+        grid, so model topology changes must be notified outside graph capture
+        and the step graph recaptured afterward.
+
+        Returns:
+            Whether particle storage was resized or the grid was recreated.
+
+        Raises:
+            RuntimeError: If storage recovery is needed during graph capture.
+        """
         model = self.model
         n = model.particle_count
-        if n == self._capacity:
-            return
-        self._capacity = n
-        self.particle_density = wp.empty(n, dtype=wp.float32, device=model.device)
-        self.particle_pressure = wp.empty(n, dtype=wp.float32, device=model.device)
-        self.particle_vorticity = wp.empty(n, dtype=wp.vec3, device=model.device)
-        self.particle_velocity_smooth = wp.empty(n, dtype=wp.vec3, device=model.device)
-        self.pbf_lambdas = wp.empty(n, dtype=wp.float32, device=model.device) if self.pbf_enabled else None
-        self.pbf_deltas = wp.empty(n, dtype=wp.vec3, device=model.device) if self.pbf_enabled else None
-        self.render_positions = wp.empty(n, dtype=wp.vec3, device=model.device) if self.render_enabled else None
-        self.render_anisotropy = wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
-        self.render_anisotropy_secondary = (
-            wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
-        )
-        self.render_anisotropy_tertiary = (
-            wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
-        )
-        self.render_buffers_valid = False
-        if n:
+        resized = n != self._capacity
+        grid_created = n > 0 and model.particle_grid is None
+        if (resized or grid_created) and model.device.is_capturing:
+            raise RuntimeError(
+                "SolverSPH particle storage cannot be resized or recreated during graph capture. "
+                "End graph capture, call solver.notify_model_changed(ModelFlags.PARTICLE_PROPERTIES), "
+                "then recapture the step."
+            )
+
+        if resized:
+            self._capacity = n
+            self.particle_density = wp.empty(n, dtype=wp.float32, device=model.device)
+            self.particle_pressure = wp.empty(n, dtype=wp.float32, device=model.device)
+            self.particle_vorticity = wp.empty(n, dtype=wp.vec3, device=model.device)
+            self.particle_velocity_smooth = wp.empty(n, dtype=wp.vec3, device=model.device)
+            self.pbf_lambdas = wp.empty(n, dtype=wp.float32, device=model.device) if self.pbf_enabled else None
+            self.pbf_deltas = wp.empty(n, dtype=wp.vec3, device=model.device) if self.pbf_enabled else None
+            self.render_positions = wp.empty(n, dtype=wp.vec3, device=model.device) if self.render_enabled else None
+            self.render_anisotropy = wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
+            self.render_anisotropy_secondary = (
+                wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
+            )
+            self.render_anisotropy_tertiary = (
+                wp.empty(n, dtype=wp.vec4, device=model.device) if self.render_enabled else None
+            )
+            self.render_buffers_valid = False
+
+        if grid_created:
             with wp.ScopedDevice(model.device):
-                if model.particle_grid is None:
-                    model.particle_grid = wp.HashGrid(128, 128, 128)
-                model.particle_grid.reserve(n)
+                model.particle_grid = wp.HashGrid(128, 128, 128)
+
+        return resized or grid_created
 
     def _ensure_diffuse_storage(self) -> None:
         if not self.diffuse_enabled:
@@ -376,6 +398,7 @@ class SolverSPH(SolverBase):
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if flags & ModelFlags.PARTICLE_PROPERTIES:
             self._ensure_particle_storage()
+            self._configure_particle_grid()
             self._ensure_diffuse_storage()
 
     @override
@@ -400,7 +423,8 @@ class SolverSPH(SolverBase):
         if model.particle_count == 0:
             return
 
-        self._ensure_particle_storage()
+        if self._ensure_particle_storage():
+            self._configure_particle_grid()
         assert model.particle_grid is not None
         assert self.particle_density is not None
         assert self.particle_pressure is not None
