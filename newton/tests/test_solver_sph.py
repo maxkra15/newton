@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+import newton._src.solvers.particle_grid as particle_grid_module
 from newton.solvers import SolverSPH
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -1358,10 +1359,12 @@ def test_sph_render_anisotropy_clamps_match_solver_settings(test, device):
 def test_sph_cuda_graph_capture(test, device):
     if not wp.get_device(device).is_cuda:
         test.skipTest("CUDA graph capture requires a CUDA device")
+    if not particle_grid_module._HASH_GRID_GROUPING_SUPPORTED:
+        test.skipTest("Warp grouped HashGrid API is unavailable")
 
-    builder = newton.ModelBuilder(gravity=-9.81)
-    builder.default_particle_radius = 0.05
-    builder.add_particle_grid(
+    world = newton.ModelBuilder(gravity=-9.81)
+    world.default_particle_radius = 0.05
+    world.add_particle_grid(
         pos=wp.vec3(-0.2, -0.1, 0.1),
         rot=wp.quat_identity(),
         vel=wp.vec3(0.2, 0.0, 0.0),
@@ -1375,8 +1378,11 @@ def test_sph_cuda_graph_capture(test, device):
         jitter=0.0,
         radius_mean=0.05,
         radius_std=0.0,
+        flags=newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID,
     )
-    model = builder.finalize(device=device)
+    scene = newton.ModelBuilder(gravity=-9.81)
+    scene.replicate(world, 2)
+    model = scene.finalize(device=device)
     state_0 = model.state()
     state_1 = model.state()
     solver = SolverSPH(
@@ -1390,18 +1396,34 @@ def test_sph_cuda_graph_capture(test, device):
         max_velocity=5.0,
     )
 
+    test.assertEqual(model.world_count, 2)
+    test.assertTrue(solver._particle_grid_grouped)
+    particles_per_world = model.particle_count // model.world_count
+    worlds = model.particle_world.numpy().reshape(model.world_count, particles_per_world)
+    expected_worlds = np.broadcast_to(
+        np.arange(model.world_count, dtype=np.int32)[:, None],
+        worlds.shape,
+    )
+    np.testing.assert_array_equal(worlds, expected_worlds)
+
     # Compile kernels and allocate solver/grid internals before capture.
+    initial_positions = state_0.particle_q.numpy().reshape(model.world_count, particles_per_world, 3)
     solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
     state_0, state_1 = state_1, state_0
-    wp.synchronize()
+    wp.synchronize_device(device)
 
     with wp.ScopedCapture(device=device) as capture:
         state_0.clear_forces()
         solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
 
     wp.capture_launch(capture.graph)
-    wp.synchronize()
-    test.assertTrue(np.all(np.isfinite(state_1.particle_q.numpy())))
+    positions = state_1.particle_q.numpy().reshape(model.world_count, particles_per_world, 3)
+    velocities = state_1.particle_qd.numpy().reshape(model.world_count, particles_per_world, 3)
+    test.assertTrue(np.isfinite(positions).all())
+    test.assertTrue(np.isfinite(velocities).all())
+    test.assertGreater(float(np.linalg.norm(positions - initial_positions)), 1.0e-6)
+    np.testing.assert_allclose(positions[0], positions[1], atol=1.0e-5, rtol=0.0)
+    np.testing.assert_allclose(velocities[0], velocities[1], atol=1.0e-5, rtol=0.0)
 
 
 devices = get_test_devices(mode="basic")

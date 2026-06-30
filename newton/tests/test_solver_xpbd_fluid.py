@@ -796,6 +796,70 @@ def test_fluid_reorder_noop_when_not_all_fluid(test, device):
     test.assertEqual(float(np.abs(before - state.particle_q.numpy()).max()), 0.0)
 
 
+def test_xpbd_grouped_cuda_graph_capture(test, device):
+    if not wp.get_device(device).is_cuda:
+        test.skipTest("CUDA graph capture requires a CUDA device")
+    if not particle_grid_module._HASH_GRID_GROUPING_SUPPORTED:
+        test.skipTest("Warp grouped HashGrid API is unavailable")
+
+    world = newton.ModelBuilder(gravity=-9.81)
+    world.add_particle_grid(
+        pos=wp.vec3(-0.075, -0.075, 0.1),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.2, 0.0, 0.0),
+        dim_x=4,
+        dim_y=4,
+        dim_z=3,
+        cell_x=SPACING,
+        cell_y=SPACING,
+        cell_z=SPACING,
+        mass=PARTICLE_MASS,
+        jitter=0.0,
+        radius_mean=RADIUS,
+        radius_std=0.0,
+        flags=FLUID_FLAGS,
+    )
+    scene = newton.ModelBuilder(gravity=-9.81)
+    scene.replicate(world, 2)
+    model = scene.finalize(device=device)
+    solver = newton.solvers.SolverXPBD(
+        model,
+        iterations=2,
+        fluid_rest_distance=SPACING,
+        fluid_cohesion=0.0,
+    )
+
+    test.assertEqual(model.world_count, 2)
+    test.assertTrue(solver._particle_grid_grouped)
+    particles_per_world = model.particle_count // model.world_count
+    worlds = model.particle_world.numpy().reshape(model.world_count, particles_per_world)
+    expected_worlds = np.broadcast_to(
+        np.arange(model.world_count, dtype=np.int32)[:, None],
+        worlds.shape,
+    )
+    np.testing.assert_array_equal(worlds, expected_worlds)
+
+    state_0 = model.state()
+    state_1 = model.state()
+    initial_positions = state_0.particle_q.numpy().reshape(model.world_count, particles_per_world, 3)
+    solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
+    state_0, state_1 = state_1, state_0
+    wp.synchronize_device(device)
+
+    with wp.ScopedCapture(device=device) as capture:
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control=None, contacts=None, dt=1.0 / 240.0)
+
+    wp.capture_launch(capture.graph)
+    positions = state_1.particle_q.numpy().reshape(model.world_count, particles_per_world, 3)
+    velocities = state_1.particle_qd.numpy().reshape(model.world_count, particles_per_world, 3)
+    test.assertTrue(np.isfinite(positions).all())
+    test.assertTrue(np.isfinite(velocities).all())
+    test.assertGreater(float(np.linalg.norm(positions - initial_positions)), 1.0e-6)
+    np.testing.assert_allclose(positions[0], positions[1], atol=1.0e-6, rtol=0.0)
+    np.testing.assert_allclose(velocities[0], velocities[1], atol=1.0e-6, rtol=0.0)
+
+
 devices = get_test_devices()
 
 
@@ -827,6 +891,7 @@ for _name in (
     "test_fluid_sdf_mesh_contains_particles",
     "test_fluid_reorder_is_pure_relabel",
     "test_fluid_reorder_noop_when_not_all_fluid",
+    "test_xpbd_grouped_cuda_graph_capture",
     "test_fluid_max_neighbors_truncates_density",
     "test_fluid_coincident_particles_separate",
     "test_body_velocity_clamp_and_sanitize",
