@@ -505,8 +505,7 @@ class Example:
                 iterations=1,
             ),
         )
-        proxy_runtime = self.solver._proxy_collision_configs[("mjc", "vbd")]
-        self.proxy_contacts = proxy_runtime.contacts
+        self.proxy_contacts = self.solver.get_proxy_contacts("mjc", "vbd")
         if self.proxy_contacts is None or len(self.proxy_grip_shapes) != 2:
             raise RuntimeError("Proxy grip contact diagnostics were not initialized")
 
