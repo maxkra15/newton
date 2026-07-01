@@ -815,7 +815,8 @@ class Example:
             kd=CONTACT_KD,
             mu=CONTACT_MU,
             margin=0.0,
-            gap=0.001,
+            # Match the restored IsaacLab cable setup's legacy broad contact window.
+            gap=0.1,
             collision_group=-1,
         )
         self.cable_bodies, cable_joints = builder.add_rod(
@@ -876,7 +877,7 @@ class Example:
                 kd=CONTACT_KD,
                 mu=CONTACT_MU,
                 margin=0.0,
-                gap=0.001,
+                gap=0.01,
                 collision_group=-1,
             ),
             color=plug_builder.shape_color[plug_shape],
