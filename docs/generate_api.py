@@ -30,6 +30,7 @@ import pkgutil
 import re
 import shutil
 import sys
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -307,7 +308,15 @@ def write_module_page(mod_name: str, api_toctree_modules: set[str] | None = None
         lines.extend([".. rubric:: Classes", ""])
         if uses_internal_solver_module or is_solver_submodule:
             for cls in classes:
-                lines.extend([f".. autoclass:: {cls}", ""])
+                lines.append(f".. autoclass:: {cls}")
+                attr = getattr(module, cls)
+                # Napoleon renders an Attributes section as member directives;
+                # exclude the same dataclass fields from automatic members.
+                if is_dataclass(attr) and "Attributes:" in (inspect.getdoc(attr) or ""):
+                    excluded_fields = ", ".join(field.name for field in fields(attr))
+                    if excluded_fields:
+                        lines.append(f"   :exclude-members: {excluded_fields}")
+                lines.append("")
         else:
             lines.extend(
                 [

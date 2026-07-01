@@ -13,6 +13,13 @@
 - Add `SensorTiledCamera.utils.assign_checkerboard_material(shape_indices=...)` for applying the checkerboard texture to selected shapes.
 - Add `--render-fps` to cap example rendering rate without changing simulation frame timing
 - Add `ModelBuilder.BvhConfig` for selecting Warp BVH constructors during model finalization for mesh, Gaussian, and shape BVHs.
+- Add `--solver vbd` to `franka_cloth_newton` alongside the default `--solver coupled` mode.
+- Add generic solver CUDA graph capability and preparation hooks, including recursive capability aggregation and persistent-buffer preparation for coupled solvers.
+- Add entry-local collision providers and named zero-copy contact streams with capacity and overflow diagnostics to experimental coupled solvers.
+- Add live read-only Proxy feedback/Aitken diagnostics and on-demand ADMM contact and convergence diagnostics to experimental coupled solvers.
+- Add `SolverVBD.set_joint_constraint_modes()` for atomically validated, in-place batched structural joint-mode updates.
+- Add proxy joint support to experimental `SolverCoupledProxy` via `Proxy.joints` / `Proxy.proxy_joints`, keeping source-owned fixed, prismatic, and revolute joints active in destination proxy views.
+- Add optional device-side Aitken feedback relaxation to experimental `SolverCoupledProxy`.
 - Add an experimental coupled solver framework:
   - Introduce `newton.solvers.experimental.coupled` with `SolverCoupled`, `SolverCoupledProxy`, `SolverCoupledADMM`, and `ModelView` for multi-solver ownership, state mapping, and view-local model overrides.
   - Support body and particle proxy coupling with virtual inertia, solver hooks, MPM collider/transfer proxies, and convergence diagnostics.
@@ -43,9 +50,11 @@
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
+- Fix experimental coupled collision providers to keep compact contact namespaces safe, refresh bidirectional providers before first use, preserve collision cadence across failed steps, and clear stale current-contact diagnostics after masked ADMM resets.
 - Fix memory growth in the Style3D solver when CUDA Graph capture is disabled
 - Fix `newton.eval_jacobian`, `SolverFeatherstone`, and the IK analytic Jacobian building `JointType.D6` angular motion-subspace columns from raw axes, so `J @ joint_qd` now matches `State.body_qd` for two- or three-angular-DOF joints at non-identity configurations.
 - Fix mesh inertia computation to produce deterministic results across repeated CUDA runs. (#3136)
+- Fix world-selective coupled resets to preserve unselected and global warm starts and contact history, refresh selected-world collision state, and bound contact processing when raw counters overflow fixed capacities.
 - Fix `SolverImplicitMPM` whole-step CUDA graph capture failing when the rheology inner solver is an iterative linear method such as `solver="cg"`. (#3155)
 - Fix USD import so non-unit `metersPerUnit` and `kilogramsPerUnit` warn as unsupported, and stop scaling `PhysicsScene` gravity magnitude by `metersPerUnit`.
 - Fix swapped kinetic and potential energy labels in the `basic_plotting` example, and report per-world values directly so the live plot overlays match the side-panel readouts

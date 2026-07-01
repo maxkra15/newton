@@ -196,6 +196,20 @@ class SolverBase:
         """
         return self.model.device
 
+    @property
+    def supports_cuda_graph_capture(self) -> bool:
+        """Return whether this solver can be stepped inside a CUDA graph."""
+        return True
+
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Allocate graph-persistent buffers without advancing simulation state.
+
+        Args:
+            contacts: Optional contact buffers whose capacities may determine
+                persistent solver storage.
+        """
+        del contacts
+
     def _init_kinematic_state(self):
         """Allocate and populate effective inverse mass/inertia arrays."""
         model = self.model

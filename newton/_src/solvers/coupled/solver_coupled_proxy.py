@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from ...sim import JointType, ModelFlags, StateFlags
+from ...sim import Contacts, JointType, ModelFlags, StateFlags
+from .contact_stream import (
+    CoupledContactStream,
+    ProxyBodyFeedback,
+    ProxyParticleFeedback,
+    ProxyRelaxationDiagnostics,
+)
 from .interface import (
     CouplingEndpointKind,
 )
@@ -26,10 +32,11 @@ from .proxy_utils import (
     sync_proxy_particles_kernel,
     sync_proxy_states_kernel,
 )
+from .reset_utils import zero_selected_rows
 from .solver_coupled import SolverCoupled
 
 if TYPE_CHECKING:
-    from ...sim import Contacts, Control, Model, State
+    from ...sim import Control, Model, State
     from .model_view import ModelView
 
 
@@ -47,6 +54,7 @@ class _ProxyBodyMapping:
     src_body_ids: wp.array = field(default=None)
     proxy_body_ids_global: wp.array = field(default=None)
     proxy_body_ids_local: wp.array = field(default=None)
+    world_ids: wp.array = field(default=None)
     source_local_to_proxy_local: wp.array = field(default=None)
     source_local_to_proxy_global: wp.array = field(default=None)
     destination_local_to_proxy_global: wp.array = field(default=None)
@@ -79,6 +87,7 @@ class _ProxyParticleMapping:
     src_particle_ids: wp.array = field(default=None)
     proxy_particle_ids_global: wp.array = field(default=None)
     proxy_particle_ids_local: wp.array = field(default=None)
+    world_ids: wp.array = field(default=None)
     source_local_to_proxy_local: wp.array = field(default=None)
     source_local_to_proxy_global: wp.array = field(default=None)
     destination_local_to_proxy_global: wp.array = field(default=None)
@@ -165,65 +174,89 @@ def _reset_aitken_state_kernel(
     relaxation: wp.array[float],
     has_previous: wp.array[int],
 ):
-    relaxation[0] = initial_relaxation
-    has_previous[0] = 0
+    slot = wp.tid()
+    relaxation[slot] = initial_relaxation
+    has_previous[slot] = 0
+
+
+@wp.kernel(enable_backward=False)
+def _reset_selected_aitken_slots_kernel(
+    initial_relaxation: float,
+    world_mask: wp.array[wp.bool],
+    stats: wp.array2d[float],
+    relaxation: wp.array[float],
+    has_previous: wp.array[int],
+):
+    slot = wp.tid()
+    world = slot - 1
+    if world >= 0 and world_mask[world]:
+        stats[slot, 0] = 0.0
+        stats[slot, 1] = 0.0
+        relaxation[slot] = initial_relaxation
+        has_previous[slot] = 0
 
 
 @wp.kernel(enable_backward=False)
 def _accumulate_aitken_body_stats_kernel(
     proxy_ids: wp.array[int],
+    world_ids: wp.array[int],
     force_previous: wp.array[wp.spatial_vector],
     force_raw: wp.array[wp.spatial_vector],
     residual_previous: wp.array[wp.spatial_vector],
     has_previous: wp.array[int],
-    stats: wp.array[float],
+    stats: wp.array2d[float],
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = world_ids[i] + 1
     residual = force_raw[proxy_id] - force_previous[i]
-    if has_previous[0] != 0:
+    if has_previous[slot] != 0:
         delta = residual - residual_previous[i]
-        wp.atomic_add(stats, 0, wp.dot(residual_previous[i], delta))
-        wp.atomic_add(stats, 1, wp.dot(delta, delta))
+        wp.atomic_add(stats, slot, 0, wp.dot(residual_previous[i], delta))
+        wp.atomic_add(stats, slot, 1, wp.dot(delta, delta))
 
 
 @wp.kernel(enable_backward=False)
 def _accumulate_aitken_particle_stats_kernel(
     proxy_ids: wp.array[int],
+    world_ids: wp.array[int],
     force_previous: wp.array[wp.vec3],
     force_raw: wp.array[wp.vec3],
     residual_previous: wp.array[wp.vec3],
     has_previous: wp.array[int],
-    stats: wp.array[float],
+    stats: wp.array2d[float],
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = world_ids[i] + 1
     residual = force_raw[proxy_id] - force_previous[i]
-    if has_previous[0] != 0:
+    if has_previous[slot] != 0:
         delta = residual - residual_previous[i]
-        wp.atomic_add(stats, 0, wp.dot(residual_previous[i], delta))
-        wp.atomic_add(stats, 1, wp.dot(delta, delta))
+        wp.atomic_add(stats, slot, 0, wp.dot(residual_previous[i], delta))
+        wp.atomic_add(stats, slot, 1, wp.dot(delta, delta))
 
 
 @wp.kernel(enable_backward=False)
 def _update_aitken_relaxation_kernel(
     relaxation_min: float,
     relaxation_max: float,
-    stats: wp.array[float],
+    stats: wp.array2d[float],
     relaxation: wp.array[float],
     has_previous: wp.array[int],
 ):
-    if has_previous[0] != 0:
-        denominator = stats[1]
+    slot = wp.tid()
+    if has_previous[slot] != 0:
+        denominator = stats[slot, 1]
         if denominator > 1.0e-20:
-            candidate = -relaxation[0] * stats[0] / denominator
-            relaxation[0] = wp.clamp(candidate, relaxation_min, relaxation_max)
-    has_previous[0] = 1
+            candidate = -relaxation[slot] * stats[slot, 0] / denominator
+            relaxation[slot] = wp.clamp(candidate, relaxation_min, relaxation_max)
+    has_previous[slot] = 1
 
 
 @wp.kernel(enable_backward=False)
 def _blend_aitken_body_forces_kernel(
     proxy_ids: wp.array[int],
+    world_ids: wp.array[int],
     force_previous: wp.array[wp.spatial_vector],
     residual_previous: wp.array[wp.spatial_vector],
     relaxation: wp.array[float],
@@ -231,14 +264,16 @@ def _blend_aitken_body_forces_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = world_ids[i] + 1
     residual = force[proxy_id] - force_previous[i]
-    force[proxy_id] = force_previous[i] + relaxation[0] * residual
+    force[proxy_id] = force_previous[i] + relaxation[slot] * residual
     residual_previous[i] = residual
 
 
 @wp.kernel(enable_backward=False)
 def _blend_aitken_particle_forces_kernel(
     proxy_ids: wp.array[int],
+    world_ids: wp.array[int],
     force_previous: wp.array[wp.vec3],
     residual_previous: wp.array[wp.vec3],
     relaxation: wp.array[float],
@@ -246,8 +281,9 @@ def _blend_aitken_particle_forces_kernel(
 ):
     i = wp.tid()
     proxy_id = proxy_ids[i]
+    slot = world_ids[i] + 1
     residual = force[proxy_id] - force_previous[i]
-    force[proxy_id] = force_previous[i] + relaxation[0] * residual
+    force[proxy_id] = force_previous[i] + relaxation[slot] * residual
     residual_previous[i] = residual
 
 
@@ -298,7 +334,9 @@ class SolverCoupledProxy(SolverCoupled):
                 ``SolverCoupledProxy`` uses the returned pipeline to detect
                 destination proxy contacts before each destination solve. If
                 the factory returns ``None``, the destination solve receives
-                the outer-level contacts passed to :meth:`step`.
+                the outer-level contacts passed to :meth:`step` when its entry
+                preserves parent shape ids; compact entries receive no outer
+                contacts without a local provider.
             collide_interval: Collision-detection refresh interval for
                 ``collision_pipeline``. ``None`` means every proxy pass when a
                 custom pipeline is supplied. Explicit values must be positive
@@ -364,6 +402,7 @@ class SolverCoupledProxy(SolverCoupled):
         )
         self._proxy_collision_configs = self._build_proxy_collision_configs(coupling)
         self._proxy_groups = self._build_proxy_groups()
+        self._proxy_contact_stream_buffers: dict[tuple[str, str], Contacts | None] = {}
 
         super().__init__(
             model=model,
@@ -469,6 +508,24 @@ class SolverCoupledProxy(SolverCoupled):
             raise ValueError(f"Duplicate {label} ids in proxy mapping")
 
     @staticmethod
+    def _validate_unique_proxy_destination_ids_across_mappings(
+        label: str,
+        mappings: Sequence,
+        proxy_ids_attr: str,
+    ) -> None:
+        seen: set[tuple[str, int]] = set()
+        for mapping in mappings:
+            destination = mapping.dst_name
+            proxy_ids = getattr(mapping, proxy_ids_attr).numpy()
+            duplicates = sorted({int(id_) for id_ in proxy_ids if (destination, int(id_)) in seen})
+            if duplicates:
+                raise ValueError(
+                    f"Proxy destination {label} ids are mapped by multiple Proxy records "
+                    f"for entry {destination!r}: {duplicates}"
+                )
+            seen.update((destination, int(id_)) for id_ in proxy_ids)
+
+    @staticmethod
     def _validate_proxy_destination_ids_not_owned(
         label: str,
         proxy_ids: Sequence[int],
@@ -484,20 +541,28 @@ class SolverCoupledProxy(SolverCoupled):
             )
 
     @staticmethod
-    def _validate_proxy_body_worlds(model: Model, source_ids: Sequence[int], proxy_ids: Sequence[int]) -> None:
-        if model.body_world is None:
-            return
+    def _validate_proxy_entity_worlds(
+        label: str,
+        entity_world: wp.array | None,
+        source_ids: Sequence[int],
+        proxy_ids: Sequence[int],
+    ) -> list[int]:
+        if entity_world is None:
+            return [-1] * len(source_ids)
 
-        body_world = model.body_world.numpy()
+        worlds = entity_world.numpy()
+        mapping_worlds = []
         for source_id, proxy_id in zip(source_ids, proxy_ids, strict=True):
-            source_world = int(body_world[source_id])
-            proxy_world = int(body_world[proxy_id])
+            source_world = int(worlds[source_id])
+            proxy_world = int(worlds[proxy_id])
             if source_world != proxy_world:
                 raise ValueError(
-                    "Proxy source body and destination proxy body must live in the same world: "
-                    f"source body {source_id} is in world {source_world}, "
-                    f"proxy body {proxy_id} is in world {proxy_world}"
+                    f"Proxy source {label} and destination proxy {label} must live in the same world: "
+                    f"source {label} {source_id} is in world {source_world}, "
+                    f"proxy {label} {proxy_id} is in world {proxy_world}"
                 )
+            mapping_worlds.append(source_world)
+        return mapping_worlds
 
     def _proxy_body_sets_by_destination(self) -> dict[str, set[int]]:
         proxy_bodies: dict[str, set[int]] = {}
@@ -568,6 +633,7 @@ class SolverCoupledProxy(SolverCoupled):
             self._validate_proxy_ids("Proxy destination joint", proxy_local_ids, model.joint_count)
             self._validate_unique_proxy_ids("source joint", src_ids)
             self._validate_unique_proxy_ids("proxy joint", proxy_local_ids)
+            self._validate_proxy_entity_worlds("joint", model.joint_world, src_ids, proxy_local_ids)
             self._validate_proxy_source_ids_owned(
                 "joint",
                 src_ids,
@@ -657,7 +723,7 @@ class SolverCoupledProxy(SolverCoupled):
             self._validate_proxy_ids("Proxy destination body", proxy_local_ids, model.body_count)
             self._validate_unique_proxy_ids("source body", src_ids)
             self._validate_unique_proxy_ids("proxy body", proxy_local_ids)
-            self._validate_proxy_body_worlds(model, src_ids, proxy_local_ids)
+            mapping_worlds = self._validate_proxy_entity_worlds("body", model.body_world, src_ids, proxy_local_ids)
             self._validate_proxy_source_ids_owned(
                 "body",
                 src_ids,
@@ -687,6 +753,7 @@ class SolverCoupledProxy(SolverCoupled):
                     src_body_ids=wp.array(src_ids, dtype=int, device=device),
                     proxy_body_ids_global=wp.array(proxy_global_ids, dtype=int, device=device),
                     proxy_body_ids_local=wp.array(proxy_local_ids, dtype=int, device=device),
+                    world_ids=wp.array(mapping_worlds, dtype=int, device=device),
                     source_local_to_proxy_local=wp.array(source_local_to_proxy_local, dtype=int, device=device),
                     source_local_to_proxy_global=wp.array(source_local_to_proxy_global, dtype=int, device=device),
                     destination_local_to_proxy_global=wp.array(
@@ -762,6 +829,9 @@ class SolverCoupledProxy(SolverCoupled):
             self._validate_proxy_ids("Proxy destination particle", proxy_local_ids, model.particle_count)
             self._validate_unique_proxy_ids("source particle", src_ids)
             self._validate_unique_proxy_ids("proxy particle", proxy_local_ids)
+            mapping_worlds = self._validate_proxy_entity_worlds(
+                "particle", model.particle_world, src_ids, proxy_local_ids
+            )
             self._validate_proxy_source_ids_owned(
                 "particle",
                 src_ids,
@@ -791,6 +861,7 @@ class SolverCoupledProxy(SolverCoupled):
                     src_particle_ids=wp.array(src_ids, dtype=int, device=device),
                     proxy_particle_ids_global=wp.array(proxy_global_ids, dtype=int, device=device),
                     proxy_particle_ids_local=wp.array(proxy_local_ids, dtype=int, device=device),
+                    world_ids=wp.array(mapping_worlds, dtype=int, device=device),
                     source_local_to_proxy_local=wp.array(source_local_to_proxy_local, dtype=int, device=device),
                     source_local_to_proxy_global=wp.array(source_local_to_proxy_global, dtype=int, device=device),
                     destination_local_to_proxy_global=wp.array(
@@ -830,8 +901,44 @@ class SolverCoupledProxy(SolverCoupled):
     def _after_entries_constructed(self) -> None:
         self._refresh_proxy_view_maps()
         self._validate_in_place_proxy_entries()
+        self._validate_proxy_collision_providers()
+        self._validate_unique_proxy_destination_ids_across_mappings(
+            "body",
+            self._proxy_mappings,
+            "proxy_body_ids_global",
+        )
+        self._validate_unique_proxy_destination_ids_across_mappings(
+            "particle",
+            self._proxy_particle_mappings,
+            "proxy_particle_ids_global",
+        )
+        self._validate_unique_proxy_destination_ids_across_mappings(
+            "joint",
+            self._proxy_joint_mappings,
+            "proxy_joint_ids_global",
+        )
         self._apply_proxy_effective_masses()
         self._init_proxy_collision_pipelines()
+
+    def _validate_proxy_collision_providers(self) -> None:
+        """Reject ambiguous destination contact provider configurations."""
+        entry_provider_sources: dict[str, set[str]] = {}
+        for source, destination in self._proxy_groups:
+            if self._entries[destination].collision_pipeline is not None:
+                entry_provider_sources.setdefault(destination, set()).add(source)
+        for destination, sources in entry_provider_sources.items():
+            if len(sources) > 1:
+                raise ValueError(
+                    f"Proxy destination {destination!r} cannot use one entry collision pipeline "
+                    f"with multiple proxy sources: {sorted(sources)}"
+                )
+
+        for source, destination in self._proxy_collision_configs:
+            if self._entries[destination].collision_pipeline is not None:
+                raise ValueError(
+                    f"Proxy direction {source!r} to {destination!r} cannot configure both an entry "
+                    "collision pipeline and a Proxy collision pipeline"
+                )
 
     def _refresh_proxy_view_maps(self) -> None:
         """Remap dense proxy maps to the source/destination view layouts."""
@@ -1094,6 +1201,227 @@ class SolverCoupledProxy(SolverCoupled):
         config = self._proxy_collision_configs.get((source, destination))
         return None if config is None else config.contacts
 
+    @property
+    def supports_cuda_graph_capture(self) -> bool:
+        """Return whether entries and mapping-local collision providers support capture."""
+        return super().supports_cuda_graph_capture and all(
+            config.collide_interval == 1 and bool(getattr(config.pipeline, "supports_cuda_graph_capture", True))
+            for config in self._proxy_collision_configs.values()
+        )
+
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Prepare base and mapping-local contact paths without advancing simulation state."""
+        super().prepare_cuda_graph_capture(contacts)
+        for config in self._proxy_collision_configs.values():
+            prepare_pipeline = getattr(config.pipeline, "prepare_cuda_graph_capture", None)
+            if callable(prepare_pipeline):
+                prepare_pipeline()
+            self._entries[config.dst_name].solver.prepare_cuda_graph_capture(config.contacts)
+
+    def proxy_body_feedback(self, source: str, destination: str) -> ProxyBodyFeedback:
+        """Return live borrowed body-feedback buffers for one proxy direction.
+
+        The returned arrays are solver-owned and must be treated as read-only.
+        Requesting the descriptor performs no device-to-host synchronization.
+
+        Raises:
+            KeyError: If the direction has no body proxy mapping.
+        """
+        mappings = tuple(
+            mapping
+            for mapping in self._proxy_mappings
+            if mapping.src_name == source and mapping.dst_name == destination
+        )
+        if not mappings:
+            raise KeyError(f"No body proxy feedback for direction {source!r} to {destination!r}")
+        return ProxyBodyFeedback(
+            source=source,
+            destination=destination,
+            source_body_ids=tuple(mapping.src_body_ids for mapping in mappings),
+            proxy_body_ids=tuple(mapping.proxy_body_ids_global for mapping in mappings),
+            forces=tuple(mapping.coupling_forces for mapping in mappings),
+        )
+
+    def proxy_particle_feedback(self, source: str, destination: str) -> ProxyParticleFeedback:
+        """Return live borrowed particle-feedback buffers for one proxy direction.
+
+        The returned arrays are solver-owned and must be treated as read-only.
+        Requesting the descriptor performs no device-to-host synchronization.
+
+        Raises:
+            KeyError: If the direction has no particle proxy mapping.
+        """
+        mappings = tuple(
+            mapping
+            for mapping in self._proxy_particle_mappings
+            if mapping.src_name == source and mapping.dst_name == destination
+        )
+        if not mappings:
+            raise KeyError(f"No particle proxy feedback for direction {source!r} to {destination!r}")
+        return ProxyParticleFeedback(
+            source=source,
+            destination=destination,
+            source_particle_ids=tuple(mapping.src_particle_ids for mapping in mappings),
+            proxy_particle_ids=tuple(mapping.proxy_particle_ids_global for mapping in mappings),
+            forces=tuple(mapping.coupling_forces for mapping in mappings),
+        )
+
+    def proxy_relaxation_diagnostics(self, source: str, destination: str) -> ProxyRelaxationDiagnostics:
+        """Return live borrowed relaxation state for one proxy direction.
+
+        Fixed-mode mappings report their configured scalar and no live Aitken
+        arrays. Aitken arrays use slot ``0`` for global entities and slot
+        ``world_id + 1`` for regular worlds. Requesting the descriptor performs
+        no device-to-host synchronization.
+
+        Raises:
+            KeyError: If the direction has no body or particle proxy mapping.
+        """
+        body_mappings = tuple(
+            mapping
+            for mapping in self._proxy_mappings
+            if mapping.src_name == source and mapping.dst_name == destination
+        )
+        particle_mappings = tuple(
+            mapping
+            for mapping in self._proxy_particle_mappings
+            if mapping.src_name == source and mapping.dst_name == destination
+        )
+        if not body_mappings and not particle_mappings:
+            raise KeyError(f"No proxy relaxation state for direction {source!r} to {destination!r}")
+
+        def state(mappings):
+            if not mappings:
+                return (None,) * 8
+            is_aitken = tuple(
+                int(mapping.proxy_relaxation_mode) == int(_ProxyRelaxationMode.AITKEN) for mapping in mappings
+            )
+            return (
+                tuple("aitken" if enabled else "fixed" for enabled in is_aitken),
+                tuple(float(mapping.proxy_relaxation) for mapping in mappings),
+                tuple(float(mapping.proxy_relaxation_min) for mapping in mappings),
+                tuple(float(mapping.proxy_relaxation_max) for mapping in mappings),
+                tuple(mapping.world_ids for mapping in mappings),
+                tuple(
+                    mapping.aitken_relaxation if enabled else None
+                    for mapping, enabled in zip(mappings, is_aitken, strict=True)
+                ),
+                tuple(
+                    mapping.aitken_has_previous if enabled else None
+                    for mapping, enabled in zip(mappings, is_aitken, strict=True)
+                ),
+                tuple(
+                    mapping.aitken_stats if enabled else None
+                    for mapping, enabled in zip(mappings, is_aitken, strict=True)
+                ),
+            )
+
+        (
+            body_mode,
+            body_configured,
+            body_min,
+            body_max,
+            body_world_ids,
+            body_current,
+            body_has_previous,
+            body_stats,
+        ) = state(body_mappings)
+        (
+            particle_mode,
+            particle_configured,
+            particle_min,
+            particle_max,
+            particle_world_ids,
+            particle_current,
+            particle_has_previous,
+            particle_stats,
+        ) = state(particle_mappings)
+        return ProxyRelaxationDiagnostics(
+            source=source,
+            destination=destination,
+            body_mode=body_mode,
+            body_configured=body_configured,
+            body_min=body_min,
+            body_max=body_max,
+            body_world_ids=body_world_ids,
+            body_current=body_current,
+            body_has_previous=body_has_previous,
+            body_stats=body_stats,
+            particle_mode=particle_mode,
+            particle_configured=particle_configured,
+            particle_min=particle_min,
+            particle_max=particle_max,
+            particle_world_ids=particle_world_ids,
+            particle_current=particle_current,
+            particle_has_previous=particle_has_previous,
+            particle_stats=particle_stats,
+        )
+
+    @staticmethod
+    def _validate_prepared_proxy_contacts(
+        destination,
+        input_contacts: Contacts | None,
+        prepared_contacts,
+    ) -> None:
+        """Validate a proxy contact replacement without reading device data."""
+        if prepared_contacts is None:
+            return
+        if not isinstance(prepared_contacts, Contacts):
+            raise TypeError(
+                f"coupling_prepare_proxy_contacts for destination {destination.name!r} "
+                f"must return Contacts or None, got {type(prepared_contacts).__name__}"
+            )
+        if prepared_contacts.device != destination.view.device:
+            raise ValueError(
+                f"coupling_prepare_proxy_contacts for destination {destination.name!r} returned Contacts "
+                f"on device {prepared_contacts.device}, expected {destination.view.device}"
+            )
+        if input_contacts is not None and (
+            prepared_contacts.rigid_contact_max != input_contacts.rigid_contact_max
+            or prepared_contacts.soft_contact_max != input_contacts.soft_contact_max
+        ):
+            raise ValueError(
+                f"coupling_prepare_proxy_contacts for destination {destination.name!r} replacement capacities "
+                f"must match input capacities ({input_contacts.rigid_contact_max}, {input_contacts.soft_contact_max})"
+            )
+
+    def contact_streams(self, outer_contacts: Contacts | None = None) -> tuple[CoupledContactStream, ...]:
+        """Return base streams plus directional proxy collision buffers."""
+        if not self._contact_streams_valid:
+            return ()
+
+        streams = list(super().contact_streams(outer_contacts))
+        for source, destination in self._proxy_groups:
+            key = (source, destination)
+            contacts = None
+            if key in self._proxy_contact_stream_buffers:
+                contacts = self._proxy_contact_stream_buffers[key]
+            else:
+                config = self._proxy_collision_configs.get(key)
+                if config is not None:
+                    contacts = config.contacts
+                else:
+                    destination_entry = self._entries[destination]
+                    if destination_entry.collision_pipeline is not None:
+                        contacts = destination_entry.collision_contacts
+            if contacts is None:
+                continue
+
+            destination_entry = self._entries[destination]
+            streams.append(
+                CoupledContactStream(
+                    name=f"proxy/{source}/{destination}",
+                    kind="proxy",
+                    contacts=contacts,
+                    source=source,
+                    destination=destination,
+                    shape_local_to_parent=destination_entry.shape_local_to_global,
+                    particle_local_to_parent=destination_entry.particle_local_to_global,
+                    forces_available=False,
+                )
+            )
+        return tuple(streams)
+
     def get_proxy_collision_state(self) -> dict[tuple[str, str], int]:
         """Return host-side proxy collision cadence state for later restore."""
         return {key: config.collide_counter for key, config in self._proxy_collision_configs.items()}
@@ -1105,10 +1433,21 @@ class SolverCoupledProxy(SolverCoupled):
             if config is not None:
                 config.collide_counter = int(collide_counter)
 
+    def _capture_coupling_collision_cadence_state(self) -> object:
+        """Snapshot mapping-local provider counters for failed-step rollback."""
+        return self.get_proxy_collision_state()
+
+    def _restore_coupling_collision_cadence_state(self, state: object) -> None:
+        """Restore mapping-local provider counters after a failed step."""
+        if not isinstance(state, dict):
+            raise TypeError("Proxy collision cadence state must be a dictionary")
+        self.restore_proxy_collision_state(state)
+
     def _after_entry_states_created(self) -> None:
         super()._after_entry_states_created()
         model = self.model
         device = model.device
+        aitken_slot_count = int(model.world_count) + 1
         for mapping in self._proxy_mappings:
             mapping.coupling_forces = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
             if mapping.proxy_relaxation != 1.0 or int(mapping.proxy_relaxation_mode) == int(
@@ -1125,9 +1464,14 @@ class SolverCoupledProxy(SolverCoupled):
                     dtype=wp.spatial_vector,
                     device=device,
                 )
-                mapping.aitken_stats = wp.zeros(2, dtype=float, device=device)
-                mapping.aitken_relaxation = wp.array([mapping.proxy_relaxation], dtype=float, device=device)
-                mapping.aitken_has_previous = wp.zeros(1, dtype=int, device=device)
+                mapping.aitken_stats = wp.zeros((aitken_slot_count, 2), dtype=float, device=device)
+                mapping.aitken_relaxation = wp.full(
+                    aitken_slot_count,
+                    mapping.proxy_relaxation,
+                    dtype=float,
+                    device=device,
+                )
+                mapping.aitken_has_previous = wp.zeros(aitken_slot_count, dtype=int, device=device)
             mapping.proxy_qd_before = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
         for mapping in self._proxy_particle_mappings:
             mapping.coupling_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
@@ -1145,9 +1489,14 @@ class SolverCoupledProxy(SolverCoupled):
                     dtype=wp.vec3,
                     device=device,
                 )
-                mapping.aitken_stats = wp.zeros(2, dtype=float, device=device)
-                mapping.aitken_relaxation = wp.array([mapping.proxy_relaxation], dtype=float, device=device)
-                mapping.aitken_has_previous = wp.zeros(1, dtype=int, device=device)
+                mapping.aitken_stats = wp.zeros((aitken_slot_count, 2), dtype=float, device=device)
+                mapping.aitken_relaxation = wp.full(
+                    aitken_slot_count,
+                    mapping.proxy_relaxation,
+                    dtype=float,
+                    device=device,
+                )
+                mapping.aitken_has_previous = wp.zeros(aitken_slot_count, dtype=int, device=device)
             mapping.proxy_qd_before = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
 
     def _entry_needs_gravity_acceleration(self, entry) -> bool:
@@ -1162,42 +1511,67 @@ class SolverCoupledProxy(SolverCoupled):
         world_mask: wp.array | None = None,
         flags: StateFlags | int | None = None,
     ) -> None:
-        """Clear lagged proxy feedback and collision caches after reset."""
+        """Clear lagged proxy feedback for reset-selected worlds."""
         super()._reset_coupling_state(state, world_mask=world_mask, flags=flags)
-        for mapping in self._proxy_mappings:
-            if mapping.coupling_forces is not None:
-                mapping.coupling_forces.zero_()
+        self._clear_proxy_collision_buffers(world_mask)
+        if world_mask is None:
+            for mapping in [*self._proxy_mappings, *self._proxy_particle_mappings]:
+                if mapping.coupling_forces is not None:
+                    mapping.coupling_forces.zero_()
+                if mapping.coupling_forces_previous is not None:
+                    mapping.coupling_forces_previous.zero_()
+                if mapping.aitken_residual_previous is not None:
+                    mapping.aitken_residual_previous.zero_()
+                if mapping.aitken_stats is not None:
+                    mapping.aitken_stats.zero_()
+                if mapping.aitken_relaxation is not None:
+                    mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
+                if mapping.aitken_has_previous is not None:
+                    mapping.aitken_has_previous.zero_()
+                if mapping.proxy_qd_before is not None:
+                    mapping.proxy_qd_before.zero_()
+            return
+
+        for mapping, entity_world in (
+            *((mapping, self.model.body_world) for mapping in self._proxy_mappings),
+            *((mapping, self.model.particle_world) for mapping in self._proxy_particle_mappings),
+        ):
+            if mapping.coupling_forces is not None and entity_world is not None:
+                zero_selected_rows(mapping.coupling_forces, entity_world, world_mask)
             if mapping.coupling_forces_previous is not None:
-                mapping.coupling_forces_previous.zero_()
+                zero_selected_rows(mapping.coupling_forces_previous, mapping.world_ids, world_mask)
             if mapping.aitken_residual_previous is not None:
-                mapping.aitken_residual_previous.zero_()
+                zero_selected_rows(mapping.aitken_residual_previous, mapping.world_ids, world_mask)
+            if mapping.proxy_qd_before is not None and entity_world is not None:
+                zero_selected_rows(mapping.proxy_qd_before, entity_world, world_mask)
             if mapping.aitken_stats is not None:
-                mapping.aitken_stats.zero_()
-            if mapping.aitken_relaxation is not None:
-                mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
-            if mapping.aitken_has_previous is not None:
-                mapping.aitken_has_previous.zero_()
-            if mapping.proxy_qd_before is not None:
-                mapping.proxy_qd_before.zero_()
-        for mapping in self._proxy_particle_mappings:
-            if mapping.coupling_forces is not None:
-                mapping.coupling_forces.zero_()
-            if mapping.coupling_forces_previous is not None:
-                mapping.coupling_forces_previous.zero_()
-            if mapping.aitken_residual_previous is not None:
-                mapping.aitken_residual_previous.zero_()
-            if mapping.aitken_stats is not None:
-                mapping.aitken_stats.zero_()
-            if mapping.aitken_relaxation is not None:
-                mapping.aitken_relaxation.fill_(mapping.proxy_relaxation)
-            if mapping.aitken_has_previous is not None:
-                mapping.aitken_has_previous.zero_()
-            if mapping.proxy_qd_before is not None:
-                mapping.proxy_qd_before.zero_()
+                wp.launch(
+                    _reset_selected_aitken_slots_kernel,
+                    dim=mapping.aitken_relaxation.shape[0],
+                    inputs=[
+                        float(mapping.proxy_relaxation),
+                        world_mask,
+                        mapping.aitken_stats,
+                        mapping.aitken_relaxation,
+                        mapping.aitken_has_previous,
+                    ],
+                    device=self.model.device,
+                )
+
+    def _clear_proxy_collision_buffers(self, world_mask: wp.array | None) -> None:
+        """Clear mapping-local provider contacts and restart collision cadence."""
         for config in self._proxy_collision_configs.values():
             config.collide_counter = 0
+            if config.pipeline is not None:
+                self._reset_collision_provider_contact_matching(config.pipeline, world_mask)
             if config.contacts is not None:
                 config.contacts.clear(bump_generation=True)
+        self._proxy_contact_stream_buffers.clear()
+
+    def _invalidate_coupling_contact_streams(self) -> None:
+        """Discard partially published directional buffers after a failed step."""
+        super()._invalidate_coupling_contact_streams()
+        self._proxy_contact_stream_buffers.clear()
 
     def _stash_proxy_body_feedback(self, proxy: _ProxyBodyMapping) -> None:
         if proxy.coupling_forces_previous is None:
@@ -1237,6 +1611,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_body_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_body_ids_global,
+                    proxy.world_ids,
                     proxy.coupling_forces_previous,
                     proxy.coupling_forces,
                     proxy.aitken_residual_previous,
@@ -1247,7 +1622,7 @@ class SolverCoupledProxy(SolverCoupled):
             )
             wp.launch(
                 _update_aitken_relaxation_kernel,
-                dim=1,
+                dim=proxy.aitken_relaxation.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation_min),
                     float(proxy.proxy_relaxation_max),
@@ -1262,6 +1637,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_body_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_body_ids_global,
+                    proxy.world_ids,
                     proxy.coupling_forces_previous,
                     proxy.aitken_residual_previous,
                     proxy.aitken_relaxation,
@@ -1292,6 +1668,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_particle_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_particle_ids_global,
+                    proxy.world_ids,
                     proxy.coupling_forces_previous,
                     proxy.coupling_forces,
                     proxy.aitken_residual_previous,
@@ -1302,7 +1679,7 @@ class SolverCoupledProxy(SolverCoupled):
             )
             wp.launch(
                 _update_aitken_relaxation_kernel,
-                dim=1,
+                dim=proxy.aitken_relaxation.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation_min),
                     float(proxy.proxy_relaxation_max),
@@ -1317,6 +1694,7 @@ class SolverCoupledProxy(SolverCoupled):
                 dim=proxy.proxy_particle_ids_global.shape[0],
                 inputs=[
                     proxy.proxy_particle_ids_global,
+                    proxy.world_ids,
                     proxy.coupling_forces_previous,
                     proxy.aitken_residual_previous,
                     proxy.aitken_relaxation,
@@ -1486,13 +1864,20 @@ class SolverCoupledProxy(SolverCoupled):
                 self._distribute_state(state_in, dt=dt, iteration_restart=True)
             self._step_proxy(state_in, control, contacts, dt, iteration_restart=k > 0)
 
+    def _refresh_entry_collision_pipelines(self) -> None:
+        """Defer destination providers until their proxy state has been synchronized."""
+        proxy_destinations = {destination for _, destination in self._proxy_groups}
+        for entry in self._entries.values():
+            if entry.name not in proxy_destinations:
+                self._refresh_entry_collision_pipeline_once(entry)
+
     def _reset_aitken_iteration_state(self) -> None:
         for proxy in [*self._proxy_mappings, *self._proxy_particle_mappings]:
             if int(proxy.proxy_relaxation_mode) != int(_ProxyRelaxationMode.AITKEN):
                 continue
             wp.launch(
                 _reset_aitken_state_kernel,
-                dim=1,
+                dim=proxy.aitken_relaxation.shape[0],
                 inputs=[
                     float(proxy.proxy_relaxation),
                     proxy.aitken_relaxation,
@@ -1561,6 +1946,8 @@ class SolverCoupledProxy(SolverCoupled):
                     )
                 self._notify_input_state_update(src, StateFlags.PARTICLE_F, dt=dt)
 
+            if not iteration_restart:
+                self._refresh_entry_collision_pipeline_once(src)
             self._step_entry(src, control, contacts, dt)
 
             for proxy in body_proxies:
@@ -1649,6 +2036,13 @@ class SolverCoupledProxy(SolverCoupled):
                     collision_config, dst.state_0, iteration_restart=iteration_restart
                 )
                 filter_dst_contacts = False
+            elif dst.collision_pipeline is not None:
+                if iteration_restart:
+                    contacts_freshly_detected = False
+                else:
+                    contacts_freshly_detected = self._refresh_entry_collision_pipeline_once(dst)
+                dst_contacts = dst.collision_contacts
+                filter_dst_contacts = False
 
             restore_external_contacts = None
             dst_contacts_used = dst_contacts
@@ -1660,6 +2054,7 @@ class SolverCoupledProxy(SolverCoupled):
                     dst_contacts,
                     contacts_freshly_detected=contacts_freshly_detected,
                 )
+                self._validate_prepared_proxy_contacts(dst, contacts_before_prepare, dst_contacts)
                 if (
                     collision_config is None
                     and contacts_before_prepare is contacts
@@ -1695,6 +2090,8 @@ class SolverCoupledProxy(SolverCoupled):
                         ],
                         device=self.model.device,
                     )
+
+            self._proxy_contact_stream_buffers[(src_name, dst_name)] = dst_contacts_used
 
             for proxy in body_proxies:
                 dst.solver.coupling_harvest_proxy_wrenches(

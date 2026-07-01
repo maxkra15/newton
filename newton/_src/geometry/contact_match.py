@@ -219,6 +219,7 @@ class _MatchData:
     prev_keys: wp.array[wp.int64]
     prev_pos_world: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
+    prev_valid: wp.array[wp.bool]
     prev_count: wp.array[wp.int32]
 
     # Current frame (unsorted).
@@ -304,19 +305,24 @@ def _match_contacts_kernel(data: _MatchData):
         data.match_index[tid] = MATCH_NOT_FOUND
         return
 
-    # Closest-point match within the pair range, gated by normal dot.
+    # Closest-point match within the valid part of the pair range, gated by
+    # normal dot.  A pair whose rows were all invalidated by a world-selective
+    # reset behaves exactly like a pair with no prior history.
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
+    has_valid_pair = int(0)
     for old_idx in range(range_lo, range_hi):
-        old_pos = data.prev_pos_world[old_idx]
-        diff = new_pos_w - old_pos
-        dist_sq = wp.dot(diff, diff)
-        old_n = data.prev_normal[old_idx]
-        ndot = wp.dot(new_n, old_n)
+        if data.prev_valid[old_idx]:
+            has_valid_pair = 1
+            old_pos = data.prev_pos_world[old_idx]
+            diff = new_pos_w - old_pos
+            dist_sq = wp.dot(diff, diff)
+            old_n = data.prev_normal[old_idx]
+            ndot = wp.dot(new_n, old_n)
 
-        if dist_sq <= best_dist_sq and ndot >= data.normal_dot_threshold:
-            best_dist_sq = dist_sq
-            best_idx = old_idx
+            if dist_sq <= best_dist_sq and ndot >= data.normal_dot_threshold:
+                best_dist_sq = dist_sq
+                best_idx = old_idx
 
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
@@ -326,9 +332,11 @@ def _match_contacts_kernel(data: _MatchData):
         # winner invariant under the non-deterministic unsorted slot
         # assignment that the narrow phase gives us via ``wp.atomic_add``.
         wp.atomic_min(data.prev_claim, best_idx, _pack_claim(best_dist_sq, target_key))
-    else:
+    elif has_valid_pair != 0:
         # Pair range exists but no contact within thresholds.
         data.match_index[tid] = MATCH_BROKEN
+    else:
+        data.match_index[tid] = MATCH_NOT_FOUND
 
 
 @wp.kernel(enable_backward=False)
@@ -350,10 +358,27 @@ def _clear_prev_claim_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _invalidate_previous_contacts_kernel(
+    prev_world: wp.array[wp.int32],
+    prev_valid: wp.array[wp.bool],
+    prev_count: wp.array[wp.int32],
+    world_mask: wp.array[wp.bool],
+):
+    """Invalidate active prior rows belonging to selected regular worlds."""
+    i = wp.tid()
+    if i >= prev_count[0]:
+        return
+    world = prev_world[i]
+    if world >= wp.int32(0) and world_mask[world]:
+        prev_valid[i] = False
+
+
+@wp.kernel(enable_backward=False)
 def _resolve_claims_kernel(
     match_index: wp.array[wp.int32],
     sort_keys: wp.array[wp.int64],
     prev_claim: wp.array[wp.int64],
+    prev_valid: wp.array[wp.bool],
     prev_was_matched: wp.array[wp.int32],
     new_count: wp.array[wp.int32],
     has_report: int,
@@ -373,6 +398,12 @@ def _resolve_claims_kernel(
     cand = match_index[tid]
     if cand < wp.int32(0):
         return  # already MATCH_NOT_FOUND or MATCH_BROKEN
+    if not prev_valid[cand]:
+        # Defensive guard: pass 1 never claims an invalid row, but keeping
+        # validity authoritative here prevents stale claims from leaking into
+        # sticky replay or the contact report if that invariant changes.
+        match_index[tid] = MATCH_NOT_FOUND
+        return
 
     winner_key_low = prev_claim[cand] & wp.int64(0xFFFFFFFF)
     my_key_low = sort_keys[tid] & wp.int64(0xFFFFFFFF)
@@ -413,10 +444,13 @@ class _SaveStateData:
 
     body_q: wp.array[wp.transform]
     shape_body: wp.array[wp.int32]
+    shape_world: wp.array[wp.int32]
 
     dst_keys: wp.array[wp.int64]
     dst_pos_world: wp.array[wp.vec3]  # world-space midpoint of point0 and point1
     dst_normal: wp.array[wp.vec3]
+    dst_world: wp.array[wp.int32]
+    dst_valid: wp.array[wp.bool]
     dst_point0_body: wp.array[wp.vec3]
     dst_point1_body: wp.array[wp.vec3]
     dst_offset0_body: wp.array[wp.vec3]
@@ -441,19 +475,32 @@ def _save_sorted_state_kernel(data: _SaveStateData):
     """
     i = wp.tid()
     if i == 0:
-        data.dst_count[0] = data.src_count[0]
+        # ``src_count`` remains the raw overflow diagnostic; persisted matcher
+        # state can only address the fixed-capacity destination sidecars.
+        data.dst_count[0] = wp.min(data.src_count[0], data.dst_keys.shape[0])
     if i < data.src_count[0]:
         data.dst_keys[i] = data.src_keys[i]
 
+        shape0 = data.src_shape0[i]
+        shape1 = data.src_shape1[i]
+        world0 = data.shape_world[shape0]
+        if world0 >= wp.int32(0):
+            data.dst_world[i] = world0
+        else:
+            # The local shape wins regardless of canonical shape order;
+            # global-global contacts therefore retain world -1.
+            data.dst_world[i] = data.shape_world[shape1]
+        data.dst_valid[i] = True
+
         p0 = data.src_point0[i]
-        bid0 = data.shape_body[data.src_shape0[i]]
+        bid0 = data.shape_body[shape0]
         if bid0 == -1:
             p0w = p0
         else:
             p0w = wp.transform_point(data.body_q[bid0], p0)
 
         p1 = data.src_point1[i]
-        bid1 = data.shape_body[data.src_shape1[i]]
+        bid1 = data.shape_body[shape1]
         if bid1 == -1:
             p1w = p1
         else:
@@ -502,6 +549,7 @@ class _ReplayData:
     prev_offset0: wp.array[wp.vec3]
     prev_offset1: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
+    prev_valid: wp.array[wp.bool]
 
     point0: wp.array[wp.vec3]
     point1: wp.array[wp.vec3]
@@ -524,6 +572,8 @@ def _replay_matched_kernel(data: _ReplayData):
     idx = data.match_index[tid]
     if idx < wp.int32(0):
         return  # MATCH_NOT_FOUND or MATCH_BROKEN -- keep new-frame data.
+    if not data.prev_valid[idx]:
+        return  # World-selective reset invalidated this prior row.
 
     body0 = data.shape_body[data.shape0[tid]]
     body1 = data.shape_body[data.shape1[tid]]
@@ -569,6 +619,7 @@ def _collect_new_contacts_kernel(
 @wp.kernel(enable_backward=False)
 def _collect_broken_contacts_kernel(
     prev_was_matched: wp.array[wp.int32],
+    prev_valid: wp.array[wp.bool],
     prev_count: wp.array[wp.int32],
     broken_indices: wp.array[wp.int32],
     broken_count: wp.array[wp.int32],
@@ -577,7 +628,7 @@ def _collect_broken_contacts_kernel(
     i = wp.tid()
     if i >= prev_count[0]:
         return
-    if prev_was_matched[i] == wp.int32(0):
+    if prev_valid[i] and prev_was_matched[i] == wp.int32(0):
         slot = wp.atomic_add(broken_count, 0, wp.int32(1))
         broken_indices[slot] = wp.int32(i)
 
@@ -601,9 +652,10 @@ class ContactMatcher:
 
     Memory is minimised by reusing the sorter's existing scratch buffers for
     the previous-frame world-space contact midpoints and normals.  The matcher
-    owns two small per-contact buffers in addition: the sorted key cache
-    (8 bytes/contact) and the per-prev claim word used by the ``atomic_min``
-    race that keeps new→prev injective (8 bytes/contact).  When
+    owns four small per-contact buffers in addition: the sorted key cache
+    (8 bytes/contact), the per-prev claim word used by the ``atomic_min``
+    race that keeps new→prev injective (8 bytes/contact), and row-aligned
+    previous-world/validity sidecars used by world-selective reset.  When
     ``contact_report`` is disabled, the ``prev_was_matched`` flag array is
     also skipped.
 
@@ -618,6 +670,8 @@ class ContactMatcher:
         capacity: Maximum number of contacts (must match :class:`ContactSorter`).
         sorter: The :class:`ContactSorter` whose scratch buffers will be
             reused for storing previous-frame positions and normals.
+        shape_world: Per-shape regular-world index, with ``-1`` for global
+            shapes. Used to persist an effective world for each sorted row.
         pos_threshold: World-space distance threshold [m] between the
             previous and current contact midpoints
             ``0.5 * (world(point0) + world(point1))``.  Contacts whose midpoint
@@ -642,6 +696,7 @@ class ContactMatcher:
         capacity: int,
         *,
         sorter: ContactSorter,
+        shape_world: wp.array[wp.int32],
         pos_threshold: float = 0.0005,
         normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
@@ -653,6 +708,7 @@ class ContactMatcher:
             self._pos_threshold_sq = pos_threshold * pos_threshold
             self._normal_dot_threshold = normal_dot_threshold
             self._sorter = sorter
+            self._shape_world = shape_world
 
             # Only buffer we must own: sorted keys survive across frames
             # (_sort_keys_copy is overwritten by _prepare_sort each frame).
@@ -661,6 +717,8 @@ class ContactMatcher:
             # for shape_a=0, shape_b=0, sub_key=0.
             self._prev_sorted_keys = wp.full(capacity, SORT_KEY_SENTINEL, dtype=wp.int64)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
+            self._prev_world = wp.full(capacity, -1, dtype=wp.int32)
+            self._prev_valid = wp.zeros(capacity, dtype=wp.bool)
 
             # Per-prev claim word for the atomic_min race that keeps the
             # new→prev mapping injective (see module docstring).  Reset
@@ -721,17 +779,24 @@ class ContactMatcher:
         """Device-side previous frame contact count (single-element int32)."""
         return self._prev_count
 
-    def reset(self) -> None:
-        """Clear cross-frame state so the next frame starts fresh.
+    def reset(self, world_mask: wp.array[wp.bool] | None = None) -> None:
+        """Clear all or selected-world cross-frame state.
 
         Use this after any discontinuity that invalidates the previous
-        frame's contacts (RL episode reset, teleported bodies, scene
-        reload).  After ``reset()`` the next :meth:`match` produces all
-        :data:`MATCH_NOT_FOUND` and :meth:`build_report` reports zero broken
-        contacts.  Zeroing ``_prev_count`` is sufficient because both kernels
-        gate on it.
+        frame's contacts (RL episode reset, teleported bodies, scene reload).
+        With no mask, zeroing ``_prev_count`` makes the next :meth:`match`
+        entirely fresh. With a mask, only previous rows belonging to selected
+        regular worlds are invalidated; global rows remain valid.
         """
-        self._prev_count.zero_()
+        if world_mask is None:
+            self._prev_count.zero_()
+            return
+        wp.launch(
+            _invalidate_previous_contacts_kernel,
+            dim=self._capacity,
+            inputs=[self._prev_world, self._prev_valid, self._prev_count, world_mask],
+            device=self._prev_valid.device,
+        )
 
     # ------------------------------------------------------------------
     # Public methods
@@ -794,6 +859,7 @@ class ContactMatcher:
         # Reuse sorter scratch buffers for prev-frame world-space data.
         data.prev_pos_world = self._sorter.scratch_pos_world
         data.prev_normal = self._sorter.scratch_normal
+        data.prev_valid = self._prev_valid
         data.prev_count = self._prev_count
         data.new_keys = sort_keys
         data.new_point0 = point0
@@ -817,6 +883,7 @@ class ContactMatcher:
                 match_index_out,
                 sort_keys,
                 self._prev_claim,
+                self._prev_valid,
                 self._prev_was_matched,
                 contact_count,
                 1 if self._has_report else 0,
@@ -877,10 +944,13 @@ class ContactMatcher:
         data.src_count = contact_count
         data.body_q = body_q
         data.shape_body = shape_body
+        data.shape_world = self._shape_world
         data.dst_keys = self._prev_sorted_keys
         # Write world-space midpoint and normal into the sorter's scratch buffers.
         data.dst_pos_world = self._sorter.scratch_pos_world
         data.dst_normal = self._sorter.scratch_normal
+        data.dst_world = self._prev_world
+        data.dst_valid = self._prev_valid
         data.dst_count = self._prev_count
 
         if self._sticky:
@@ -959,6 +1029,7 @@ class ContactMatcher:
         # replay runs after ``sort_full``, which has clobbered scratch_normal
         # with the current frame's pre-sort normals during its backup pass.
         data.prev_normal = self._prev_normal_sticky
+        data.prev_valid = self._prev_valid
         data.point0 = point0
         data.point1 = point1
         data.offset0 = offset0
@@ -1021,6 +1092,6 @@ class ContactMatcher:
         wp.launch(
             _collect_broken_contacts_kernel,
             dim=self._capacity,
-            inputs=[self._prev_was_matched, self._prev_count, broken_indices, broken_count],
+            inputs=[self._prev_was_matched, self._prev_valid, self._prev_count, broken_indices, broken_count],
             device=device,
         )

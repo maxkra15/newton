@@ -51,6 +51,8 @@ class AdmmContactStream:
         point_b: Contact point on side B [m].
         normal: Contact normal from side B to side A [unitless].
         source_id: Detector-local source id for diagnostics or warm-start keys.
+        world_ids: Effective regular-world index for each row, or ``-1`` for
+            global rows.
         normal_force: Normal contact force applied to side A [N].
         normal_impulse: Normal contact impulse applied to side A [N s].
     """
@@ -69,6 +71,7 @@ class AdmmContactStream:
     point_b: wp.array[wp.vec3]
     normal: wp.array[wp.vec3]
     source_id: wp.array[int]
+    world_ids: wp.array[int]
     normal_force: wp.array[float]
     normal_impulse: wp.array[float]
 
@@ -105,6 +108,7 @@ class AdmmContactStream:
             point_b=wp.zeros(capacity, dtype=wp.vec3, device=device),
             normal=wp.zeros(capacity, dtype=wp.vec3, device=device),
             source_id=wp.full(capacity, -1, dtype=int, device=device),
+            world_ids=wp.full(capacity, -1, dtype=int, device=device),
             normal_force=wp.zeros(capacity, dtype=float, device=device),
             normal_impulse=wp.zeros(capacity, dtype=float, device=device),
         )
@@ -114,6 +118,21 @@ class AdmmContactStream:
 def admm_contact_stream_reset_count_kernel(count: wp.array[int]):
     """Reset the active contact count of a stream."""
     count[0] = 0
+
+
+@wp.kernel(enable_backward=False)
+def admm_contact_stream_reset_selected_rows_kernel(
+    world_ids: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    normal_force: wp.array[float],
+    normal_impulse: wp.array[float],
+):
+    """Clear force outputs for selected regular-world stream rows."""
+    row = wp.tid()
+    world = world_ids[row]
+    if world >= 0 and world_mask[world]:
+        normal_force[row] = 0.0
+        normal_impulse[row] = 0.0
 
 
 @wp.kernel(enable_backward=False)

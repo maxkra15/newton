@@ -18,6 +18,7 @@ from .admm_contact_stream import (
     AdmmContactStream,
     AdmmContactType,
     admm_contact_stream_reset_count_kernel,
+    admm_contact_stream_reset_selected_rows_kernel,
     admm_contact_stream_update_normal_force_kernel,
 )
 from .admm_utils import (
@@ -76,17 +77,22 @@ from .admm_utils import (
     mark_local_indices_from_global_mask_kernel,
     particle_gravity_compensation_lumped_kernel,
     particle_particle_contacts_hashgrid_kernel,
+    reset_dynamic_admm_rows_kernel,
+    reset_static_admm_rows_kernel,
     scatter_body_effective_mass_block_kernel,
     scatter_effective_mass_kernel,
+    solve_coulomb_isotropic,
     u_update_quadratic_kernel,
     velocity_proximal_shift_body_lumped_kernel,
     velocity_proximal_shift_joint_lumped_kernel,
     velocity_proximal_shift_particle_lumped_kernel,
 )
+from .contact_stream import AdmmDiagnostics, AdmmInterfaceDiagnostics, CoupledContactStream
 from .interface import (
     CouplingEndpointKind,
 )
 from .model_view import ModelView
+from .reset_utils import copy_selected_rows, zero_selected_rows
 from .solver_coupled import (
     SolverCoupled,
     SolverEntry,
@@ -96,6 +102,148 @@ from .solver_coupled import (
 
 if TYPE_CHECKING:
     from ...sim import Contacts, Control, Model, ModelBuilder, State
+
+
+_ADMM_DIAGNOSTICS_INACTIVE_U_MIN = wp.constant(-1.0e8)
+
+
+@wp.func
+def _admm_diagnostics_soft_threshold(value: float, threshold: float) -> float:
+    threshold = wp.max(0.0, threshold)
+    if value > threshold:
+        return value - threshold
+    if value < -threshold:
+        return value + threshold
+    return 0.0
+
+
+@wp.kernel(enable_backward=False)
+def _admm_diagnostics_accumulate_counts_kernel(
+    active_count: wp.array[int],
+    active_count_max: wp.array[int],
+    capacity: int,
+    contact_count: wp.array[int],
+    contact_count_max: wp.array[int],
+    contact_overflow: wp.array[int],
+):
+    """Accumulate readable dynamic-contact counts and current overflow."""
+    raw_count = wp.max(active_count[0], 0)
+    raw_max = wp.max(active_count_max[0], 0)
+    wp.atomic_add(contact_count, 0, wp.min(raw_count, capacity))
+    wp.atomic_add(contact_count_max, 0, wp.min(raw_max, capacity))
+    wp.atomic_add(contact_overflow, 0, wp.max(raw_count - capacity, 0))
+
+
+@wp.kernel(enable_backward=False)
+def _admm_diagnostics_accumulate_quadratic_residual_kernel(
+    rho: float,
+    kappa: wp.array[float],
+    damping: wp.array[float],
+    W: wp.array[float],
+    u: wp.array[wp.vec3],
+    Jv: wp.array[wp.vec3],
+    u_target: wp.array[wp.vec3],
+    lambda_: wp.array[wp.vec3],
+    primal_residual_sq: wp.array[float],
+    dual_residual_sq: wp.array[float],
+):
+    """Accumulate consensus and quadratic proximal fixed-point residuals."""
+    row = wp.tid()
+    primal = u[row] - Jv[row]
+    wp.atomic_add(primal_residual_sq, 0, wp.dot(primal, primal))
+
+    weight = W[row]
+    prox_input = u[row]
+    scaled_rho = rho * weight
+    if scaled_rho != 0.0:
+        prox_input = prox_input - lambda_[row] / scaled_rho
+    rho_weight_sq = rho * weight * weight
+    denominator = kappa[row] + damping[row] + rho_weight_sq
+    prox = prox_input
+    if denominator > 0.0:
+        prox = (rho_weight_sq * prox_input + kappa[row] * u_target[row]) / denominator
+    dual = u[row] - prox
+    wp.atomic_add(dual_residual_sq, 0, wp.dot(dual, dual))
+
+
+@wp.kernel(enable_backward=False)
+def _admm_diagnostics_accumulate_box_residual_kernel(
+    rho: float,
+    friction: wp.array[wp.vec3],
+    W: wp.array[float],
+    u: wp.array[wp.vec3],
+    Jv: wp.array[wp.vec3],
+    lambda_: wp.array[wp.vec3],
+    primal_residual_sq: wp.array[float],
+    dual_residual_sq: wp.array[float],
+):
+    """Accumulate consensus and box-friction fixed-point residuals."""
+    row = wp.tid()
+    primal = u[row] - Jv[row]
+    wp.atomic_add(primal_residual_sq, 0, wp.dot(primal, primal))
+
+    weight = W[row]
+    prox_input = u[row]
+    scaled_rho = rho * weight
+    if scaled_rho != 0.0:
+        prox_input = prox_input - lambda_[row] / scaled_rho
+    threshold = wp.vec3(0.0, 0.0, 0.0)
+    force_denominator = rho * weight * weight
+    if force_denominator > 0.0:
+        threshold = friction[row] / force_denominator
+    prox = wp.vec3(
+        _admm_diagnostics_soft_threshold(prox_input[0], threshold[0]),
+        _admm_diagnostics_soft_threshold(prox_input[1], threshold[1]),
+        _admm_diagnostics_soft_threshold(prox_input[2], threshold[2]),
+    )
+    dual = u[row] - prox
+    wp.atomic_add(dual_residual_sq, 0, wp.dot(dual, dual))
+
+
+@wp.kernel(enable_backward=False)
+def _admm_diagnostics_accumulate_contact_residual_kernel(
+    active_count: wp.array[int],
+    rho: float,
+    u_min: wp.array[float],
+    W: wp.array[float],
+    friction: wp.array[float],
+    normal: wp.array[wp.vec3],
+    u: wp.array[wp.vec3],
+    Jv: wp.array[wp.vec3],
+    lambda_: wp.array[wp.vec3],
+    primal_residual_sq: wp.array[float],
+    dual_residual_sq: wp.array[float],
+):
+    """Accumulate active contact consensus and fixed-point residuals."""
+    row = wp.tid()
+    if row >= active_count[0]:
+        return
+
+    primal = u[row] - Jv[row]
+    wp.atomic_add(primal_residual_sq, 0, wp.dot(primal, primal))
+
+    weight = W[row]
+    prox_input = u[row]
+    scaled_rho = rho * weight
+    if scaled_rho != 0.0:
+        prox_input = prox_input - lambda_[row] / scaled_rho
+    prox = prox_input
+    minimum = u_min[row]
+    if minimum > _ADMM_DIAGNOSTICS_INACTIVE_U_MIN:
+        shifted = prox_input - minimum * normal[row]
+        prox = solve_coulomb_isotropic(wp.max(0.0, friction[row]), normal[row], shifted) + minimum * normal[row]
+    dual = u[row] - prox
+    wp.atomic_add(dual_residual_sq, 0, wp.dot(dual, dual))
+
+
+@wp.kernel(enable_backward=False)
+def _admm_diagnostics_finalize_norms_kernel(
+    primal_residual_sq: wp.array[float],
+    dual_residual_sq: wp.array[float],
+):
+    """Convert accumulated squared residuals to L2 norms."""
+    primal_residual_sq[0] = wp.sqrt(wp.max(0.0, primal_residual_sq[0]))
+    dual_residual_sq[0] = wp.sqrt(wp.max(0.0, dual_residual_sq[0]))
 
 
 @dataclass
@@ -144,6 +292,7 @@ class _AdmmRigidRigidAttachmentGroup:
 
     body_entry_name_a: str
     body_entry_name_b: str
+    world_ids: wp.array[int]
     body_ids_a: wp.array
     point_a: wp.array
     body_ids_b: wp.array
@@ -167,6 +316,7 @@ class _AdmmRigidRigidAngularAttachmentGroup:
 
     body_entry_name_a: str
     body_entry_name_b: str
+    world_ids: wp.array[int]
     body_ids_a: wp.array
     frame_a: wp.array
     body_ids_b: wp.array
@@ -190,6 +340,7 @@ class _AdmmRigidRigidAngularFrictionGroup:
 
     body_entry_name_a: str
     body_entry_name_b: str
+    world_ids: wp.array[int]
     body_ids_a: wp.array
     frame_a: wp.array
     body_ids_b: wp.array
@@ -210,6 +361,7 @@ class _AdmmRigidParticleAttachmentGroup:
 
     body_entry_name: str
     particle_entry_name: str
+    world_ids: wp.array[int]
     body_ids: wp.array
     point_body: wp.array
     particle_ids: wp.array
@@ -246,6 +398,7 @@ class _AdmmRigidRigidContactGroup:
     lambda_: wp.array
     Jv: wp.array
     u_min: wp.array
+    world_ids: wp.array[int]
     capacity: int | None = None
     active_count: wp.array | None = None
     active_count_max: wp.array | None = None
@@ -286,6 +439,7 @@ class _AdmmRigidParticleContactGroup:
     lambda_: wp.array
     Jv: wp.array
     u_min: wp.array
+    world_ids: wp.array[int]
     capacity: int | None = None
     active_count: wp.array | None = None
     active_count_max: wp.array | None = None
@@ -324,6 +478,7 @@ class _AdmmParticleParticleContactGroup:
     lambda_: wp.array
     Jv: wp.array
     u_min: wp.array
+    world_ids: wp.array[int]
     capacity: int | None = None
     active_count: wp.array | None = None
     active_count_max: wp.array | None = None
@@ -646,6 +801,8 @@ class SolverCoupledADMM(SolverCoupled):
         self._admm_joint_proxy_body_keep: dict[str, set[int]] = {}
         self._admm_joint_proxy_joint_keep: dict[str, set[int]] = {}
         self._admm_joint_proxy_mappings: list[_AdmmJointProxyMapping] = []
+        self._admm_diagnostics: AdmmDiagnostics | None = None
+        self._admm_diagnostic_interface_groups: tuple[tuple[AdmmInterfaceDiagnostics, tuple[object, ...]], ...] = ()
 
         self._validate_config(coupling)
         if coupling.joint_proximal_bodies:
@@ -658,6 +815,7 @@ class SolverCoupledADMM(SolverCoupled):
         )
 
         self._setup_admm(coupling)
+        self._setup_admm_diagnostics(coupling)
         self._apply_cached_admm_joint_proxy_effective_masses()
 
     @classmethod
@@ -973,6 +1131,121 @@ class SolverCoupledADMM(SolverCoupled):
         """Maximum collision-detected ADMM contact count observed so far."""
         return self._sum_active_count("active_count_max")
 
+    def diagnostics(self) -> AdmmDiagnostics:
+        """Update and return stable device-resident ADMM diagnostics.
+
+        Reductions run only when this method is called. The method performs no
+        device-to-host synchronization and does not modify simulation arrays,
+        so a warmed call can be captured in a CUDA graph.
+        """
+        diagnostics = self._admm_diagnostics
+        if diagnostics is None:
+            raise RuntimeError("ADMM diagnostics were not initialized")
+
+        diagnostics.contact_count.zero_()
+        diagnostics.contact_count_max.zero_()
+        diagnostics.contact_overflow.zero_()
+        for group in (
+            *self._admm_dynamic_rr_contact_groups,
+            *self._admm_dynamic_rp_contact_groups,
+            *self._admm_dynamic_pp_contact_groups,
+        ):
+            contact_stream = getattr(group, "contact_stream", None)
+            if contact_stream is None:
+                count = group.active_count
+                count_max = group.active_count_max
+                capacity = int(group.count)
+            else:
+                count = contact_stream.count
+                count_max = contact_stream.count_max
+                capacity = int(contact_stream.capacity)
+            wp.launch(
+                _admm_diagnostics_accumulate_counts_kernel,
+                dim=1,
+                inputs=[count, count_max, capacity],
+                outputs=[
+                    diagnostics.contact_count,
+                    diagnostics.contact_count_max,
+                    diagnostics.contact_overflow,
+                ],
+                device=self.model.device,
+            )
+
+        rho = float(self._coupling.rho)
+        for interface, groups in self._admm_diagnostic_interface_groups:
+            interface.primal_residual_norm.zero_()
+            interface.dual_residual_norm.zero_()
+            for group in groups:
+                active_count = getattr(group, "active_count", None)
+                if active_count is not None:
+                    wp.launch(
+                        _admm_diagnostics_accumulate_contact_residual_kernel,
+                        dim=group.count,
+                        inputs=[
+                            active_count,
+                            rho,
+                            group.u_min,
+                            group.W,
+                            group.friction,
+                            group.normal,
+                            group.u,
+                            group.Jv,
+                            group.lambda_,
+                        ],
+                        outputs=[interface.primal_residual_norm, interface.dual_residual_norm],
+                        device=self.model.device,
+                    )
+                elif hasattr(group, "kappa"):
+                    wp.launch(
+                        _admm_diagnostics_accumulate_quadratic_residual_kernel,
+                        dim=group.count,
+                        inputs=[
+                            rho,
+                            group.kappa,
+                            group.damping,
+                            group.W,
+                            group.u,
+                            group.Jv,
+                            group.u_target,
+                            group.lambda_,
+                        ],
+                        outputs=[interface.primal_residual_norm, interface.dual_residual_norm],
+                        device=self.model.device,
+                    )
+                else:
+                    wp.launch(
+                        _admm_diagnostics_accumulate_box_residual_kernel,
+                        dim=group.count,
+                        inputs=[rho, group.friction, group.W, group.u, group.Jv, group.lambda_],
+                        outputs=[interface.primal_residual_norm, interface.dual_residual_norm],
+                        device=self.model.device,
+                    )
+            wp.launch(
+                _admm_diagnostics_finalize_norms_kernel,
+                dim=1,
+                inputs=[interface.primal_residual_norm, interface.dual_residual_norm],
+                device=self.model.device,
+            )
+
+        return diagnostics
+
+    def contact_streams(self, outer_contacts: Contacts | None = None) -> tuple[CoupledContactStream, ...]:
+        """Return base streams plus the raw ADMM collision buffer, when present."""
+        if not self._contact_streams_valid:
+            return ()
+
+        streams = list(super().contact_streams(outer_contacts))
+        if self._admm_internal_contacts is not None:
+            streams.append(
+                CoupledContactStream(
+                    name="admm/internal",
+                    kind="admm",
+                    contacts=self._admm_internal_contacts,
+                    forces_available=False,
+                )
+            )
+        return tuple(streams)
+
     def _customize_view(self, name: str, view: ModelView, body_indices: wp.array) -> None:
         """Apply ADMM view customizations before sub-solver construction."""
         self._disable_admm_joint_proxy_shape_collisions(name, view)
@@ -1119,6 +1392,58 @@ class SolverCoupledADMM(SolverCoupled):
                 refresh_supported_solvers=True,
                 notify_unsupported_solvers=True,
             )
+
+    def _admm_constraint_groups(self) -> tuple[object, ...]:
+        return (
+            *self._admm_rr_groups,
+            *self._admm_rr_angular_groups,
+            *self._admm_rr_revolute_angular_groups,
+            *self._admm_rr_angular_friction_groups,
+            *self._admm_rp_groups,
+            *self._admm_dynamic_rr_contact_groups,
+            *self._admm_dynamic_rp_contact_groups,
+            *self._admm_dynamic_pp_contact_groups,
+        )
+
+    @staticmethod
+    def _admm_group_owner_names(group: object) -> tuple[str, str]:
+        if hasattr(group, "body_entry_name_a"):
+            return group.body_entry_name_a, group.body_entry_name_b
+        if hasattr(group, "particle_entry_name_a"):
+            return group.particle_entry_name_a, group.particle_entry_name_b
+        return group.body_entry_name, group.particle_entry_name
+
+    def _setup_admm_diagnostics(self, coupling: SolverCoupledADMM.Config) -> None:
+        """Allocate stable device outputs and canonical owner-pair bindings."""
+        device = self.model.device
+        entry_order = {name: index for index, name in enumerate(self._entries)}
+        groups_by_pair: dict[tuple[str, str], list[object]] = {}
+        for group in self._admm_constraint_groups():
+            source, destination = self._admm_group_owner_names(group)
+            if entry_order[destination] < entry_order[source]:
+                source, destination = destination, source
+            groups_by_pair.setdefault((source, destination), []).append(group)
+
+        bindings = []
+        interfaces = []
+        for owner_pair in sorted(groups_by_pair, key=lambda pair: (entry_order[pair[0]], entry_order[pair[1]])):
+            interface = AdmmInterfaceDiagnostics(
+                source=owner_pair[0],
+                destination=owner_pair[1],
+                primal_residual_norm=wp.zeros(1, dtype=float, device=device),
+                dual_residual_norm=wp.zeros(1, dtype=float, device=device),
+            )
+            interfaces.append(interface)
+            bindings.append((interface, tuple(groups_by_pair[owner_pair])))
+
+        self._admm_diagnostic_interface_groups = tuple(bindings)
+        self._admm_diagnostics = AdmmDiagnostics(
+            iterations=int(coupling.iterations),
+            contact_count=wp.zeros(1, dtype=wp.int32, device=device),
+            contact_count_max=wp.zeros(1, dtype=wp.int32, device=device),
+            contact_overflow=wp.zeros(1, dtype=wp.int32, device=device),
+            interfaces=tuple(interfaces),
+        )
 
     def _setup_admm_body_joint_qd_proximal_map(self, entry: SolverEntry, buf: _AdmmBuffers) -> None:
         if (
@@ -1765,6 +2090,11 @@ class SolverCoupledADMM(SolverCoupled):
     ) -> None:
         """Clear ADMM warm-start and internal contact buffers after reset."""
         super()._reset_coupling_state(state, world_mask=world_mask, flags=flags)
+        if world_mask is not None:
+            self._reset_static_admm_state_by_world(world_mask)
+            self._reset_dynamic_admm_state_by_world(world_mask)
+            return
+
         for name, entry in self._entries.items():
             buf = self._admm_buffers[name]
             if buf.body_q_n is not None:
@@ -1799,6 +2129,84 @@ class SolverCoupledADMM(SolverCoupled):
         if float(self._coupling.gamma) > 0.0:
             self._refresh_admm_proximal_masks()
             self._refresh_admm_proximal_view_overrides(refresh_supported_solvers=True)
+
+    def _reset_static_admm_state_by_world(self, world_mask: wp.array) -> None:
+        """Reset selected static rows without disturbing dynamic contact state."""
+        for name, entry in self._entries.items():
+            buf = self._admm_buffers[name]
+            snapshots = (
+                (entry.state_0.body_q, buf.body_q_n, entry.view.body_world),
+                (entry.state_0.body_qd, buf.body_qd_n, entry.view.body_world),
+                (entry.state_0.body_qd, buf.body_qd_k, entry.view.body_world),
+                (entry.state_0.particle_q, buf.particle_q_n, entry.view.particle_world),
+                (entry.state_0.particle_qd, buf.particle_qd_n, entry.view.particle_world),
+                (entry.state_0.particle_qd, buf.particle_qd_k, entry.view.particle_world),
+                (entry.state_0.joint_q, buf.joint_q_n, entry.joint_coord_world),
+                (entry.state_0.joint_qd, buf.joint_qd_n, entry.joint_dof_world),
+                (entry.state_0.joint_qd, buf.joint_qd_k, entry.joint_dof_world),
+            )
+            for src, dst, entity_world in snapshots:
+                if src is not None and dst is not None:
+                    copy_selected_rows(src, dst, entity_world, world_mask)
+            for values, entity_world in (
+                (buf.body_f, entry.view.body_world),
+                (buf.particle_f, entry.view.particle_world),
+            ):
+                if values is not None:
+                    zero_selected_rows(values, entity_world, world_mask)
+
+        for group in (
+            *self._admm_rr_groups,
+            *self._admm_rr_angular_groups,
+            *self._admm_rr_revolute_angular_groups,
+            *self._admm_rr_angular_friction_groups,
+            *self._admm_rp_groups,
+        ):
+            u_target = getattr(group, "u_target", group.u)
+            has_u_target = int(hasattr(group, "u_target"))
+            wp.launch(
+                reset_static_admm_rows_kernel,
+                dim=group.count,
+                inputs=[group.world_ids, world_mask, group.u, group.lambda_, group.Jv, u_target, has_u_target],
+                device=self.model.device,
+            )
+
+    def _reset_dynamic_admm_state_by_world(self, world_mask: wp.array) -> None:
+        """Reset selected dynamic rows while retaining dense contact snapshots."""
+        for group in (
+            *self._admm_dynamic_rr_contact_groups,
+            *self._admm_dynamic_rp_contact_groups,
+            *self._admm_dynamic_pp_contact_groups,
+        ):
+            wp.launch(
+                reset_dynamic_admm_rows_kernel,
+                dim=group.count,
+                inputs=[group.world_ids, world_mask, group.u, group.lambda_, group.Jv, group.u_min],
+                device=self.model.device,
+            )
+            group.active_count.zero_()
+            contact_stream = getattr(group, "contact_stream", None)
+            if contact_stream is not None:
+                contact_stream.count.zero_()
+                wp.launch(
+                    admm_contact_stream_reset_selected_rows_kernel,
+                    dim=contact_stream.capacity,
+                    inputs=[
+                        contact_stream.world_ids,
+                        world_mask,
+                        contact_stream.normal_force,
+                        contact_stream.normal_impulse,
+                    ],
+                    device=self.model.device,
+                )
+
+        # ADMM collision detection runs at the start of every coupled step.
+        # Invalidating only these matcher rows makes that pass fresh for the
+        # selected worlds while preserving sticky history elsewhere.
+        if self._admm_collision_pipeline is not None:
+            self._admm_collision_pipeline.reset_contact_matching(world_mask)
+        if self._admm_internal_contacts is not None:
+            self._admm_internal_contacts.clear(bump_generation=True)
 
     @staticmethod
     def _zero_array(array) -> None:
@@ -2445,6 +2853,7 @@ class SolverCoupledADMM(SolverCoupled):
         joint_qd_start = self.model.joint_qd_start.numpy()
         joint_friction = self.model.joint_friction.numpy()
         joint_axis = self.model.joint_axis.numpy()
+        body_world = self.model.body_world.numpy()
 
         point_items: dict[
             tuple[str, str],
@@ -2468,6 +2877,13 @@ class SolverCoupledADMM(SolverCoupled):
                 continue
 
             child_entry, parent_entry = owner_pair
+            child_world = int(body_world[child])
+            parent_world = int(body_world[parent])
+            if child_world != parent_world:
+                raise ValueError(
+                    f"ADMM cross-solver joint {joint} endpoints must live in the same world; "
+                    f"child body {child} is in world {child_world}, parent body {parent} is in world {parent_world}"
+                )
             jtype = int(joint_type[joint])
             if jtype == int(JointType.BALL):
                 point_items.setdefault((child_entry, parent_entry), []).append(
@@ -2573,6 +2989,7 @@ class SolverCoupledADMM(SolverCoupled):
             self._require_effective_mass(entry_name_b, CouplingEndpointKind.BODY)
             body_mass_np_a = self._body_effective_mass_np(entry_name_a)
             body_mass_np_b = self._body_effective_mass_np(entry_name_b)
+            world_ids = [int(body_world[item[0]]) for item in items]
             body_ids_a = [self._body_local_id(entry_name_a, item[0]) for item in items]
             points_a = [wp.vec3(*item[1]) for item in items]
             body_ids_b = [self._body_local_id(entry_name_b, item[2]) for item in items]
@@ -2590,6 +3007,7 @@ class SolverCoupledADMM(SolverCoupled):
                 _AdmmRigidRigidAttachmentGroup(
                     body_entry_name_a=entry_name_a,
                     body_entry_name_b=entry_name_b,
+                    world_ids=wp.array(world_ids, dtype=int, device=device),
                     body_ids_a=wp.array(body_ids_a, dtype=int, device=device),
                     point_a=wp.array(points_a, dtype=wp.vec3, device=device),
                     body_ids_b=wp.array(body_ids_b, dtype=int, device=device),
@@ -2605,6 +3023,7 @@ class SolverCoupledADMM(SolverCoupled):
             )
 
         for (entry_name_a, entry_name_b), items in angular_items.items():
+            world_ids = [int(body_world[item[0]]) for item in items]
             body_ids_a = [self._body_local_id(entry_name_a, item[0]) for item in items]
             frames_a = [item[1] for item in items]
             body_ids_b = [self._body_local_id(entry_name_b, item[2]) for item in items]
@@ -2620,6 +3039,7 @@ class SolverCoupledADMM(SolverCoupled):
                 _AdmmRigidRigidAngularAttachmentGroup(
                     body_entry_name_a=entry_name_a,
                     body_entry_name_b=entry_name_b,
+                    world_ids=wp.array(world_ids, dtype=int, device=device),
                     body_ids_a=wp.array(body_ids_a, dtype=int, device=device),
                     frame_a=wp.array(frames_a, dtype=wp.transform, device=device),
                     body_ids_b=wp.array(body_ids_b, dtype=int, device=device),
@@ -2635,6 +3055,7 @@ class SolverCoupledADMM(SolverCoupled):
             )
 
         for (entry_name_a, entry_name_b), items in revolute_angular_items.items():
+            world_ids = [int(body_world[item[0]]) for item in items]
             body_ids_a = [self._body_local_id(entry_name_a, item[0]) for item in items]
             frames_a = [item[1] for item in items]
             body_ids_b = [self._body_local_id(entry_name_b, item[2]) for item in items]
@@ -2650,6 +3071,7 @@ class SolverCoupledADMM(SolverCoupled):
                 _AdmmRigidRigidAngularAttachmentGroup(
                     body_entry_name_a=entry_name_a,
                     body_entry_name_b=entry_name_b,
+                    world_ids=wp.array(world_ids, dtype=int, device=device),
                     body_ids_a=wp.array(body_ids_a, dtype=int, device=device),
                     frame_a=wp.array(frames_a, dtype=wp.transform, device=device),
                     body_ids_b=wp.array(body_ids_b, dtype=int, device=device),
@@ -2665,6 +3087,7 @@ class SolverCoupledADMM(SolverCoupled):
             )
 
         for (entry_name_a, entry_name_b), items in angular_friction_items.items():
+            world_ids = [int(body_world[item[0]]) for item in items]
             body_ids_a = [self._body_local_id(entry_name_a, item[0]) for item in items]
             frames_a = [item[1] for item in items]
             body_ids_b = [self._body_local_id(entry_name_b, item[2]) for item in items]
@@ -2678,6 +3101,7 @@ class SolverCoupledADMM(SolverCoupled):
                 _AdmmRigidRigidAngularFrictionGroup(
                     body_entry_name_a=entry_name_a,
                     body_entry_name_b=entry_name_b,
+                    world_ids=wp.array(world_ids, dtype=int, device=device),
                     body_ids_a=wp.array(body_ids_a, dtype=int, device=device),
                     frame_a=wp.array(frames_a, dtype=wp.transform, device=device),
                     body_ids_b=wp.array(body_ids_b, dtype=int, device=device),
@@ -2716,6 +3140,8 @@ class SolverCoupledADMM(SolverCoupled):
         stiffness_np = coupling_ns.body_particle_attachment_stiffness.numpy()
         damping_np = coupling_ns.body_particle_attachment_damping.numpy()
         enabled_np = coupling_ns.body_particle_attachment_enabled.numpy()
+        body_world = self.model.body_world.numpy()
+        particle_world = self.model.particle_world.numpy()
 
         grouped: dict[tuple[str, str], list[tuple[int, tuple[float, float, float], int, float, float]]] = {}
         for row in range(count):
@@ -2727,6 +3153,13 @@ class SolverCoupledADMM(SolverCoupled):
                 raise IndexError(f"ADMM body-particle attachment row {row} has body index {body} out of range")
             if particle < 0 or particle >= self.model.particle_count:
                 raise IndexError(f"ADMM body-particle attachment row {row} has particle index {particle} out of range")
+            body_world_id = int(body_world[body])
+            particle_world_id = int(particle_world[particle])
+            if body_world_id != particle_world_id:
+                raise ValueError(
+                    f"ADMM body-particle attachment row {row} endpoints must live in the same world; "
+                    f"body {body} is in world {body_world_id}, particle {particle} is in world {particle_world_id}"
+                )
             stiffness = float(stiffness_np[row])
             if stiffness < 0.0:
                 raise ValueError(f"ADMM body-particle attachment row {row} has negative stiffness")
@@ -2748,6 +3181,7 @@ class SolverCoupledADMM(SolverCoupled):
             self._require_effective_mass(particle_entry, CouplingEndpointKind.PARTICLE)
             body_mass_np = self._body_effective_mass_np(body_entry)
             particle_mass_np = self._particle_effective_mass_np(particle_entry)
+            world_ids = [int(body_world[item[0]]) for item in items]
             body_ids = [self._body_local_id(body_entry, item[0]) for item in items]
             points = [wp.vec3(*item[1]) for item in items]
             particle_ids = [item[2] for item in items]
@@ -2764,6 +3198,7 @@ class SolverCoupledADMM(SolverCoupled):
                 _AdmmRigidParticleAttachmentGroup(
                     body_entry_name=body_entry,
                     particle_entry_name=particle_entry,
+                    world_ids=wp.array(world_ids, dtype=int, device=device),
                     body_ids=wp.array(body_ids, dtype=int, device=device),
                     point_body=wp.array(points, dtype=wp.vec3, device=device),
                     particle_ids=wp.array(particle_ids, dtype=int, device=device),
@@ -2876,7 +3311,6 @@ class SolverCoupledADMM(SolverCoupled):
                 contact_rr_snapshot_by_contact_kernel,
                 dim=group.count,
                 inputs=[
-                    group.active_count,
                     group.contact_ids,
                     group.active,
                     group.W,
@@ -2892,6 +3326,7 @@ class SolverCoupledADMM(SolverCoupled):
                 dim=group.count,
                 inputs=[
                     group.active_count,
+                    group.world_ids,
                     group.body_ids_a,
                     group.point_a,
                     group.offset_a,
@@ -2936,6 +3371,7 @@ class SolverCoupledADMM(SolverCoupled):
                     buf_a.body_effective_mass,
                     buf_b.body_effective_mass,
                     self.model.shape_material_mu,
+                    self.model.body_world,
                     1 if use_contact_matching else 0,
                     float(self._coupling.contact_matching_force_scale),
                     int(group.count),
@@ -2946,6 +3382,7 @@ class SolverCoupledADMM(SolverCoupled):
                     group.prev_contact_W,
                 ],
                 outputs=[
+                    group.world_ids,
                     group.body_ids_a,
                     group.point_a,
                     group.offset_a,
@@ -2998,6 +3435,7 @@ class SolverCoupledADMM(SolverCoupled):
                     dim=group.count,
                     inputs=[
                         group.active_count,
+                        group.world_ids,
                         group.body_ids,
                         group.point_body,
                         group.particle_ids,
@@ -3030,6 +3468,8 @@ class SolverCoupledADMM(SolverCoupled):
                         body_buf.body_effective_mass,
                         particle_buf.particle_effective_mass,
                         self.model.shape_material_mu,
+                        self.model.body_world,
+                        self.model.particle_world,
                         float(self.model.particle_mu),
                         int(group.count),
                         group.active_count,
@@ -3041,6 +3481,7 @@ class SolverCoupledADMM(SolverCoupled):
                         group.prev_lambda,
                     ],
                     outputs=[
+                        group.world_ids,
                         group.body_ids,
                         group.point_body,
                         group.particle_ids,
@@ -3089,6 +3530,7 @@ class SolverCoupledADMM(SolverCoupled):
                 dim=group.count,
                 inputs=[
                     group.active_count,
+                    group.world_ids,
                     group.particle_ids_a,
                     group.particle_ids_b,
                     group.active,
@@ -3127,6 +3569,7 @@ class SolverCoupledADMM(SolverCoupled):
                     contact_stream.particle_a,
                     contact_stream.particle_b,
                     contact_stream.normal,
+                    contact_stream.world_ids,
                     contact_stream.source_id,
                 ],
                 device=self.model.device,
@@ -3141,6 +3584,7 @@ class SolverCoupledADMM(SolverCoupled):
                     contact_stream.normal,
                     self._admm_buffers[group.particle_entry_name_a].particle_effective_mass,
                     self._admm_buffers[group.particle_entry_name_b].particle_effective_mass,
+                    self.model.particle_world,
                     float(self.model.particle_mu),
                     int(group.count),
                     group.active_count,
@@ -3152,6 +3596,7 @@ class SolverCoupledADMM(SolverCoupled):
                     group.prev_lambda,
                 ],
                 outputs=[
+                    group.world_ids,
                     group.particle_ids_a,
                     group.particle_ids_b,
                     group.active,
@@ -3229,6 +3674,7 @@ class SolverCoupledADMM(SolverCoupled):
                     lambda_=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     Jv=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     u_min=wp.zeros(capacity, dtype=float, device=device),
+                    world_ids=wp.full(capacity, -1, dtype=int, device=device),
                     capacity=capacity,
                     active_count=wp.zeros(1, dtype=int, device=device),
                     active_count_max=wp.zeros(1, dtype=int, device=device),
@@ -3302,6 +3748,7 @@ class SolverCoupledADMM(SolverCoupled):
                     lambda_=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     Jv=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     u_min=wp.zeros(capacity, dtype=float, device=device),
+                    world_ids=wp.full(capacity, -1, dtype=int, device=device),
                     capacity=capacity,
                     active_count=wp.zeros(1, dtype=int, device=device),
                     active_count_max=wp.zeros(1, dtype=int, device=device),
@@ -3369,6 +3816,7 @@ class SolverCoupledADMM(SolverCoupled):
                     lambda_=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     Jv=wp.zeros(capacity, dtype=wp.vec3, device=device),
                     u_min=wp.zeros(capacity, dtype=float, device=device),
+                    world_ids=wp.full(capacity, -1, dtype=int, device=device),
                     capacity=capacity,
                     active_count=wp.zeros(1, dtype=int, device=device),
                     active_count_max=wp.zeros(1, dtype=int, device=device),

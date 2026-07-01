@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
 class TestContactMatching(unittest.TestCase):
@@ -43,11 +43,92 @@ def _build_simple_scene(device):
     return model, state
 
 
+def _build_multi_world_scene(device):
+    """Build two regular worlds plus one isolated global-global contact pair."""
+    world_builder = newton.ModelBuilder()
+    body_a = world_builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+    world_builder.add_shape_sphere(body=body_a, radius=0.1)
+    body_b = world_builder.add_body(xform=wp.transform(wp.vec3(0.19, 0.0, 0.0)))
+    world_builder.add_shape_sphere(body=body_b, radius=0.1)
+
+    builder = newton.ModelBuilder()
+    global_body_a = builder.add_body(xform=wp.transform(wp.vec3(10.0, 0.0, 0.0)))
+    builder.add_shape_sphere(body=global_body_a, radius=0.1)
+    global_body_b = builder.add_body(xform=wp.transform(wp.vec3(10.19, 0.0, 0.0)))
+    builder.add_shape_sphere(body=global_body_b, radius=0.1)
+
+    builder.add_world(world_builder)
+    builder.add_world(world_builder, xform=wp.transform(wp.vec3(2.0, 0.0, 0.0)))
+
+    model = builder.finalize(device=device)
+    state = model.state()
+    return model, state
+
+
+def _contact_worlds(model, contacts, count):
+    """Return each sorted contact's effective world (shape 0 wins if local)."""
+    shape_world = model.shape_world.numpy()
+    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    world0 = shape_world[shape0]
+    world1 = shape_world[shape1]
+    return np.where(world0 >= 0, world0, world1)
+
+
+@wp.kernel
+def _select_world_mask(mask: wp.array[wp.bool], selected_world: int):
+    world = wp.tid()
+    mask[world] = world == selected_world
+
+
 def _collide_once(pipeline, state, contacts):
     """Clear and collide, returning the contact count on host."""
     contacts.clear()
     pipeline.collide(state, contacts)
     return contacts.rigid_contact_count.numpy()[0]
+
+
+def _build_overflow_pipeline(device, *, contact_matching, contact_report=False):
+    """Build a three-contact scene with capacity for only two contacts."""
+    model, state = _build_multi_world_scene(device)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        rigid_contact_max=2,
+        contact_matching=contact_matching,
+        contact_report=contact_report,
+        verify_buffers=False,
+    )
+    return model, state, pipeline, pipeline.contacts()
+
+
+def _assert_overflow_frame_bounded(test, pipeline, state, contacts, *, check_report=False):
+    """Collide once and verify raw diagnostics stay separate from matcher state."""
+    raw_count = int(_collide_once(pipeline, state, contacts))
+    capacity = pipeline.rigid_contact_max
+    test.assertGreater(raw_count, capacity)
+    test.assertEqual(raw_count, 3, "The raw diagnostics counter must retain every attempted contact")
+    test.assertEqual(
+        int(pipeline._contact_matcher.prev_contact_count.numpy()[0]),
+        capacity,
+        "Matcher history must clamp its active prefix to fixed-capacity sidecars",
+    )
+
+    match_index = contacts.rigid_contact_match_index.numpy()[:capacity]
+    test.assertTrue(np.all(match_index >= newton.geometry.MATCH_BROKEN))
+    test.assertTrue(np.all(match_index < capacity))
+
+    if check_report:
+        new_count = int(contacts.rigid_contact_new_count.numpy()[0])
+        broken_count = int(contacts.rigid_contact_broken_count.numpy()[0])
+        test.assertLessEqual(new_count, capacity)
+        test.assertLessEqual(broken_count, capacity)
+        new_indices = contacts.rigid_contact_new_indices.numpy()[:new_count]
+        broken_indices = contacts.rigid_contact_broken_indices.numpy()[:broken_count]
+        test.assertTrue(np.all(new_indices >= 0) and np.all(new_indices < capacity))
+        test.assertTrue(np.all(broken_indices >= 0) and np.all(broken_indices < capacity))
+
+    return raw_count
 
 
 # ---------------------------------------------------------------------------
@@ -387,10 +468,199 @@ def test_matching_disabled_no_allocation(test, device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
         contacts = pipeline.contacts()
+        pipeline.reset_contact_matching()
         test.assertIsNone(contacts.rigid_contact_match_index)
         test.assertIsNone(contacts.rigid_contact_new_indices)
         test.assertIsNone(contacts.rigid_contact_broken_indices)
         test.assertEqual(pipeline.contact_matching, "disabled")
+
+
+def test_world_selective_reset_preserves_other_worlds_and_global(test, device):
+    """A partial reset restarts one world while preserving other/global history."""
+    with wp.ScopedDevice(device):
+        model, state = _build_multi_world_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+            contact_report=True,
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, 3)
+        worlds1 = _contact_worlds(model, contacts, count1)
+        np.testing.assert_array_equal(np.sort(worlds1), np.array([-1, 0, 1], dtype=np.int32))
+
+        # Establish that every row has matchable history before resetting.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count2, count1)
+        test.assertTrue(np.all(contacts.rigid_contact_match_index.numpy()[:count2] >= 0))
+
+        pipeline.reset_contact_matching(wp.array([True, False], dtype=wp.bool, device=device))
+
+        count3 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count3, count1)
+        worlds3 = _contact_worlds(model, contacts, count3)
+        match3 = contacts.rigid_contact_match_index.numpy()[:count3]
+
+        # An invalid-only prior pair is new, not broken.  Unselected regular
+        # history and global-global history remain matchable.
+        test.assertTrue(np.all(match3[worlds3 == 0] == newton.geometry.MATCH_NOT_FOUND))
+        test.assertTrue(np.all(match3[worlds3 == 1] >= 0))
+        test.assertTrue(np.all(match3[worlds3 == -1] >= 0))
+
+        new_count = contacts.rigid_contact_new_count.numpy()[0]
+        new_indices = contacts.rigid_contact_new_indices.numpy()[:new_count]
+        test.assertEqual(new_count, np.count_nonzero(worlds3 == 0))
+        test.assertTrue(np.all(worlds3[new_indices] == 0))
+        test.assertEqual(
+            contacts.rigid_contact_broken_count.numpy()[0],
+            0,
+            "Invalidated prior rows must not be reported as broken",
+        )
+
+        # Saving frame 3 revalidates its current rows, so every world matches
+        # again on the following stable frame.
+        count4 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count4, count1)
+        test.assertTrue(np.all(contacts.rigid_contact_match_index.numpy()[:count4] >= 0))
+
+
+def test_full_reset_contact_matching_clears_all_worlds(test, device):
+    """The no-argument reset remains a full reset, including global history."""
+    with wp.ScopedDevice(device):
+        model, state = _build_multi_world_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+            contact_report=True,
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        _collide_once(pipeline, state, contacts)
+        pipeline.reset_contact_matching()
+
+        count3 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count3, count1)
+        match3 = contacts.rigid_contact_match_index.numpy()[:count3]
+        test.assertTrue(np.all(match3 == newton.geometry.MATCH_NOT_FOUND))
+        test.assertEqual(contacts.rigid_contact_new_count.numpy()[0], count3)
+        test.assertEqual(contacts.rigid_contact_broken_count.numpy()[0], 0)
+
+
+def test_reset_contact_matching_mask_validation_precedes_mutation(test, device):
+    """Reject malformed masks before changing matching state, even if disabled."""
+    with wp.ScopedDevice(device):
+        model, state = _build_multi_world_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+        count = _collide_once(pipeline, state, contacts)
+
+        invalid_masks = (
+            ([True, False], TypeError),
+            (wp.zeros(model.world_count, dtype=wp.int32, device=device), TypeError),
+            (wp.zeros((1, model.world_count), dtype=wp.bool, device=device), ValueError),
+            (wp.zeros(model.world_count + 1, dtype=wp.bool, device=device), ValueError),
+        )
+        for world_mask, error_type in invalid_masks:
+            with test.assertRaises(error_type):
+                pipeline.reset_contact_matching(world_mask)
+
+        if wp.is_cuda_available():
+            other_device = wp.get_device("cpu") if device.is_cuda else wp.get_cuda_devices()[0]
+            wrong_device_mask = wp.zeros(model.world_count, dtype=wp.bool, device=other_device)
+            with test.assertRaises(ValueError):
+                pipeline.reset_contact_matching(wrong_device_mask)
+
+        # None of the rejected calls may have invalidated the populated state.
+        stable_count = _collide_once(pipeline, state, contacts)
+        test.assertEqual(stable_count, count)
+        test.assertTrue(np.all(contacts.rigid_contact_match_index.numpy()[:stable_count] >= 0))
+
+        pipeline_disabled = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="disabled")
+        pipeline_disabled.reset_contact_matching(wp.array([True, False], dtype=wp.bool, device=device))
+        with test.assertRaises(TypeError):
+            pipeline_disabled.reset_contact_matching(wp.zeros(model.world_count, dtype=wp.int32, device=device))
+
+
+def test_overflow_latest_clamps_matcher_history(test, device):
+    """LATEST keeps raw overflow diagnostics but bounds persisted history."""
+    with wp.ScopedDevice(device):
+        _model, state, pipeline, contacts = _build_overflow_pipeline(device, contact_matching="latest")
+
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts)
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts)
+
+
+def test_overflow_contact_report_indices_bounded(test, device):
+    """Overflow cannot create report counts or indices beyond contact capacity."""
+    with wp.ScopedDevice(device):
+        _model, state, pipeline, contacts = _build_overflow_pipeline(
+            device,
+            contact_matching="latest",
+            contact_report=True,
+        )
+
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts, check_report=True)
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts, check_report=True)
+
+
+def test_overflow_masked_reset_stays_bounded(test, device):
+    """Masked reset only consumes the fixed-capacity overflow history prefix."""
+    with wp.ScopedDevice(device):
+        model, state, pipeline, contacts = _build_overflow_pipeline(
+            device,
+            contact_matching="latest",
+            contact_report=True,
+        )
+
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts, check_report=True)
+        pipeline.reset_contact_matching(wp.array([True, True], dtype=wp.bool, device=device))
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts, check_report=True)
+
+        worlds = _contact_worlds(model, contacts, pipeline.rigid_contact_max)
+        match_index = contacts.rigid_contact_match_index.numpy()[: pipeline.rigid_contact_max]
+        regular = worlds >= 0
+        test.assertTrue(regular.any())
+        test.assertTrue(np.all(match_index[regular] == newton.geometry.MATCH_NOT_FOUND))
+        test.assertTrue(np.all(match_index[~regular] >= 0))
+
+
+def test_reset_contact_matching_graph_reads_device_mutated_mask(test, device):
+    """Captured reset replays against mask values changed later on the device."""
+    with wp.ScopedDevice(device):
+        model, state = _build_multi_world_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        count = _collide_once(pipeline, state, contacts)
+        _collide_once(pipeline, state, contacts)
+        world_mask = wp.zeros(model.world_count, dtype=wp.bool, device=device)
+
+        # Warm up reset before capture so compilation is outside the graph.
+        pipeline.reset_contact_matching(world_mask)
+        with wp.ScopedCapture(device=device) as capture:
+            pipeline.reset_contact_matching(world_mask)
+        graph = capture.graph
+
+        for selected_world in (0, 1):
+            wp.launch(
+                _select_world_mask,
+                dim=model.world_count,
+                inputs=[world_mask, selected_world],
+                device=device,
+            )
+            wp.capture_launch(graph)
+
+            replay_count = _collide_once(pipeline, state, contacts)
+            test.assertEqual(replay_count, count)
+            worlds = _contact_worlds(model, contacts, replay_count)
+            match_index = contacts.rigid_contact_match_index.numpy()[:replay_count]
+            test.assertTrue(np.all(match_index[worlds == selected_world] == newton.geometry.MATCH_NOT_FOUND))
+            test.assertTrue(np.all(match_index[worlds != selected_world] >= 0))
 
 
 def test_match_index_valid_after_sort(test, device):
@@ -640,6 +910,65 @@ def test_sticky_unmatched_rows_pass_through(test, device):
         )
 
 
+def test_sticky_world_selective_reset_does_not_replay_invalid_history(test, device):
+    """Sticky replay leaves a reset world's fresh narrow-phase geometry intact."""
+    with wp.ScopedDevice(device):
+        model, state = _build_multi_world_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, 3)
+        worlds1 = _contact_worlds(model, contacts, count1)
+        normal1 = contacts.rigid_contact_normal.numpy()[:count1].copy()
+
+        pipeline.reset_contact_matching(wp.array([True, False], dtype=wp.bool, device=device))
+
+        # Tilt only world 0's sphere-sphere normal by a small amount.  It is
+        # still within normal matching thresholds, so stale valid history
+        # would replay the old normal and make this test fail.
+        body_world = model.body_world.numpy()
+        world0_bodies = np.flatnonzero(body_world == 0)
+        test.assertEqual(len(world0_bodies), 2)
+        q = state.body_q.numpy()
+        q[world0_bodies[1]][1] += 0.0001
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        fresh_pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
+        fresh_contacts = fresh_pipeline.contacts()
+        fresh_count = _collide_once(fresh_pipeline, state, fresh_contacts)
+        test.assertEqual(fresh_count, count1)
+        fresh_worlds = _contact_worlds(model, fresh_contacts, fresh_count)
+        fresh_normal = fresh_contacts.rigid_contact_normal.numpy()[:fresh_count]
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count2, count1)
+        worlds2 = _contact_worlds(model, contacts, count2)
+        match2 = contacts.rigid_contact_match_index.numpy()[:count2]
+        normal2 = contacts.rigid_contact_normal.numpy()[:count2]
+
+        test.assertTrue(np.all(match2[worlds2 == 0] == newton.geometry.MATCH_NOT_FOUND))
+        test.assertTrue(np.all(match2[worlds2 != 0] >= 0))
+        test.assertFalse(
+            np.array_equal(normal1[worlds1 == 0], fresh_normal[fresh_worlds == 0]),
+            "Precondition: perturbation must change world 0's fresh contact normal",
+        )
+        np.testing.assert_array_equal(
+            normal2[worlds2 == 0],
+            fresh_normal[fresh_worlds == 0],
+            err_msg="Sticky replay must not restore invalidated world 0 history",
+        )
+
+
+def test_overflow_sticky_replay_stays_bounded(test, device):
+    """STICKY replay never indexes beyond its fixed-capacity saved geometry."""
+    with wp.ScopedDevice(device):
+        _model, state, pipeline, contacts = _build_overflow_pipeline(device, contact_matching="sticky")
+
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts)
+        _assert_overflow_frame_bounded(test, pipeline, state, contacts)
+
+
 def test_sticky_disabled_no_sticky_buffers(test, device):
     """LATEST and DISABLED modes must not allocate sticky buffers."""
     with wp.ScopedDevice(device):
@@ -669,6 +998,7 @@ def test_sticky_disabled_no_sticky_buffers(test, device):
 # ---------------------------------------------------------------------------
 
 devices = get_test_devices()
+cuda_devices = get_cuda_test_devices()
 
 add_function_test(
     TestContactMatching, "test_first_frame_all_not_found", test_first_frame_all_not_found, devices=devices
@@ -707,6 +1037,48 @@ add_function_test(
     TestContactMatching, "test_matching_disabled_no_allocation", test_matching_disabled_no_allocation, devices=devices
 )
 add_function_test(
+    TestContactMatching,
+    "test_world_selective_reset_preserves_other_worlds_and_global",
+    test_world_selective_reset_preserves_other_worlds_and_global,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_full_reset_contact_matching_clears_all_worlds",
+    test_full_reset_contact_matching_clears_all_worlds,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_reset_contact_matching_mask_validation_precedes_mutation",
+    test_reset_contact_matching_mask_validation_precedes_mutation,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_overflow_latest_clamps_matcher_history",
+    test_overflow_latest_clamps_matcher_history,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_overflow_contact_report_indices_bounded",
+    test_overflow_contact_report_indices_bounded,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_overflow_masked_reset_stays_bounded",
+    test_overflow_masked_reset_stays_bounded,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_reset_contact_matching_graph_reads_device_mutated_mask",
+    test_reset_contact_matching_graph_reads_device_mutated_mask,
+    devices=cuda_devices,
+)
+add_function_test(
     TestContactMatching, "test_match_index_valid_after_sort", test_match_index_valid_after_sort, devices=devices
 )
 add_function_test(
@@ -727,6 +1099,18 @@ add_function_test(
     TestContactMatchingSticky,
     "test_sticky_unmatched_rows_pass_through",
     test_sticky_unmatched_rows_pass_through,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_world_selective_reset_does_not_replay_invalid_history",
+    test_sticky_world_selective_reset_does_not_replay_invalid_history,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_overflow_sticky_replay_stays_bounded",
+    test_overflow_sticky_replay_stays_bounded,
     devices=devices,
 )
 add_function_test(

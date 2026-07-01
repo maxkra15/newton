@@ -98,6 +98,55 @@ notifications arrive. Direct writes through returned Warp arrays are not
 intercepted, so view-local edits should go through the coupled-solver API that
 owns the view.
 
+Entry-local Configuration and Collision
+---------------------------------------
+
+Use ``Entry.configure_view`` for deliberate, entry-local model overrides. The
+callback runs after ownership masks are applied and before the entry collision
+provider and solver are constructed. Assigning an array on the view creates an
+overlay; it does not replace the parent-model array. For example, this entry
+uses different friction and owns its own collision pipeline:
+
+.. code-block:: python
+
+   import newton
+   import warp as wp
+
+   from newton.solvers import SolverMuJoCo
+   from newton.solvers.experimental.coupled import SolverCoupled
+
+   def configure_rigid_view(view):
+       friction = wp.clone(view.shape_material_mu)
+       friction.fill_(0.8)
+       view.shape_material_mu = friction
+
+   rigid_entry = SolverCoupled.Entry(
+       name="rigid",
+       solver=lambda view: SolverMuJoCo(
+           model=view,
+           use_mujoco_contacts=False,
+       ),
+       bodies=rigid_body_ids,
+       shapes=rigid_shape_ids,
+       configure_view=configure_rigid_view,
+       collision_pipeline=lambda view: newton.CollisionPipeline(
+           view,
+           contact_matching="latest",
+       ),
+       collide_interval=2,
+   )
+
+An entry-local provider receives the finalized :class:`ModelView`, including
+the ``configure_view`` overlay, shape visibility, compact namespace when
+requested, and filtered shape pairs. Its persistent contact buffer takes
+precedence over outer contacts for that entry. ``collide_interval`` counts
+outer coupled steps, not entry substeps; ``None`` refreshes every outer step.
+Returning ``None`` from the factory keeps the outer-contact fallback only when
+``preserve_shape_ids=True``. Compact entries use entry-local shape IDs, so they
+receive no contacts unless the factory supplies an entry-local provider. A
+reset clears the current provider contacts and cadence so the next step
+refreshes collision even when the interval is greater than one.
+
 Coupling Hooks
 --------------
 
@@ -139,6 +188,88 @@ Force injection itself is not a hook. Couplers write into public
 call the normal solver step. Likewise, virtual and proximal mass changes are
 applied to a ``ModelView`` and refreshed through the usual
 ``notify_model_changed()`` path when a solver must rebuild private caches.
+
+Contact Streams, Reset, and Graph Capture
+-----------------------------------------
+
+Contact stream selection
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+A coupled solve can use several contact buffers at once. Select the buffer you
+intend by its stable stream name instead of assuming that one aggregate
+``Contacts`` object represents the whole solve:
+
+.. code-block:: python
+
+   streams = {
+       stream.name: stream
+       for stream in coupled.contact_streams(outer_contacts)
+   }
+   rigid_stream = streams["entry/rigid"]
+   counts = rigid_stream.diagnostics()
+   readable_rigid_rows = min(
+       max(counts.rigid_count, 0),
+       counts.rigid_capacity,
+   )
+
+``contact_streams()`` may report ``outer``, ``entry/<name>``,
+``proxy/<source>/<destination>``, and ``admm/internal`` buffers. Enumeration is
+zero-copy and performs no filtering, collision update, device allocation, or
+host synchronization. Pass ``outer_contacts`` explicitly before the first
+successful step; otherwise the method uses the last successfully stepped outer
+buffer. A failed or incomplete step publishes no streams.
+
+The returned descriptors borrow live buffers and optional local-to-parent ID
+maps. Treat them as read-only and do not retain them beyond the coupled solver's
+lifetime. ``forces_available`` is ``False`` unless the complete stream has a
+standardized force representation. Calling ``diagnostics()`` is deliberately
+different from enumeration: it reads the device counters on the host and
+reports raw counts, capacities, and overflow. Clamp raw counts to capacity, as
+above, before indexing fixed-size contact arrays.
+
+World-selective reset
+~~~~~~~~~~~~~~~~~~~~~
+
+The reset mask is a one-dimensional Warp Boolean array on the model device,
+with one element per regular world:
+
+.. code-block:: python
+
+   import warp as wp
+
+   selected_worlds = wp.array(
+       [True, False],
+       dtype=wp.bool,
+       device=coupled.device,
+   )
+   coupled.reset(state, world_mask=selected_worlds)
+
+A partial reset clears selected entry state, transient forces, coupling warm
+starts, and contact-matching history while preserving unselected worlds.
+Global entities use world ID ``-1`` and are never selected by a partial mask.
+Current contact buffers and host collision cadence are invalidated globally so
+the next step performs fresh collision detection; unselected and global matcher
+history remains available to that pass. Omit ``world_mask`` for a full reset.
+
+CUDA graph lifecycle
+~~~~~~~~~~~~~~~~~~~~
+
+Query graph support after constructing the complete solver hierarchy, then
+prepare persistent buffers before capture:
+
+.. code-block:: python
+
+   if not coupled.supports_cuda_graph_capture:
+       raise RuntimeError("coupled configuration is not graph-capturable")
+
+   coupled.prepare_cuda_graph_capture(outer_contacts)
+
+``supports_cuda_graph_capture`` aggregates every entry and optional collision
+provider. Entry collision cadence must be one for capture, and dynamic sparse
+topology such as sparse implicit MPM reports unsupported. Preparation is
+idempotent, recursively prepares providers and sub-solvers, and does not step
+the simulation. Call it before capture whenever contact capacities determine
+persistent solver storage.
 
 Proxy Coupling
 --------------
@@ -213,7 +344,8 @@ Proxy-local collision detection is optional. A proxy can provide a
 the factory returns a pipeline, the coupler owns a persistent contact buffer and
 refreshes it at ``collide_interval``. If the factory returns ``None`` or no
 factory is supplied, the destination solve uses contacts passed to the outer
-``step()`` call.
+``step()`` call when the destination preserves parent shape IDs. A compact
+destination receives no outer contacts unless it has a local provider.
 
 The generic proxy loop currently supports at most two solver entries. Within
 that limit, body and particle mappings are grouped by ``(source,
@@ -305,6 +437,49 @@ This keeps the implementation compatible with solvers that can provide an
 articulated mass estimate, such as MuJoCo Warp, while still allowing simpler
 solvers to participate.
 
+Coupling Diagnostics
+--------------------
+
+Proxy diagnostics expose the exact live feedback and Aitken arrays for one
+direction. They do not copy arrays or synchronize with the host:
+
+.. code-block:: python
+
+   body_feedback = proxy_solver.proxy_body_feedback("rigid", "soft")
+   for source_ids, proxy_ids, forces in zip(
+       body_feedback.source_body_ids,
+       body_feedback.proxy_body_ids,
+       body_feedback.forces,
+       strict=True,
+   ):
+       # ``forces`` is parent-model-sized and indexed at ``proxy_ids``.
+       consume_body_feedback(source_ids, proxy_ids, forces)
+
+   relaxation = proxy_solver.proxy_relaxation_diagnostics("rigid", "soft")
+
+Body and particle feedback mappings remain separate and retain configuration
+order. Consumers must treat all borrowed arrays as read-only. Fixed relaxation
+uses the configured scalar. Aitken ``body_current`` and ``particle_current``
+arrays use slot ``0`` for global entities and slot ``world_id + 1`` for a
+regular world. A missing direction or requested entity kind raises
+:class:`KeyError`.
+
+ADMM reductions are also on demand:
+
+.. code-block:: python
+
+   summary = admm_solver.diagnostics()
+   current_contact_count = int(summary.contact_count.numpy()[0])
+   for interface in summary.interfaces:
+       primal = float(interface.primal_residual_norm.numpy()[0])
+       dual = float(interface.dual_residual_norm.numpy()[0])
+
+Calling ``diagnostics()`` launches device reductions into stable, read-only
+one-element arrays without changing simulation state. It adds no work to an
+ordinary ``step()``. Reading those arrays with ``numpy()`` synchronizes with the
+host. ``contact_count`` and ``contact_count_max`` are capacity-clamped;
+``contact_overflow`` reports raw excess rows.
+
 Choosing Proxy or ADMM Coupling
 -------------------------------
 
@@ -339,6 +514,27 @@ notifications. The notification hook keeps private previous-body state aligned
 when proxy poses are synchronized or ADMM iterations restart. The harvest path
 reduces final rigid-rigid and body-particle contact forces onto proxy bodies
 instead of relying on aggregate momentum differences.
+
+VBD can update several structural joint modes in one validated transaction:
+
+.. code-block:: python
+
+   from newton.solvers import SolverVBD
+
+   vbd.set_joint_constraint_modes(
+       [shoulder_joint, elbow_joint],
+       hard=[True, False],
+   )
+   vbd.set_joint_constraint_modes(
+       cable_joint_ids,
+       hard=False,
+       slot=SolverVBD.JointSlot.BEND,
+   )
+
+All indices, modes, and structural slots are validated before device state is
+changed. The call updates captured buffers in place; switching a slot to soft
+clears its persistent lambda and reference state. Call this API before CUDA
+graph capture.
 
 Implicit MPM supports proxy body and proxy particle rewind/harvest hooks.
 Transfer-active proxy particles can participate in P2G/G2P momentum transfer

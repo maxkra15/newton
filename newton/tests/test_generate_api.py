@@ -64,5 +64,28 @@ class TestGenerateApiCopyright(unittest.TestCase):
                 )
 
 
+@unittest.skipUnless(generate_api is not None, "requires the docs/ package (source checkout only)")
+class TestGenerateApiDataclasses(unittest.TestCase):
+    def tearDown(self):
+        generate_api._COPYRIGHT_LINES.clear()
+
+    def test_solver_submodule_excludes_dataclass_fields_already_described_in_docstring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            with (
+                mock.patch.object(generate_api, "OUTPUT_DIR", output_dir),
+                mock.patch.object(generate_api, "REPO_ROOT", output_dir),
+            ):
+                generate_api.write_module_page("newton.solvers.experimental.coupled", set())
+
+            page = (output_dir / "newton_solvers_experimental_coupled.rst").read_text(encoding="utf-8")
+            self.assertIn(
+                ".. autoclass:: ProxyBodyFeedback\n"
+                "   :exclude-members: source, destination, source_body_ids, proxy_body_ids, forces",
+                page,
+            )
+            self.assertNotIn(".. autoclass:: CoupledContactDiagnostics\n   :exclude-members:", page)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

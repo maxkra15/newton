@@ -435,6 +435,12 @@ class CouplingInterface:
         momentum change. Proxy-static and proxy-proxy rigid contacts therefore
         must not be passed through as solver contacts because they would feed
         constraints between virtual objects back to the source.
+
+        Overrides may return ``None`` to disable contacts or a replacement
+        :class:`~newton.Contacts` buffer. A distinct replacement must use shape
+        and particle ids in the destination solver's :class:`ModelView`
+        namespace, be allocated on that view's device, and have the same rigid
+        and soft capacities as the input buffer.
         """
         del state, contacts_freshly_detected
         if contacts is None or contacts.rigid_contact_count is None or contacts.rigid_contact_max == 0:

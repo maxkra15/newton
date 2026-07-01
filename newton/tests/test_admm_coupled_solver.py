@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import math
 import unittest
+from dataclasses import FrozenInstanceError
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.coupled import admm_utils
 from newton._src.solvers.coupled.interface import CouplingInterface
 from newton.solvers import (
     SolverBase,
@@ -24,6 +26,7 @@ from newton.solvers import (
     SolverVBD,
     SolverXPBD,
 )
+from newton.solvers.experimental import coupled as coupled_api
 from newton.solvers.experimental.coupled import (
     SolverCoupled,
     SolverCoupledADMM,
@@ -67,6 +70,19 @@ class _KinematicAdmmPlaneSolver(_CustomAdmmParticleCopySolver):
             inputs=[state_out.body_q, state_out.body_qd, self.angle],
             device=self.model.device,
         )
+
+
+class _FailingAdmmCopySolver(_CustomAdmmParticleCopySolver):
+    """ADMM test solver with an opt-in step failure."""
+
+    def __init__(self, model):
+        super().__init__(model)
+        self.fail = False
+
+    def step(self, state_in, state_out, control, contacts, dt):
+        if self.fail:
+            raise RuntimeError("intentional ADMM step failure")
+        super().step(state_in, state_out, control, contacts, dt)
 
 
 def _build_cloth_rigid_scene(
@@ -942,6 +958,949 @@ class TestAdmmBodyParticleAttachment(unittest.TestCase):
         self.assertLess(final_gap, 0.5 * initial_gap)
 
 
+class TestAdmmReset(unittest.TestCase):
+    """World-masked reset behavior for static and dynamic ADMM state."""
+
+    _STATIC_RESET_ATTRS = ("u", "lambda_", "Jv", "u_target")
+    _DYNAMIC_RESET_ATTRS = ("u", "lambda_", "Jv", "u_min")
+
+    @staticmethod
+    def _build_solver() -> tuple[newton.Model, SolverCoupledADMM]:
+        template = newton.ModelBuilder(gravity=0.0)
+
+        def add_body(x: float) -> int:
+            return template.add_body(
+                xform=wp.transform(p=wp.vec3(x, 0.0, 0.0), q=wp.quat_identity()),
+                mass=1.0,
+                inertia=wp.mat33(np.eye(3) * 0.1),
+            )
+
+        fixed_parent = add_body(0.0)
+        fixed_child = add_body(0.2)
+        revolute_parent = add_body(0.4)
+        revolute_child = add_body(0.6)
+        ball_parent = add_body(0.8)
+        ball_child = add_body(1.0)
+        attachment_body = add_body(1.2)
+        owned_body = add_body(1.6)
+        template.add_shape_sphere(fixed_parent, radius=0.05)
+        template.add_shape_sphere(fixed_child, radius=0.05)
+        template.add_joint_fixed(parent=fixed_parent, child=fixed_child, collision_filter_parent=False)
+        template.add_joint_revolute(
+            parent=revolute_parent,
+            child=revolute_child,
+            axis=(1.0, 0.0, 0.0),
+            friction=0.4,
+            collision_filter_parent=False,
+        )
+        template.add_joint_ball(
+            parent=ball_parent,
+            child=ball_child,
+            friction=0.3,
+            collision_filter_parent=False,
+        )
+        owned_joint = template.add_joint_revolute(
+            parent=-1,
+            child=owned_body,
+            axis=(0.0, 0.0, 1.0),
+            collision_filter_parent=False,
+        )
+        template.add_articulation([owned_joint])
+        particle = template.add_particle(pos=(1.4, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0)
+        SolverCoupledADMM.add_body_particle_attachment(template, attachment_body, particle)
+        template.color()
+
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device="cpu")
+        model.particle_grid = None
+
+        bodies_per_world = template.body_count
+        entry_a_local = (fixed_parent, revolute_parent, ball_parent, attachment_body, owned_body)
+        entry_b_local = (fixed_child, revolute_child, ball_child)
+        entry_a_bodies = [world * bodies_per_world + body for world in range(2) for body in entry_a_local]
+        entry_b_bodies = [world * bodies_per_world + body for world in range(2) for body in entry_b_local]
+        entry_a_joints = [world * template.joint_count + owned_joint for world in range(2)]
+        solver = SolverCoupledADMM(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="a",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=entry_a_bodies,
+                    joints=entry_a_joints,
+                ),
+                SolverCoupled.Entry(
+                    name="b",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=entry_b_bodies,
+                    particles=list(range(model.particle_count)),
+                ),
+            ],
+            coupling=SolverCoupledADMM.Config(
+                iterations=1,
+                contact_pairs=[SolverCoupledADMM.ContactPair(source="a", destination="b")],
+            ),
+        )
+        return model, solver
+
+    @staticmethod
+    def _build_dynamic_contact_solver(
+        contact_kind: str,
+        *,
+        rigid_contact_matching: str = "sticky",
+        device: str = "cpu",
+    ) -> tuple[newton.Model, SolverCoupledADMM]:
+        template = newton.ModelBuilder(gravity=0.0)
+        body_a = body_b = particle_a = particle_b = -1
+
+        if contact_kind == "rr":
+            cfg = newton.ModelBuilder.ShapeConfig()
+            cfg.has_shape_collision = True
+            cfg.has_particle_collision = False
+            cfg.density = 0.0
+            body_a = template.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
+                mass=1.0,
+                inertia=wp.mat33(np.eye(3) * 0.1),
+            )
+            body_b = template.add_body(
+                xform=wp.transform(wp.vec3(0.09, 0.0, 0.0), wp.quat_identity()),
+                mass=1.0,
+                inertia=wp.mat33(np.eye(3) * 0.1),
+            )
+            template.add_shape_sphere(body_a, radius=0.05, cfg=cfg)
+            template.add_shape_sphere(body_b, radius=0.05, cfg=cfg)
+        elif contact_kind == "rp":
+            cfg = newton.ModelBuilder.ShapeConfig()
+            cfg.has_shape_collision = False
+            cfg.has_particle_collision = True
+            cfg.density = 0.0
+            body_a = template.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
+                mass=1.0,
+                inertia=wp.mat33(np.eye(3) * 0.1),
+            )
+            template.add_shape_sphere(body_a, radius=0.08, cfg=cfg)
+            particle_b = template.add_particle(
+                pos=(0.1, 0.0, 0.0),
+                vel=(0.0, 0.0, 0.0),
+                mass=1.0,
+                radius=0.05,
+            )
+        elif contact_kind == "pp":
+            particle_a = template.add_particle(
+                pos=(0.0, 0.0, 0.0),
+                vel=(0.0, 0.0, 0.0),
+                mass=1.0,
+                radius=0.05,
+            )
+            particle_b = template.add_particle(
+                pos=(0.09, 0.0, 0.0),
+                vel=(0.0, 0.0, 0.0),
+                mass=1.0,
+                radius=0.05,
+            )
+        else:
+            raise ValueError(f"Unknown dynamic contact kind {contact_kind!r}")
+
+        template.color()
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        model = builder.finalize(device=device)
+        model.particle_grid = None
+
+        if contact_kind == "rr":
+            entries = [
+                SolverCoupled.Entry(
+                    name="a",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=[world * template.body_count + body_a for world in range(2)],
+                ),
+                SolverCoupled.Entry(
+                    name="b",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=[world * template.body_count + body_b for world in range(2)],
+                ),
+            ]
+        elif contact_kind == "rp":
+            entries = [
+                SolverCoupled.Entry(
+                    name="a",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=[world * template.body_count + body_a for world in range(2)],
+                ),
+                SolverCoupled.Entry(
+                    name="b",
+                    solver=_CustomAdmmParticleCopySolver,
+                    particles=[world * template.particle_count + particle_b for world in range(2)],
+                ),
+            ]
+        else:
+            entries = [
+                SolverCoupled.Entry(
+                    name="a",
+                    solver=_CustomAdmmParticleCopySolver,
+                    particles=[world * template.particle_count + particle_a for world in range(2)],
+                ),
+                SolverCoupled.Entry(
+                    name="b",
+                    solver=_CustomAdmmParticleCopySolver,
+                    particles=[world * template.particle_count + particle_b for world in range(2)],
+                ),
+            ]
+
+        solver = SolverCoupledADMM(
+            model=model,
+            entries=entries,
+            coupling=SolverCoupledADMM.Config(
+                iterations=1,
+                rigid_contact_matching=rigid_contact_matching,
+                contact_matching_force_scale=1.0,
+                contact_pairs=[SolverCoupledADMM.ContactPair(source="a", destination="b")],
+            ),
+        )
+        return model, solver
+
+    @staticmethod
+    def _dynamic_group(solver: SolverCoupledADMM, contact_kind: str):
+        groups = {
+            "rr": solver._admm_dynamic_rr_contact_groups,
+            "rp": solver._admm_dynamic_rp_contact_groups,
+            "pp": solver._admm_dynamic_pp_contact_groups,
+        }[contact_kind]
+        if len(groups) != 1:
+            raise AssertionError(f"Expected one {contact_kind} group, found {len(groups)}")
+        return groups[0]
+
+    @classmethod
+    def _seed_dynamic_contact_state(cls, group) -> dict[str, np.ndarray]:
+        worlds = group.world_ids.numpy()
+        seeded = {}
+        for attr_index, attr in enumerate(cls._DYNAMIC_RESET_ATTRS):
+            array = getattr(group, attr)
+            if array.dtype == wp.vec3:
+                values = np.empty((group.count, 3), dtype=np.float32)
+                for row, world in enumerate(worlds):
+                    base = 10.0 * (attr_index + 1) + (float(world) if world >= 0 else 8.0)
+                    values[row] = (base, base + 0.25, base + 0.5)
+            else:
+                values = np.asarray(
+                    [10.0 * (attr_index + 1) + (float(world) if world >= 0 else 8.0) for world in worlds],
+                    dtype=np.float32,
+                )
+            array.assign(values)
+            seeded[attr] = values.copy()
+
+        stream = getattr(group, "contact_stream", None)
+        if stream is not None:
+            stream_worlds = stream.world_ids.numpy()
+            for attr_index, attr in enumerate(("normal_force", "normal_impulse"), start=1):
+                values = np.asarray(
+                    [100.0 * attr_index + (float(world) if world >= 0 else 8.0) for world in stream_worlds],
+                    dtype=np.float32,
+                )
+                getattr(stream, attr).assign(values)
+                seeded[f"stream.{attr}"] = values.copy()
+        return seeded
+
+    @staticmethod
+    def _dynamic_contact_rows(group, contact_kind: str, world: int) -> list[tuple[tuple[int, ...], np.ndarray]]:
+        active = group.active.numpy() != 0
+        worlds = group.world_ids.numpy()
+        lambda_values = group.lambda_.numpy()
+        if contact_kind == "rr":
+            columns = (group.shape_ids_a.numpy(), group.shape_ids_b.numpy(), group.point_ids.numpy())
+        elif contact_kind == "rp":
+            columns = (group.particle_ids.numpy(), group.shape_ids.numpy())
+        else:
+            columns = (group.particle_ids_a.numpy(), group.particle_ids_b.numpy())
+
+        rows = []
+        for row in np.flatnonzero(active & (worlds == world)):
+            key = tuple(int(column[row]) for column in columns)
+            rows.append((key, lambda_values[row].copy()))
+        return sorted(rows, key=lambda item: item[0])
+
+    @staticmethod
+    def _static_groups(solver: SolverCoupledADMM):
+        return (
+            *solver._admm_rr_groups,
+            *solver._admm_rr_angular_groups,
+            *solver._admm_rr_revolute_angular_groups,
+            *solver._admm_rr_angular_friction_groups,
+            *solver._admm_rp_groups,
+        )
+
+    @staticmethod
+    def _group_endpoint_worlds(solver: SolverCoupledADMM, group) -> np.ndarray:
+        if hasattr(group, "body_entry_name_a"):
+            entry_a = solver._entries[group.body_entry_name_a]
+            global_a = entry_a.body_local_to_global.numpy()[group.body_ids_a.numpy()]
+            worlds_a = solver.model.body_world.numpy()[global_a]
+            entry_b = solver._entries[group.body_entry_name_b]
+            global_b = entry_b.body_local_to_global.numpy()[group.body_ids_b.numpy()]
+            worlds_b = solver.model.body_world.numpy()[global_b]
+        else:
+            entry_a = solver._entries[group.body_entry_name]
+            global_a = entry_a.body_local_to_global.numpy()[group.body_ids.numpy()]
+            worlds_a = solver.model.body_world.numpy()[global_a]
+            entry_b = solver._entries[group.particle_entry_name]
+            global_b = entry_b.particle_local_to_global.numpy()[group.particle_ids.numpy()]
+            worlds_b = solver.model.particle_world.numpy()[global_b]
+        np.testing.assert_array_equal(worlds_a, worlds_b)
+        return worlds_a
+
+    @staticmethod
+    def _seed_array(array, offset: float) -> np.ndarray:
+        count = array.shape[0]
+        values = np.arange(count, dtype=np.float32) + offset
+        if array.dtype == wp.transform:
+            rows = np.zeros((count, 7), dtype=np.float32)
+            rows[:, 0] = values
+            rows[:, 6] = 1.0
+        elif array.dtype == wp.spatial_vector:
+            rows = np.repeat(values[:, None], 6, axis=1)
+        elif array.dtype == wp.vec3:
+            rows = np.repeat(values[:, None], 3, axis=1)
+        else:
+            rows = values
+        array.assign(rows)
+        return rows
+
+    @classmethod
+    def _seed_static_state(cls, solver: SolverCoupledADMM):
+        group_before = []
+        for group_index, group in enumerate(cls._static_groups(solver)):
+            reset_before = {}
+            for attr_index, attr in enumerate(cls._STATIC_RESET_ATTRS):
+                array = getattr(group, attr, None)
+                if array is not None:
+                    reset_before[attr] = cls._seed_array(array, 10.0 * (group_index + 1) + attr_index)
+            topology_before = {
+                name: value.numpy().copy()
+                for name, value in vars(group).items()
+                if isinstance(value, wp.array) and name not in cls._STATIC_RESET_ATTRS
+            }
+            group_before.append((group, cls._group_endpoint_worlds(solver, group), reset_before, topology_before))
+
+        buffer_before = []
+        offset = 100.0
+        for name, entry in solver._entries.items():
+            buf = solver._admm_buffers[name]
+            snapshot_rows = (
+                ("body_q_n", entry.state_0.body_q, entry.view.body_world),
+                ("body_qd_n", entry.state_0.body_qd, entry.view.body_world),
+                ("body_qd_k", entry.state_0.body_qd, entry.view.body_world),
+                ("particle_q_n", entry.state_0.particle_q, entry.view.particle_world),
+                ("particle_qd_n", entry.state_0.particle_qd, entry.view.particle_world),
+                ("particle_qd_k", entry.state_0.particle_qd, entry.view.particle_world),
+                ("joint_q_n", entry.state_0.joint_q, entry.joint_coord_world),
+                ("joint_qd_n", entry.state_0.joint_qd, entry.joint_dof_world),
+                ("joint_qd_k", entry.state_0.joint_qd, entry.joint_dof_world),
+            )
+            snapshots = []
+            for attr, source, worlds in snapshot_rows:
+                array = getattr(buf, attr)
+                if array is not None:
+                    snapshots.append((attr, source, worlds, cls._seed_array(array, offset)))
+                    offset += 10.0
+            forces = []
+            for attr, worlds in (("body_f", entry.view.body_world), ("particle_f", entry.view.particle_world)):
+                array = getattr(buf, attr)
+                if array is not None:
+                    forces.append((attr, worlds, cls._seed_array(array, offset)))
+                    offset += 10.0
+            effective = {
+                attr: value.numpy().copy()
+                for attr, value in vars(buf).items()
+                if "effective" in attr and isinstance(value, wp.array)
+            }
+            buffer_before.append((buf, snapshots, forces, effective))
+        return group_before, buffer_before
+
+    @staticmethod
+    def _seed_parent_state(state: newton.State) -> None:
+        offset = 500.0
+        for array in (
+            state.body_q,
+            state.body_qd,
+            state.particle_q,
+            state.particle_qd,
+            state.joint_q,
+            state.joint_qd,
+        ):
+            if array is not None:
+                TestAdmmReset._seed_array(array, offset)
+                offset += 100.0
+
+    def test_static_groups_have_row_aligned_world_ids(self):
+        _model, solver = self._build_solver()
+
+        group_lists = (
+            solver._admm_rr_groups,
+            solver._admm_rr_angular_groups,
+            solver._admm_rr_revolute_angular_groups,
+            solver._admm_rr_angular_friction_groups,
+            solver._admm_rp_groups,
+        )
+        self.assertTrue(all(len(groups) == 1 for groups in group_lists))
+        for group in self._static_groups(solver):
+            self.assertTrue(hasattr(group, "world_ids"))
+            np.testing.assert_array_equal(group.world_ids.numpy(), self._group_endpoint_worlds(solver, group))
+
+    def test_partial_reset_partitions_dynamic_contact_warm_starts(self):
+        for contact_kind in ("rr", "rp", "pp"):
+            with self.subTest(contact_kind=contact_kind):
+                model_reset, solver_reset = self._build_dynamic_contact_solver(contact_kind)
+                model_control, solver_control = self._build_dynamic_contact_solver(contact_kind)
+                state_reset = model_reset.state()
+                state_control = model_control.state()
+
+                solver_reset._refresh_collision_contact_groups(state_reset)
+                solver_control._refresh_collision_contact_groups(state_control)
+
+                group_reset = self._dynamic_group(solver_reset, contact_kind)
+                group_control = self._dynamic_group(solver_control, contact_kind)
+                self.assertEqual(group_reset.world_ids.shape[0], group_reset.count)
+                active_before = group_reset.active.numpy().copy()
+                worlds_before = group_reset.world_ids.numpy().copy()
+                self.assertEqual(set(worlds_before[active_before != 0]), {0, 1})
+                self.assertTrue(np.all(worlds_before[active_before == 0] == -1))
+
+                seeded_reset = self._seed_dynamic_contact_state(group_reset)
+                self._seed_dynamic_contact_state(group_control)
+                group_reset.active_count_max.fill_(group_reset.count)
+                group_control.active_count_max.fill_(group_control.count)
+                active_count_before = group_reset.active_count.numpy().copy()
+                active_count_max_before = group_reset.active_count_max.numpy().copy()
+                self.assertGreater(int(active_count_before[0]), 0)
+                self.assertLess(int(active_count_before[0]), group_reset.count)
+                collision_high_water_before = solver_reset.collision_contact_count_max
+                topology_before = {
+                    name: value.numpy().copy()
+                    for name, value in vars(group_reset).items()
+                    if isinstance(value, wp.array) and name not in self._DYNAMIC_RESET_ATTRS and name != "active_count"
+                }
+
+                stream = getattr(group_reset, "contact_stream", None)
+                if stream is not None:
+                    self.assertEqual(stream.world_ids.shape[0], stream.capacity)
+                    stream_count_before = stream.count.numpy().copy()
+                    stream_count_max_before = stream.count_max.numpy().copy()
+                    stream_worlds_before = stream.world_ids.numpy().copy()
+
+                solver_reset.reset(
+                    state_reset,
+                    world_mask=wp.array([True, False], dtype=wp.bool, device=model_reset.device),
+                )
+
+                if solver_reset._admm_internal_contacts is not None:
+                    self.assertEqual(int(solver_reset._admm_internal_contacts.rigid_contact_count.numpy()[0]), 0)
+                    self.assertEqual(int(solver_reset._admm_internal_contacts.soft_contact_count.numpy()[0]), 0)
+                np.testing.assert_array_equal(group_reset.active_count.numpy(), np.zeros_like(active_count_before))
+                np.testing.assert_array_equal(group_reset.active_count_max.numpy(), active_count_max_before)
+                self.assertEqual(solver_reset.collision_contact_count_max, collision_high_water_before)
+                for name, before in topology_before.items():
+                    np.testing.assert_array_equal(getattr(group_reset, name).numpy(), before)
+
+                selected = worlds_before == 0
+                preserved = worlds_before != 0
+                for attr in self._DYNAMIC_RESET_ATTRS:
+                    actual = getattr(group_reset, attr).numpy()
+                    expected = seeded_reset[attr].copy()
+                    expected[selected] = 0.0
+                    np.testing.assert_array_equal(actual, expected)
+                    np.testing.assert_array_equal(actual[preserved], seeded_reset[attr][preserved])
+
+                if stream is not None:
+                    np.testing.assert_array_equal(stream.count.numpy(), np.zeros_like(stream_count_before))
+                    np.testing.assert_array_equal(stream.count_max.numpy(), stream_count_max_before)
+                    stream_selected = stream_worlds_before == 0
+                    for attr in ("normal_force", "normal_impulse"):
+                        actual = getattr(stream, attr).numpy()
+                        expected = seeded_reset[f"stream.{attr}"].copy()
+                        expected[stream_selected] = 0.0
+                        np.testing.assert_array_equal(actual, expected)
+
+                solver_reset._refresh_collision_contact_groups(state_reset)
+                solver_control._refresh_collision_contact_groups(state_control)
+
+                reset_unselected = self._dynamic_contact_rows(group_reset, contact_kind, world=1)
+                control_unselected = self._dynamic_contact_rows(group_control, contact_kind, world=1)
+                self.assertEqual([key for key, _value in reset_unselected], [key for key, _value in control_unselected])
+                np.testing.assert_array_equal(
+                    np.asarray([value for _key, value in reset_unselected]),
+                    np.asarray([value for _key, value in control_unselected]),
+                )
+                self.assertTrue(any(np.any(value != 0.0) for _key, value in reset_unselected))
+
+                reset_selected = self._dynamic_contact_rows(group_reset, contact_kind, world=0)
+                control_selected = self._dynamic_contact_rows(group_control, contact_kind, world=0)
+                self.assertEqual([key for key, _value in reset_selected], [key for key, _value in control_selected])
+                self.assertTrue(all(np.all(value == 0.0) for _key, value in reset_selected))
+                self.assertTrue(any(np.any(value != 0.0) for _key, value in control_selected))
+                np.testing.assert_array_equal(group_reset.active_count_max.numpy(), active_count_max_before)
+                self.assertEqual(solver_reset.collision_contact_count_max, collision_high_water_before)
+
+    def test_partial_reset_forces_selected_sticky_rigid_contacts_fresh(self):
+        model, solver = self._build_dynamic_contact_solver("rr", rigid_contact_matching="sticky")
+        state = model.state()
+        solver._refresh_collision_contact_groups(state)
+        group = self._dynamic_group(solver, "rr")
+        old_selected_normal = group.normal.numpy()[(group.active.numpy() != 0) & (group.world_ids.numpy() == 0)].copy()
+        self.assertGreater(len(old_selected_normal), 0)
+
+        body_world = model.body_world.numpy()
+        world_zero_bodies = np.flatnonzero(body_world == 0)
+        self.assertEqual(len(world_zero_bodies), 2)
+        body_q = state.body_q.numpy()
+        body_q[world_zero_bodies[1], 1] += 0.0001
+        state.body_q.assign(body_q)
+
+        fresh_model, fresh_solver = self._build_dynamic_contact_solver("rr", rigid_contact_matching="sticky")
+        fresh_state = fresh_model.state()
+        fresh_body_q = fresh_state.body_q.numpy()
+        fresh_body_q[np.flatnonzero(fresh_model.body_world.numpy() == 0)[1], 1] += 0.0001
+        fresh_state.body_q.assign(fresh_body_q)
+        fresh_solver._refresh_collision_contact_groups(fresh_state)
+        fresh_group = self._dynamic_group(fresh_solver, "rr")
+        fresh_selected_normal = fresh_group.normal.numpy()[
+            (fresh_group.active.numpy() != 0) & (fresh_group.world_ids.numpy() == 0)
+        ]
+        self.assertFalse(np.array_equal(old_selected_normal, fresh_selected_normal))
+
+        mask = wp.array([True, False], dtype=wp.bool, device=model.device)
+        solver.reset(state, world_mask=mask)
+        solver._refresh_collision_contact_groups(state)
+
+        selected_normal = group.normal.numpy()[(group.active.numpy() != 0) & (group.world_ids.numpy() == 0)]
+        np.testing.assert_array_equal(selected_normal, fresh_selected_normal)
+
+        contacts = solver._admm_internal_contacts
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        shape_body = model.shape_body.numpy()
+        worlds0 = model.body_world.numpy()[shape_body[shape0]]
+        worlds1 = model.body_world.numpy()[shape_body[shape1]]
+        contact_worlds = np.where(worlds0 >= 0, worlds0, worlds1)
+        match_index = contacts.rigid_contact_match_index.numpy()[:count]
+        self.assertTrue(np.all(match_index[contact_worlds == 0] == -1))
+        self.assertTrue(np.all(match_index[contact_worlds == 1] >= 0))
+
+    def test_dynamic_reset_kernel_preserves_global_rows_on_available_devices(self):
+        kernel = getattr(admm_utils, "reset_dynamic_admm_rows_kernel", None)
+        self.assertIsNotNone(kernel)
+        devices = [wp.get_device("cpu")]
+        if wp.is_cuda_available():
+            devices.append(wp.get_device("cuda:0"))
+
+        for device in devices:
+            with self.subTest(device=str(device)):
+                world_ids = wp.array([0, 1, -1], dtype=int, device=device)
+                world_mask = wp.array([True, False], dtype=wp.bool, device=device)
+                vector_arrays = [
+                    wp.full(3, wp.vec3(float(index + 1)), dtype=wp.vec3, device=device) for index in range(3)
+                ]
+                u_min = wp.full(3, 4.0, dtype=float, device=device)
+
+                wp.launch(kernel, dim=3, inputs=[world_ids, world_mask, *vector_arrays, u_min], device=device)
+
+                for index, array in enumerate(vector_arrays):
+                    expected = np.full((3, 3), float(index + 1), dtype=np.float32)
+                    expected[0] = 0.0
+                    np.testing.assert_array_equal(array.numpy(), expected)
+                np.testing.assert_array_equal(u_min.numpy(), np.asarray([0.0, 4.0, 4.0], dtype=np.float32))
+
+    def test_partial_reset_partitions_static_groups_and_entry_buffers(self):
+        model, solver = self._build_solver()
+        state = model.state()
+        self._seed_parent_state(state)
+        group_before, buffer_before = self._seed_static_state(solver)
+        self.assertTrue(any(buf.joint_q_n is not None for buf, _snapshots, _forces, _effective in buffer_before))
+
+        dynamic_high_water = []
+        dynamic_groups = (*solver._admm_dynamic_rr_contact_groups, *solver._admm_dynamic_rp_contact_groups)
+        self.assertGreater(len(dynamic_groups), 0)
+        for index, group in enumerate(dynamic_groups, start=1):
+            group.active_count_max.fill_(20 + index)
+            dynamic_high_water.append((group.active_count_max, group.active_count_max.numpy().copy()))
+
+        solver.reset(state, world_mask=wp.array([True, False], dtype=wp.bool, device=model.device))
+
+        for group, row_worlds, reset_before, topology_before in group_before:
+            selected = row_worlds == 0
+            for attr, before in reset_before.items():
+                expected = before.copy()
+                expected[selected] = 0.0
+                np.testing.assert_array_equal(getattr(group, attr).numpy(), expected)
+            for attr, before in topology_before.items():
+                np.testing.assert_array_equal(getattr(group, attr).numpy(), before)
+
+        for buf, snapshots, forces, effective_before in buffer_before:
+            for attr, source, worlds, before in snapshots:
+                expected = before.copy()
+                selected = worlds.numpy() == 0
+                expected[selected] = source.numpy()[selected]
+                np.testing.assert_array_equal(getattr(buf, attr).numpy(), expected)
+            for attr, worlds, before in forces:
+                expected = before.copy()
+                expected[worlds.numpy() == 0] = 0.0
+                np.testing.assert_array_equal(getattr(buf, attr).numpy(), expected)
+            for attr, before in effective_before.items():
+                np.testing.assert_array_equal(getattr(buf, attr).numpy(), before)
+
+        for array, before in dynamic_high_water:
+            np.testing.assert_array_equal(array.numpy(), before)
+
+    def test_static_reset_kernel_preserves_global_and_unselected_rows(self):
+        kernel = getattr(admm_utils, "reset_static_admm_rows_kernel", None)
+        self.assertIsNotNone(kernel)
+        world_ids = wp.array([0, 1, -1], dtype=int, device="cpu")
+        world_mask = wp.array([True, False], dtype=wp.bool, device="cpu")
+        arrays = [wp.full(3, wp.vec3(float(index + 1)), dtype=wp.vec3, device="cpu") for index in range(4)]
+
+        wp.launch(kernel, dim=3, inputs=[world_ids, world_mask, *arrays, 1], device="cpu")
+
+        for index, array in enumerate(arrays):
+            expected = np.full((3, 3), float(index + 1), dtype=np.float32)
+            expected[0] = 0.0
+            np.testing.assert_array_equal(array.numpy(), expected)
+
+    def test_body_particle_attachment_rejects_cross_world_endpoints(self):
+        template = newton.ModelBuilder(gravity=0.0)
+        template.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        template.add_particle(pos=(0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), mass=1.0)
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.replicate(template, world_count=2)
+        SolverCoupledADMM.add_body_particle_attachment(builder, body=0, particle=1)
+        model = builder.finalize(device="cpu")
+
+        with self.assertRaisesRegex(ValueError, "same world"):
+            SolverCoupledADMM(
+                model=model,
+                entries=[
+                    SolverCoupled.Entry(name="body", solver=_CustomAdmmParticleCopySolver, bodies=[0]),
+                    SolverCoupled.Entry(name="particle", solver=_CustomAdmmParticleCopySolver, particles=[1]),
+                ],
+                coupling=SolverCoupledADMM.Config(iterations=1),
+            )
+
+    def test_full_world_mask_matches_full_reset_for_static_state(self):
+        model_full, solver_full = self._build_solver()
+        model_masked, solver_masked = self._build_solver()
+        state_full = model_full.state()
+        state_masked = model_masked.state()
+        self._seed_parent_state(state_full)
+        self._seed_parent_state(state_masked)
+        self._seed_static_state(solver_full)
+        self._seed_static_state(solver_masked)
+
+        solver_full.reset(state_full)
+        solver_masked.reset(
+            state_masked,
+            world_mask=wp.array([True, True], dtype=wp.bool, device=model_masked.device),
+        )
+
+        for group_full, group_masked in zip(
+            self._static_groups(solver_full), self._static_groups(solver_masked), strict=True
+        ):
+            for attr in self._STATIC_RESET_ATTRS:
+                array_full = getattr(group_full, attr, None)
+                array_masked = getattr(group_masked, attr, None)
+                if array_full is not None:
+                    np.testing.assert_array_equal(array_masked.numpy(), array_full.numpy())
+        for name in solver_full._entries:
+            buf_full = solver_full._admm_buffers[name]
+            buf_masked = solver_masked._admm_buffers[name]
+            for attr in (
+                "body_q_n",
+                "body_qd_n",
+                "body_qd_k",
+                "particle_q_n",
+                "particle_qd_n",
+                "particle_qd_k",
+                "joint_q_n",
+                "joint_qd_n",
+                "joint_qd_k",
+                "body_f",
+                "particle_f",
+            ):
+                array_full = getattr(buf_full, attr)
+                array_masked = getattr(buf_masked, attr)
+                if array_full is not None:
+                    np.testing.assert_array_equal(array_masked.numpy(), array_full.numpy())
+
+
+class TestAdmmDiagnostics(unittest.TestCase):
+    """Public, on-demand ADMM convergence and contact diagnostics."""
+
+    @staticmethod
+    def _dynamic_groups(solver: SolverCoupledADMM):
+        return (
+            *solver._admm_dynamic_rr_contact_groups,
+            *solver._admm_dynamic_rp_contact_groups,
+            *solver._admm_dynamic_pp_contact_groups,
+        )
+
+    @classmethod
+    def _all_groups(cls, solver: SolverCoupledADMM):
+        return (*TestAdmmReset._static_groups(solver), *cls._dynamic_groups(solver))
+
+    @classmethod
+    def _seed_diagnostic_state(cls, solver: SolverCoupledADMM):
+        """Seed rows whose primal and proximal stationarity residuals are one."""
+        expected_current = 0
+        expected_max = 0
+        expected_overflow = 0
+        expected_residual_rows = 0
+
+        for group in cls._all_groups(solver):
+            if group.count == 0:
+                continue
+
+            group.u.fill_(wp.vec3(1.0, 0.0, 0.0))
+            group.Jv.zero_()
+            group.lambda_.fill_(wp.vec3(1.0, 0.0, 0.0))
+            group.W.fill_(1.0)
+            u_target = getattr(group, "u_target", None)
+            if u_target is not None:
+                u_target.zero_()
+            kappa = getattr(group, "kappa", None)
+            if kappa is not None:
+                kappa.fill_(1.0)
+            damping = getattr(group, "damping", None)
+            if damping is not None:
+                damping.zero_()
+            friction = getattr(group, "friction", None)
+            if friction is not None:
+                friction.zero_()
+            u_min = getattr(group, "u_min", None)
+            if u_min is not None:
+                u_min.fill_(-1.0e9)
+
+            active_count = getattr(group, "active_count", None)
+            if active_count is None:
+                expected_residual_rows += group.count
+                continue
+
+            active_count.fill_(group.count)
+            group.active_count_max.fill_(group.count)
+            group.active.fill_(1)
+            contact_stream = getattr(group, "contact_stream", None)
+            if contact_stream is not None:
+                contact_stream.count.fill_(contact_stream.capacity)
+                contact_stream.count_max.fill_(contact_stream.capacity)
+            expected_current += group.count
+            expected_max += group.count
+            expected_residual_rows += group.count
+
+        snapshots = [
+            (value, value.numpy().copy())
+            for group in cls._all_groups(solver)
+            for value in vars(group).values()
+            if isinstance(value, wp.array)
+        ]
+        return {
+            "contact_count": expected_current,
+            "contact_count_max": expected_max,
+            "contact_overflow": expected_overflow,
+            "residual_norm": math.sqrt(float(expected_residual_rows)),
+            "snapshots": snapshots,
+        }
+
+    def _assert_diagnostics(self, model, solver, expected):
+        diagnostics = solver.diagnostics()
+        self.assertIsInstance(diagnostics, coupled_api.AdmmDiagnostics)
+        self.assertEqual(diagnostics.iterations, solver._coupling.iterations)
+        self.assertEqual(len(diagnostics.interfaces), 1)
+
+        count_arrays = (
+            (diagnostics.contact_count, expected["contact_count"]),
+            (diagnostics.contact_count_max, expected["contact_count_max"]),
+            (diagnostics.contact_overflow, expected["contact_overflow"]),
+        )
+        for array, expected_value in count_arrays:
+            self.assertEqual(array.shape, (1,))
+            self.assertEqual(array.dtype, wp.int32)
+            self.assertEqual(array.device, model.device)
+            self.assertEqual(int(array.numpy()[0]), expected_value)
+
+        interface = diagnostics.interfaces[0]
+        self.assertIsInstance(interface, coupled_api.AdmmInterfaceDiagnostics)
+        self.assertEqual((interface.source, interface.destination), ("a", "b"))
+        for residual in (interface.primal_residual_norm, interface.dual_residual_norm):
+            self.assertEqual(residual.shape, (1,))
+            self.assertEqual(residual.dtype, wp.float32)
+            self.assertEqual(residual.device, model.device)
+            self.assertTrue(np.isfinite(residual.numpy()[0]))
+            self.assertAlmostEqual(float(residual.numpy()[0]), expected["residual_norm"], places=5)
+
+        return diagnostics
+
+    def test_public_schema_aggregates_static_and_dynamic_interfaces_without_mutation(self):
+        self.assertTrue(hasattr(coupled_api, "AdmmInterfaceDiagnostics"))
+        self.assertTrue(hasattr(coupled_api, "AdmmDiagnostics"))
+        model, solver = TestAdmmReset._build_solver()
+        expected = self._seed_diagnostic_state(solver)
+
+        diagnostics = self._assert_diagnostics(model, solver, expected)
+        diagnostics_again = solver.diagnostics()
+
+        self.assertIs(diagnostics_again, diagnostics)
+        self.assertIs(diagnostics_again.contact_count, diagnostics.contact_count)
+        self.assertIs(diagnostics_again.contact_count_max, diagnostics.contact_count_max)
+        self.assertIs(diagnostics_again.contact_overflow, diagnostics.contact_overflow)
+        self.assertIs(
+            diagnostics_again.interfaces[0].primal_residual_norm,
+            diagnostics.interfaces[0].primal_residual_norm,
+        )
+        self.assertIs(
+            diagnostics_again.interfaces[0].dual_residual_norm,
+            diagnostics.interfaces[0].dual_residual_norm,
+        )
+        for array, before in expected["snapshots"]:
+            np.testing.assert_array_equal(array.numpy(), before)
+
+        with self.assertRaises(FrozenInstanceError):
+            diagnostics.iterations = 0
+        with self.assertRaises(FrozenInstanceError):
+            diagnostics.interfaces[0].source = "replacement"
+
+    def test_masked_reset_clears_current_contact_diagnostics_but_preserves_high_water(self):
+        """Diagnostics must agree with the cleared public ADMM contact stream after reset."""
+        for contact_kind in ("rr", "rp", "pp"):
+            with self.subTest(contact_kind=contact_kind):
+                model, solver = TestAdmmReset._build_dynamic_contact_solver(contact_kind)
+                state = model.state()
+                solver._refresh_collision_contact_groups(state)
+
+                internal_streams = [stream for stream in solver.contact_streams() if stream.name == "admm/internal"]
+                if contact_kind != "pp":
+                    self.assertEqual(len(internal_streams), 1)
+                    stream_before = internal_streams[0].diagnostics()
+                    raw_count_before = stream_before.rigid_count if contact_kind == "rr" else stream_before.soft_count
+                    self.assertGreater(raw_count_before, 0)
+                diagnostics_before = solver.diagnostics()
+                current_before = int(diagnostics_before.contact_count.numpy()[0])
+                high_water_before = int(diagnostics_before.contact_count_max.numpy()[0])
+                self.assertGreater(current_before, 0)
+                self.assertGreater(high_water_before, 0)
+
+                solver.reset(
+                    state,
+                    world_mask=wp.array([True, False], dtype=wp.bool, device=model.device),
+                )
+
+                if contact_kind != "pp":
+                    stream_after = next(
+                        stream for stream in solver.contact_streams() if stream.name == "admm/internal"
+                    ).diagnostics()
+                    raw_count_after = stream_after.rigid_count if contact_kind == "rr" else stream_after.soft_count
+                    self.assertEqual(raw_count_after, 0)
+                self.assertEqual(solver.collision_contact_count, 0)
+                self.assertEqual(solver.collision_contact_count_max, high_water_before)
+                diagnostics_after = solver.diagnostics()
+                self.assertEqual(int(diagnostics_after.contact_count.numpy()[0]), 0)
+                self.assertEqual(int(diagnostics_after.contact_count_max.numpy()[0]), high_water_before)
+                self.assertEqual(int(diagnostics_after.contact_overflow.numpy()[0]), 0)
+
+    def test_particle_particle_rows_and_on_demand_updates(self):
+        self.assertTrue(hasattr(SolverCoupledADMM, "diagnostics"))
+        model, solver = TestAdmmReset._build_dynamic_contact_solver("pp")
+        expected = self._seed_diagnostic_state(solver)
+        group = solver._admm_dynamic_pp_contact_groups[0]
+        group.u.fill_(wp.vec3(1.0, 0.0, 0.0))
+        group.Jv.zero_()
+        group.lambda_.fill_(wp.vec3(1.0, 0.0, 0.0))
+        group.W.fill_(1.0)
+        group.friction.zero_()
+        group.u_min.fill_(-1.0e9)
+        diagnostics = self._assert_diagnostics(model, solver, expected)
+
+        diagnostics.contact_count.fill_(91)
+        diagnostics.contact_count_max.fill_(92)
+        diagnostics.contact_overflow.fill_(93)
+        diagnostics.interfaces[0].primal_residual_norm.fill_(94.0)
+        diagnostics.interfaces[0].dual_residual_norm.fill_(95.0)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        solver.step(state_0, state_1, control=None, contacts=None, dt=0.01)
+
+        self.assertEqual(int(diagnostics.contact_count.numpy()[0]), 91)
+        self.assertEqual(int(diagnostics.contact_count_max.numpy()[0]), 92)
+        self.assertEqual(int(diagnostics.contact_overflow.numpy()[0]), 93)
+        self.assertEqual(float(diagnostics.interfaces[0].primal_residual_norm.numpy()[0]), 94.0)
+        self.assertEqual(float(diagnostics.interfaces[0].dual_residual_norm.numpy()[0]), 95.0)
+
+        diagnostics_after_step = solver.diagnostics()
+        self.assertIs(diagnostics_after_step, diagnostics)
+        self.assertTrue(np.isfinite(diagnostics.interfaces[0].primal_residual_norm.numpy()[0]))
+        self.assertTrue(np.isfinite(diagnostics.interfaces[0].dual_residual_norm.numpy()[0]))
+
+    def test_particle_particle_detector_overflow_is_raw_and_capacity_bounded(self):
+        model, solver = TestAdmmReset._build_dynamic_contact_solver("pp")
+        group = solver._admm_dynamic_pp_contact_groups[0]
+        contact_stream = group.contact_stream
+        contact_stream.capacity = 1
+
+        contact_stream.particle_a.fill_(-11)
+        contact_stream.particle_b.fill_(-12)
+        contact_stream.normal.fill_(wp.vec3(13.0, 14.0, 15.0))
+        contact_stream.world_ids.fill_(-16)
+        contact_stream.source_id.fill_(-17)
+        tail_before = {
+            name: getattr(contact_stream, name).numpy()[contact_stream.capacity :].copy()
+            for name in ("particle_a", "particle_b", "normal", "world_ids", "source_id")
+        }
+
+        solver._refresh_collision_contact_groups(model.state())
+
+        self.assertEqual(int(contact_stream.count.numpy()[0]), 2)
+        self.assertEqual(int(contact_stream.count_max.numpy()[0]), contact_stream.capacity)
+        self.assertEqual(int(group.active_count.numpy()[0]), contact_stream.capacity)
+        self.assertEqual(int(group.active_count_max.numpy()[0]), contact_stream.capacity)
+        self.assertEqual(solver.collision_contact_count, contact_stream.capacity)
+        self.assertEqual(solver.collision_contact_count_max, contact_stream.capacity)
+        for name, expected_tail in tail_before.items():
+            np.testing.assert_array_equal(
+                getattr(contact_stream, name).numpy()[contact_stream.capacity :],
+                expected_tail,
+                err_msg=name,
+            )
+
+        u = np.full((group.count, 3), np.nan, dtype=np.float32)
+        u[0] = 0.0
+        group.u.assign(u)
+        group.Jv.zero_()
+        group.lambda_.zero_()
+        diagnostics = solver.diagnostics()
+
+        self.assertEqual(int(diagnostics.contact_count.numpy()[0]), contact_stream.capacity)
+        self.assertEqual(int(diagnostics.contact_count_max.numpy()[0]), contact_stream.capacity)
+        self.assertEqual(int(diagnostics.contact_overflow.numpy()[0]), 1)
+        self.assertEqual(float(diagnostics.interfaces[0].primal_residual_norm.numpy()[0]), 0.0)
+        self.assertEqual(float(diagnostics.interfaces[0].dual_residual_norm.numpy()[0]), 0.0)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA graph capture requires CUDA")
+    def test_diagnostics_reductions_are_graph_capturable(self):
+        self.assertTrue(hasattr(SolverCoupledADMM, "diagnostics"))
+        model, solver = TestAdmmReset._build_dynamic_contact_solver("pp", device="cuda:0")
+        expected = self._seed_diagnostic_state(solver)
+        diagnostics = self._assert_diagnostics(model, solver, expected)
+
+        with wp.ScopedCapture(device=model.device) as capture:
+            diagnostics_during_capture = solver.diagnostics()
+
+        self.assertIs(diagnostics_during_capture, diagnostics)
+        self.assertIsNotNone(capture.graph)
+        wp.capture_launch(capture.graph)
+        self.assertTrue(np.isfinite(diagnostics.interfaces[0].primal_residual_norm.numpy()[0]))
+        self.assertTrue(np.isfinite(diagnostics.interfaces[0].dual_residual_norm.numpy()[0]))
+
+
 class TestAdmmExternalForces(unittest.TestCase):
     """External forces set on ``state_in.body_f`` / ``particle_f`` by the
     caller (e.g. a viewer gizmo) must reach the sub-solvers."""
@@ -996,6 +1955,65 @@ class TestAdmmExternalForces(unittest.TestCase):
 
 class TestAdmmCollisionDetection(unittest.TestCase):
     """Collision-detected ADMM contact constraints."""
+
+    def test_internal_contacts_are_exposed_as_raw_public_stream(self):
+        model, plane_body, _, particle_ids = _build_inclined_plane_particle_box_scene(math.radians(10.0))
+        solver = _make_admm_inclined_plane_particle_box_solver(
+            model,
+            plane_body,
+            particle_ids,
+            math.radians(10.0),
+            friction=0.0,
+        )
+
+        streams = solver.contact_streams()
+
+        self.assertEqual([stream.name for stream in streams], ["admm/internal"])
+        stream = streams[0]
+        self.assertIsInstance(stream, coupled_api.CoupledContactStream)
+        self.assertEqual(stream.kind, "admm")
+        self.assertIs(stream.contacts, solver._admm_internal_contacts)
+        self.assertIsNone(stream.source)
+        self.assertIsNone(stream.destination)
+        self.assertIsNone(stream.shape_local_to_parent)
+        self.assertIsNone(stream.particle_local_to_parent)
+        self.assertFalse(stream.forces_available)
+        self.assertFalse(hasattr(coupled_api, "AdmmContactStream"))
+
+    def test_failed_step_hides_internal_contact_stream_until_reset(self):
+        model, plane_body, _, particle_ids = _build_inclined_plane_particle_box_scene(math.radians(10.0))
+        failing_solvers = []
+        solver = SolverCoupledADMM(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="plane",
+                    solver=_CustomAdmmParticleCopySolver,
+                    bodies=[plane_body],
+                ),
+                SolverCoupled.Entry(
+                    name="box",
+                    solver=lambda view: failing_solvers.append(_FailingAdmmCopySolver(view)) or failing_solvers[-1],
+                    particles=particle_ids,
+                ),
+            ],
+            coupling=SolverCoupledADMM.Config(
+                iterations=1,
+                contact_pairs=[SolverCoupledADMM.ContactPair(source="plane", destination="box")],
+            ),
+        )
+        state = model.state()
+        self.assertEqual([stream.name for stream in solver.contact_streams()], ["admm/internal"])
+
+        failing_solvers[0].fail = True
+        with self.assertRaisesRegex(RuntimeError, "intentional ADMM step failure"):
+            solver.step(state, state, control=None, contacts=None, dt=0.01)
+
+        self.assertEqual(solver.contact_streams(), ())
+        self.assertEqual(solver.contact_streams(newton.Contacts(0, 0, device=model.device)), ())
+
+        solver.reset(state)
+        self.assertEqual([stream.name for stream in solver.contact_streams()], ["admm/internal"])
 
     def test_rigid_contact_detection_rejects_cross_world_pairs(self):
         builder = newton.ModelBuilder()

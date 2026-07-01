@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -15,11 +16,13 @@ import warp as wp
 from ...geometry import ParticleFlags, ShapeFlags
 from ...sim import ModelFlags, StateFlags
 from ..solver import SolverBase
+from .contact_stream import CoupledContactStream
 from .interface import (
     CouplingEndpointKind,
     CouplingInterface,
 )
 from .model_view import ModelView, _AttributeNamespaceView
+from .reset_utils import copy_selected_mapped_rows, copy_selected_rows, validate_reset_world_mask, zero_selected_rows
 
 if TYPE_CHECKING:
     from ...sim import Contacts, Control, Model, State
@@ -40,12 +43,28 @@ def _inverse_index_map(local_to_global: wp.array, global_count: int, device) -> 
     return wp.array(mapping, dtype=int, device=device)
 
 
+def _joint_value_world_array(view: ModelView, start_name: str, value_count: int) -> wp.array:
+    """Expand per-joint world ids to per-coordinate or per-DOF world ids."""
+    if value_count == 0:
+        return wp.zeros(0, dtype=int, device=view.parent.device)
+
+    joint_count = int(view.joint_count)
+    joint_world = view.joint_world.numpy()
+    starts = getattr(view, start_name).numpy()
+    value_world = np.empty(value_count, dtype=np.int32)
+    for joint in range(joint_count):
+        value_world[int(starts[joint]) : int(starts[joint + 1])] = int(joint_world[joint])
+    return wp.array(value_world, dtype=int, device=view.parent.device)
+
+
 @dataclass(frozen=True)
 class _EntryIndexMaps:
     body_local_to_global: wp.array
     body_global_to_local: wp.array
     particle_local_to_global: wp.array
     particle_global_to_local: wp.array
+    shape_local_to_global: wp.array
+    shape_global_to_local: wp.array
     joint_coord_local_to_global: wp.array
     joint_coord_global_to_local: wp.array
     joint_dof_local_to_global: wp.array
@@ -154,10 +173,14 @@ class SolverEntry:
     body_global_to_local: wp.array
     particle_local_to_global: wp.array
     particle_global_to_local: wp.array
+    shape_local_to_global: wp.array
+    shape_global_to_local: wp.array
     joint_coord_local_to_global: wp.array
     joint_coord_global_to_local: wp.array
+    joint_coord_world: wp.array
     joint_dof_local_to_global: wp.array
     joint_dof_global_to_local: wp.array
+    joint_dof_world: wp.array
     preserve_shape_ids: bool
     in_place: bool
     state_0: State | None = None
@@ -168,6 +191,10 @@ class SolverEntry:
     has_particle_force_input: bool = False
     body_gravity_acceleration: wp.array[wp.vec3] | None = None
     particle_gravity_acceleration: wp.array[wp.vec3] | None = None
+    collision_pipeline: object | None = None
+    collision_contacts: Contacts | None = None
+    collide_interval: int = 1
+    collide_counter: int = 0
 
 
 class SolverCoupled(SolverBase, CouplingInterface):
@@ -216,6 +243,13 @@ class SolverCoupled(SolverBase, CouplingInterface):
             in_place: Whether the sub-solver may step in-place.
             preserve_shape_ids: Whether shape ids remain in the parent model
                 namespace instead of being compacted.
+            collision_pipeline: Optional factory for an entry-local collision
+                provider constructed from the finalized entry view. A factory
+                returning ``None`` falls back to outer contacts only when
+                ``preserve_shape_ids`` is true; compact entries receive no
+                contacts without an entry-local provider.
+            collide_interval: Outer coupled-step interval between entry-local
+                collision refreshes. ``None`` means every step.
         """
 
         name: str
@@ -228,6 +262,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
         substeps: int = 1
         in_place: bool = False
         preserve_shape_ids: bool = True
+        collision_pipeline: Callable[[ModelView], object | None] | None = None
+        collide_interval: int | None = None
 
     def __init__(
         self,
@@ -250,6 +286,9 @@ class SolverCoupled(SolverBase, CouplingInterface):
         self._entry_soft_contact_update: dict[str, wp.array] = {}
         self._entry_rigid_contact_src_to_dst: dict[str, wp.array] = {}
         self._entry_soft_contact_src_to_dst: dict[str, wp.array] = {}
+        self._entry_collision_refresh_results: dict[str, bool] = {}
+        self._last_outer_contacts: Contacts | None = None
+        self._contact_streams_valid = True
         self._entry_output_state_valid = False
 
         self._validate_entry_names()
@@ -392,8 +431,13 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 visible_bodies = {int(i) for i in cfg.bodies} | {int(i) for i in proxy_body_keep}
                 self._apply_global_shape_metadata(view, cfg, visible_bodies)
             self._filter_shape_contact_pairs(view)
+            collision_pipeline, collision_contacts, collide_interval = self._build_entry_collision_pipeline(cfg, view)
 
-            index_maps = self._build_entry_index_maps(view, index_lists)
+            index_maps = self._build_entry_index_maps(
+                view,
+                index_lists,
+                preserve_shape_ids=bool(cfg.preserve_shape_ids),
+            )
             body_dynamics_disabled_local_indices = self._global_indices_to_local_array(
                 body_dynamics_disabled_indices,
                 index_maps.body_global_to_local,
@@ -423,12 +467,19 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 body_global_to_local=index_maps.body_global_to_local,
                 particle_local_to_global=index_maps.particle_local_to_global,
                 particle_global_to_local=index_maps.particle_global_to_local,
+                shape_local_to_global=index_maps.shape_local_to_global,
+                shape_global_to_local=index_maps.shape_global_to_local,
                 joint_coord_local_to_global=index_maps.joint_coord_local_to_global,
                 joint_coord_global_to_local=index_maps.joint_coord_global_to_local,
+                joint_coord_world=_joint_value_world_array(view, "joint_q_start", int(view.joint_coord_count)),
                 joint_dof_local_to_global=index_maps.joint_dof_local_to_global,
                 joint_dof_global_to_local=index_maps.joint_dof_global_to_local,
+                joint_dof_world=_joint_value_world_array(view, "joint_qd_start", int(view.joint_dof_count)),
                 preserve_shape_ids=bool(cfg.preserve_shape_ids),
                 in_place=bool(cfg.in_place),
+                collision_pipeline=collision_pipeline,
+                collision_contacts=collision_contacts,
+                collide_interval=collide_interval,
             )
 
         self._after_entries_constructed()
@@ -443,6 +494,38 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 entry.state_tmp = entry.view.state()
 
         self._after_entry_states_created()
+
+    def _build_entry_collision_pipeline(
+        self,
+        cfg: SolverCoupled.Entry,
+        view: ModelView,
+    ) -> tuple[object | None, Contacts | None, int]:
+        """Construct one entry-local collision provider from its finalized view."""
+        factory = cfg.collision_pipeline
+        if factory is None:
+            if cfg.collide_interval is not None:
+                raise ValueError(
+                    f"SolverCoupled.Entry {cfg.name!r} collide_interval requires a collision_pipeline factory"
+                )
+            return None, None, 1
+        if not callable(factory):
+            raise TypeError(f"SolverCoupled.Entry {cfg.name!r} collision_pipeline must be callable")
+
+        collide_interval = 1 if cfg.collide_interval is None else cfg.collide_interval
+        if type(collide_interval) is not int or collide_interval < 1:
+            raise ValueError(f"SolverCoupled.Entry {cfg.name!r} collide_interval must be >= 1")
+
+        pipeline = factory(view)
+        if pipeline is None:
+            return None, None, collide_interval
+        contacts = getattr(pipeline, "contacts", None)
+        collide = getattr(pipeline, "collide", None)
+        if not callable(contacts) or not callable(collide):
+            raise TypeError(
+                f"SolverCoupled.Entry {cfg.name!r} collision_pipeline factory must return "
+                "an object with contacts() and collide()"
+            )
+        return pipeline, contacts(), collide_interval
 
     def _joint_state_indices(self, joints: Sequence[int]) -> tuple[wp.array, wp.array]:
         model = self.model
@@ -559,17 +642,25 @@ class SolverCoupled(SolverBase, CouplingInterface):
         view.body_shapes = self._global_shape_body_shapes(model.body_shapes, body_global_to_local, visible_shapes)
         view.shape_collision_filter_pairs = set(model.shape_collision_filter_pairs)
 
-    def _build_entry_index_maps(self, view: ModelView, index_lists: _CompactIndexMaps | None) -> _EntryIndexMaps:
+    def _build_entry_index_maps(
+        self,
+        view: ModelView,
+        index_lists: _CompactIndexMaps | None,
+        *,
+        preserve_shape_ids: bool,
+    ) -> _EntryIndexMaps:
         """Build local/global id maps for a completed entry view."""
         model = self.model
         device = model.device
         if index_lists is None:
             body_local_to_global = _identity_index_map(int(view.body_count), device)
             particle_local_to_global = _identity_index_map(int(view.particle_count), device)
+            shape_local_to_global = _identity_index_map(int(view.shape_count), device)
             joint_coord_local_to_global = _identity_index_map(int(view.joint_coord_count), device)
             joint_dof_local_to_global = _identity_index_map(int(view.joint_dof_count), device)
             body_global_to_local = _inverse_index_map(body_local_to_global, model.body_count, device)
             particle_global_to_local = _inverse_index_map(particle_local_to_global, model.particle_count, device)
+            shape_global_to_local = _inverse_index_map(shape_local_to_global, model.shape_count, device)
             joint_coord_global_to_local = _inverse_index_map(
                 joint_coord_local_to_global, model.joint_coord_count, device
             )
@@ -578,12 +669,19 @@ class SolverCoupled(SolverBase, CouplingInterface):
             frequency = model.AttributeFrequency
             body = index_lists.projections[frequency.BODY]
             particle = index_lists.projections[frequency.PARTICLE]
+            shape = index_lists.projections[frequency.SHAPE]
             joint_coord = index_lists.projections[frequency.JOINT_COORD]
             joint_dof = index_lists.projections[frequency.JOINT_DOF]
             body_local_to_global = wp.array(body.local_to_global, dtype=int, device=device)
             body_global_to_local = wp.array(body.global_to_local, dtype=int, device=device)
             particle_local_to_global = wp.array(particle.local_to_global, dtype=int, device=device)
             particle_global_to_local = wp.array(particle.global_to_local, dtype=int, device=device)
+            if preserve_shape_ids:
+                shape_local_to_global = _identity_index_map(int(view.shape_count), device)
+                shape_global_to_local = _inverse_index_map(shape_local_to_global, model.shape_count, device)
+            else:
+                shape_local_to_global = wp.array(shape.local_to_global, dtype=int, device=device)
+                shape_global_to_local = wp.array(shape.global_to_local, dtype=int, device=device)
             joint_coord_local_to_global = wp.array(joint_coord.local_to_global, dtype=int, device=device)
             joint_coord_global_to_local = wp.array(joint_coord.global_to_local, dtype=int, device=device)
             joint_dof_local_to_global = wp.array(joint_dof.local_to_global, dtype=int, device=device)
@@ -594,6 +692,8 @@ class SolverCoupled(SolverBase, CouplingInterface):
             body_global_to_local=body_global_to_local,
             particle_local_to_global=particle_local_to_global,
             particle_global_to_local=particle_global_to_local,
+            shape_local_to_global=shape_local_to_global,
+            shape_global_to_local=shape_global_to_local,
             joint_coord_local_to_global=joint_coord_local_to_global,
             joint_coord_global_to_local=joint_coord_global_to_local,
             joint_dof_local_to_global=joint_dof_local_to_global,
@@ -1730,6 +1830,59 @@ class SolverCoupled(SolverBase, CouplingInterface):
             return None
         return self._contacts_for_entry(entry, contacts)
 
+    def contact_streams(self, outer_contacts: Contacts | None = None) -> tuple[CoupledContactStream, ...]:
+        """Return zero-copy descriptors for currently known contact buffers.
+
+        Enumeration performs no device allocation, synchronization, contact
+        filtering, or collision update. Pass ``outer_contacts`` to describe a
+        caller-owned buffer before the first step; otherwise the most recent
+        successfully stepped outer buffer is used.
+
+        Args:
+            outer_contacts: Optional caller-owned outer contact buffer.
+
+        Returns:
+            Contact streams in stable outer-then-entry order.
+        """
+        if not self._contact_streams_valid:
+            return ()
+
+        selected_outer = outer_contacts if outer_contacts is not None else self._last_outer_contacts
+        streams: list[CoupledContactStream] = []
+        if selected_outer is not None:
+            streams.append(
+                CoupledContactStream(
+                    name="outer",
+                    kind="outer",
+                    contacts=selected_outer,
+                    forces_available=False,
+                )
+            )
+
+        for name in self._solver_order:
+            entry = self._entries[name]
+            entry_contacts = entry.collision_contacts
+            if entry_contacts is None:
+                filtered = self._entry_contact_buffers.get(name)
+                if (
+                    selected_outer is None
+                    or filtered is None
+                    or self._entry_contact_sources.get(name) is not selected_outer
+                ):
+                    continue
+                entry_contacts = filtered
+            streams.append(
+                CoupledContactStream(
+                    name=f"entry/{name}",
+                    kind="entry",
+                    contacts=entry_contacts,
+                    shape_local_to_parent=entry.shape_local_to_global,
+                    particle_local_to_parent=entry.particle_local_to_global,
+                    forces_available=False,
+                )
+            )
+        return tuple(streams)
+
     def entry_output_state_valid(self) -> bool:
         """Return whether entry output states reflect the last coupled step."""
         return self._entry_output_state_valid
@@ -1766,21 +1919,52 @@ class SolverCoupled(SolverBase, CouplingInterface):
         """
         if state is None:
             raise ValueError("'state' argument is required.")
+        validate_reset_world_mask(self.model, world_mask)
 
+        self._invalidate_contact_streams()
+        self._entry_output_state_valid = False
         self._distribute_state(state, iteration_restart=True)
         for entry in self._entries.values():
             entry.solver.reset(entry.state_0, world_mask=world_mask, flags=flags)
-            self._sync_entry_reset_state(entry)
+            self._sync_entry_reset_state(entry, world_mask, flags)
 
-        self._reconcile_state(state)
+        self._reconcile_state(state, world_mask=world_mask, flags=flags)
         self._reset_coupling_state(state, world_mask=world_mask, flags=flags)
-        self._clear_entry_contact_buffers()
+        self._clear_entry_contact_buffers(world_mask)
         self._rebuild_entry_solver_state_caches()
-        self._entry_output_state_valid = False
+        self._contact_streams_valid = True
 
     # ------------------------------------------------------------------
     # SolverBase interface
     # ------------------------------------------------------------------
+
+    @property
+    def supports_cuda_graph_capture(self) -> bool:
+        """Return whether every coupled entry and collision provider supports CUDA graph capture."""
+        return all(
+            entry.solver.supports_cuda_graph_capture
+            and (
+                entry.collision_pipeline is None
+                or (
+                    entry.collide_interval == 1
+                    and bool(getattr(entry.collision_pipeline, "supports_cuda_graph_capture", True))
+                )
+            )
+            for entry in self._entries.values()
+        )
+
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Prepare entry contact buffers and recursively prepare sub-solvers."""
+        self.prepare_contacts(contacts)
+        for entry in self._entries.values():
+            if entry.collision_pipeline is not None:
+                prepare_pipeline = getattr(entry.collision_pipeline, "prepare_cuda_graph_capture", None)
+                if callable(prepare_pipeline):
+                    prepare_pipeline()
+                entry_contacts = entry.collision_contacts
+            else:
+                entry_contacts = self.entry_contacts(entry.name, contacts)
+            entry.solver.prepare_cuda_graph_capture(entry_contacts)
 
     def step(
         self,
@@ -1797,28 +1981,61 @@ class SolverCoupled(SolverBase, CouplingInterface):
         need a private contact pipeline (e.g. proxy collisions, ADMM internal
         contacts) own their own buffers internally.
         """
-        self._distribute_state(state_in, dt=dt)
-        self._step_coupled(state_in, state_out, control, contacts, dt)
-        _copy_state(state_in, state_out)
-        self._reconcile_state(state_out)
+        collision_cadence_state = self._capture_collision_cadence_state()
+        self._entry_collision_refresh_results.clear()
+        self._contact_streams_valid = False
+        try:
+            self._distribute_state(state_in, dt=dt)
+            self._refresh_entry_collision_pipelines()
+            self._step_coupled(state_in, state_out, control, contacts, dt)
+            _copy_state(state_in, state_out)
+            self._reconcile_state(state_out)
+        except Exception:
+            self._restore_collision_cadence_state(collision_cadence_state)
+            self._entry_collision_refresh_results.clear()
+            self._invalidate_contact_streams()
+            self._entry_output_state_valid = False
+            raise
+        self._entry_collision_refresh_results.clear()
+        self._last_outer_contacts = contacts
         self._entry_output_state_valid = True
+        self._contact_streams_valid = True
 
     def prepare_contacts(self, contacts: Contacts | None) -> None:
         """Preallocate entry-local filtered contact buffers for graph capture."""
         if contacts is None:
             return
         for entry in self._entries.values():
-            if entry.preserve_shape_ids:
+            if entry.collision_pipeline is None and entry.preserve_shape_ids:
                 self._ensure_entry_contact_buffer(entry, contacts)
 
-    def _sync_entry_reset_state(self, entry: SolverEntry) -> None:
-        """Mirror a reset entry input state to persistent entry buffers."""
-        if entry.state_1 is not None and entry.state_1 is not entry.state_0:
-            _copy_state(entry.state_0, entry.state_1)
+    def _sync_entry_reset_state(
+        self,
+        entry: SolverEntry,
+        world_mask: wp.array | None,
+        flags: StateFlags | int | None,
+    ) -> None:
+        """Mirror reset rows to persistent entry buffers and invalidate transients."""
+        reset_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        persistent_states = tuple(
+            state for state in (entry.state_1, entry.state_tmp) if state is not None and state is not entry.state_0
+        )
 
-        for entry_state in (entry.state_0, entry.state_1):
-            if entry_state is not None:
+        if world_mask is None:
+            copy_all = reset_flags & StateFlags.ALL == StateFlags.ALL
+            for entry_state in persistent_states:
+                if copy_all:
+                    _copy_state(entry.state_0, entry_state)
+                else:
+                    _copy_reset_public_state(entry.state_0, entry_state, reset_flags)
+            for entry_state in _unique_states(entry.state_0, entry.state_1, entry.state_tmp):
                 _clear_transient_state_buffers(entry_state)
+            return
+
+        for entry_state in persistent_states:
+            _copy_selected_reset_public_state(entry.state_0, entry_state, entry, world_mask, reset_flags)
+        for entry_state in _unique_states(entry.state_0, entry.state_1, entry.state_tmp):
+            _clear_selected_transient_state_buffers(entry_state, entry, world_mask)
 
     def _reset_coupling_state(
         self,
@@ -1830,11 +2047,109 @@ class SolverCoupled(SolverBase, CouplingInterface):
         """Hook for subclasses to clear algorithm-specific reset state."""
         del state, world_mask, flags
 
-    def _clear_entry_contact_buffers(self) -> None:
+    def _invalidate_contact_streams(self) -> None:
+        """Hide stream descriptors after an incomplete step or during reset."""
+        self._last_outer_contacts = None
+        self._entry_contact_sources.clear()
+        self._contact_streams_valid = False
+        self._invalidate_coupling_contact_streams()
+
+    def _invalidate_coupling_contact_streams(self) -> None:
+        """Hook for subclasses to invalidate algorithm-specific stream state."""
+
+    @staticmethod
+    def _reset_collision_provider_contact_matching(pipeline: object, world_mask: wp.array | None) -> None:
+        """Reset an optional provider hook without hiding hook-internal errors."""
+        reset_contact_matching = getattr(pipeline, "reset_contact_matching", None)
+        if not callable(reset_contact_matching):
+            return
+        if world_mask is None:
+            reset_contact_matching()
+            return
+
+        try:
+            reset_signature = inspect.signature(reset_contact_matching)
+        except (TypeError, ValueError):
+            # Some extension callables do not expose a signature. Preserve the
+            # legacy optional-hook contract without catching call-time errors.
+            reset_contact_matching()
+            return
+
+        try:
+            reset_signature.bind(world_mask=world_mask)
+        except TypeError:
+            try:
+                reset_signature.bind(world_mask)
+            except TypeError:
+                reset_signature.bind()
+                reset_contact_matching()
+            else:
+                reset_contact_matching(world_mask)
+        else:
+            reset_contact_matching(world_mask=world_mask)
+
+    def _clear_entry_contact_buffers(self, world_mask: wp.array | None = None) -> None:
         """Invalidate cached entry-local contact buffers after a reset."""
+        self._entry_collision_refresh_results.clear()
         for contacts in self._entry_contact_buffers.values():
             contacts.clear(bump_generation=True)
         self._entry_contact_sources.clear()
+        for entry in self._entries.values():
+            entry.collide_counter = 0
+            if entry.collision_pipeline is not None:
+                self._reset_collision_provider_contact_matching(entry.collision_pipeline, world_mask)
+            if entry.collision_contacts is not None:
+                clear_contacts = getattr(entry.collision_contacts, "clear", None)
+                if callable(clear_contacts):
+                    clear_contacts(bump_generation=True)
+
+    def _refresh_entry_collision_pipeline(self, entry: SolverEntry) -> bool:
+        """Refresh one entry collision buffer according to its outer-step cadence."""
+        if entry.collision_pipeline is None:
+            return False
+        if entry.state_0 is None:
+            raise RuntimeError(f"SolverCoupled.Entry {entry.name!r} is missing its input state")
+
+        contacts_freshly_detected = entry.collide_counter % entry.collide_interval == 0
+        if contacts_freshly_detected:
+            entry.collision_pipeline.collide(entry.state_0, entry.collision_contacts)
+        entry.collide_counter += 1
+        return contacts_freshly_detected
+
+    def _refresh_entry_collision_pipeline_once(self, entry: SolverEntry) -> bool:
+        """Refresh one provider at most once during the current outer-step attempt."""
+        if entry.name in self._entry_collision_refresh_results:
+            return self._entry_collision_refresh_results[entry.name]
+        contacts_freshly_detected = self._refresh_entry_collision_pipeline(entry)
+        self._entry_collision_refresh_results[entry.name] = contacts_freshly_detected
+        return contacts_freshly_detected
+
+    def _refresh_entry_collision_pipelines(self) -> None:
+        """Refresh configured entry collision providers once per coupled step."""
+        for entry in self._entries.values():
+            self._refresh_entry_collision_pipeline_once(entry)
+
+    def _capture_collision_cadence_state(self) -> tuple[dict[str, int], object]:
+        """Snapshot collision-provider counters before an outer-step attempt."""
+        entry_state = {name: entry.collide_counter for name, entry in self._entries.items()}
+        return entry_state, self._capture_coupling_collision_cadence_state()
+
+    def _restore_collision_cadence_state(self, state: tuple[dict[str, int], object]) -> None:
+        """Restore collision-provider counters after a failed outer-step attempt."""
+        entry_state, coupling_state = state
+        for name, collide_counter in entry_state.items():
+            entry = self._entries.get(name)
+            if entry is not None:
+                entry.collide_counter = int(collide_counter)
+        self._restore_coupling_collision_cadence_state(coupling_state)
+
+    def _capture_coupling_collision_cadence_state(self) -> object:
+        """Hook for subclass collision-provider cadence state."""
+        return None
+
+    def _restore_coupling_collision_cadence_state(self, state: object) -> None:
+        """Restore subclass collision-provider cadence state."""
+        del state
 
     def _rebuild_entry_solver_state_caches(self) -> None:
         """Refresh optional sub-solver spatial caches from reset entry states."""
@@ -1874,10 +2189,21 @@ class SolverCoupled(SolverBase, CouplingInterface):
             _copy_state_to_entry(state_in, entry.state_0, entry)
             self._notify_input_state_update(entry, flags, dt=dt, iteration_restart=iteration_restart)
 
-    def _reconcile_state(self, state_out: State) -> None:
+    def _reconcile_state(
+        self,
+        state_out: State,
+        *,
+        world_mask: wp.array | None = None,
+        flags: StateFlags | int | None = None,
+    ) -> None:
         """Merge owned sub-solver state into ``state_out``."""
+        reset_flags = StateFlags.ALL if flags is None else StateFlags(flags)
+        fast_full_copy = world_mask is None and reset_flags & StateFlags.ALL == StateFlags.ALL
         for entry in self._entries.values():
             if entry.state_1 is None:
+                continue
+            if not fast_full_copy:
+                self._reconcile_reset_state(entry, state_out, world_mask, reset_flags)
                 continue
             if entry.body_indices.shape[0] > 0 and entry.state_1.body_q is not None and state_out.body_q is not None:
                 wp.launch(
@@ -1943,6 +2269,101 @@ class SolverCoupled(SolverBase, CouplingInterface):
                     ],
                     device=self.model.device,
                 )
+
+    def _reconcile_reset_state(
+        self,
+        entry: SolverEntry,
+        state_out: State,
+        world_mask: wp.array | None,
+        flags: StateFlags,
+    ) -> None:
+        """Merge only reset-selected fields and worlds into the parent state."""
+
+        def scatter(
+            flag: StateFlags,
+            src: wp.array | None,
+            dst: wp.array | None,
+            global_indices: wp.array,
+            global_to_local: wp.array,
+            local_entity_world: wp.array,
+        ) -> None:
+            if not flags & flag or src is None or dst is None or global_indices.shape[0] == 0:
+                return
+            if world_mask is not None:
+                copy_selected_mapped_rows(
+                    src,
+                    dst,
+                    global_indices,
+                    global_to_local,
+                    local_entity_world,
+                    world_mask,
+                )
+                return
+            if src.dtype == wp.transform:
+                kernel = _scatter_transform_state_mapped
+            elif src.dtype == wp.spatial_vector:
+                kernel = _scatter_spatial_state_mapped
+            elif src.dtype == wp.vec3:
+                kernel = _scatter_vec3_state_mapped
+            elif src.dtype == wp.float32:
+                kernel = _scatter_scalar_state_mapped
+            else:
+                raise TypeError(f"Unsupported reset reconciliation dtype {src.dtype}.")
+            wp.launch(
+                kernel,
+                dim=global_indices.shape[0],
+                inputs=[global_indices, global_to_local, src, dst],
+                device=self.model.device,
+            )
+
+        scatter(
+            StateFlags.BODY_Q,
+            entry.state_1.body_q,
+            state_out.body_q,
+            entry.body_indices,
+            entry.body_global_to_local,
+            entry.view.body_world,
+        )
+        scatter(
+            StateFlags.BODY_QD,
+            entry.state_1.body_qd,
+            state_out.body_qd,
+            entry.body_indices,
+            entry.body_global_to_local,
+            entry.view.body_world,
+        )
+        scatter(
+            StateFlags.PARTICLE_Q,
+            entry.state_1.particle_q,
+            state_out.particle_q,
+            entry.particle_indices,
+            entry.particle_global_to_local,
+            entry.view.particle_world,
+        )
+        scatter(
+            StateFlags.PARTICLE_QD,
+            entry.state_1.particle_qd,
+            state_out.particle_qd,
+            entry.particle_indices,
+            entry.particle_global_to_local,
+            entry.view.particle_world,
+        )
+        scatter(
+            StateFlags.JOINT_Q,
+            entry.state_1.joint_q,
+            state_out.joint_q,
+            entry.joint_q_indices,
+            entry.joint_coord_global_to_local,
+            entry.joint_coord_world,
+        )
+        scatter(
+            StateFlags.JOINT_QD,
+            entry.state_1.joint_qd,
+            state_out.joint_qd,
+            entry.joint_qd_indices,
+            entry.joint_dof_global_to_local,
+            entry.joint_dof_world,
+        )
 
     # ------------------------------------------------------------------
     # Generic proxy implementation
@@ -2103,7 +2524,10 @@ class SolverCoupled(SolverBase, CouplingInterface):
     ) -> Contacts | None:
         """Step one sub-solver entry, honoring its local substep count."""
         if filter_contacts:
-            contacts = self._contacts_for_entry(entry, contacts)
+            if entry.collision_pipeline is not None:
+                contacts = entry.collision_contacts
+            else:
+                contacts = self._contacts_for_entry(entry, contacts)
         control = _copy_control_to_entry(control, entry)
         if control_callback is not None:
             control_callback(control)
@@ -2134,7 +2558,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
 
     def _contacts_for_entry(self, entry: SolverEntry, contacts: Contacts | None) -> Contacts | None:
         if contacts is None or not entry.preserve_shape_ids:
-            return contacts
+            return None
         if contacts is self._entry_contact_buffers.get(entry.name):
             return contacts
 
@@ -2157,6 +2581,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 dim=contact_update_dim,
                 inputs=[
                     contacts.contact_generation,
+                    filtered.contact_generation,
                     self._entry_rigid_contact_generation[entry.name],
                     self._entry_soft_contact_generation[entry.name],
                     self._entry_rigid_contact_update[entry.name],
@@ -2552,6 +2977,75 @@ def _copy_state(src: State, dst: State) -> None:
         _copy_prefix(dst.joint_qd, src.joint_qd, "joint_qd")
 
 
+def _unique_states(*states: State | None) -> tuple[State, ...]:
+    """Return non-null states once each while preserving order."""
+    unique = []
+    seen = set()
+    for state in states:
+        if state is not None and id(state) not in seen:
+            unique.append(state)
+            seen.add(id(state))
+    return tuple(unique)
+
+
+def _copy_reset_public_state(src: State, dst: State, flags: StateFlags) -> None:
+    """Bulk-copy public reset fields selected by ``flags``."""
+    fields = (
+        (StateFlags.BODY_Q, "body_q"),
+        (StateFlags.BODY_QD, "body_qd"),
+        (StateFlags.PARTICLE_Q, "particle_q"),
+        (StateFlags.PARTICLE_QD, "particle_qd"),
+        (StateFlags.JOINT_Q, "joint_q"),
+        (StateFlags.JOINT_QD, "joint_qd"),
+    )
+    for flag, name in fields:
+        src_array = getattr(src, name, None)
+        dst_array = getattr(dst, name, None)
+        if flags & flag and src_array is not None and dst_array is not None:
+            _copy_prefix(dst_array, src_array, name)
+
+
+def _copy_selected_reset_public_state(
+    src: State,
+    dst: State,
+    entry: SolverEntry,
+    world_mask: wp.array,
+    flags: StateFlags,
+) -> None:
+    """Copy selected-world public reset fields between entry states."""
+    fields = (
+        (StateFlags.BODY_Q, "body_q", entry.view.body_world),
+        (StateFlags.BODY_QD, "body_qd", entry.view.body_world),
+        (StateFlags.PARTICLE_Q, "particle_q", entry.view.particle_world),
+        (StateFlags.PARTICLE_QD, "particle_qd", entry.view.particle_world),
+        (StateFlags.JOINT_Q, "joint_q", entry.joint_coord_world),
+        (StateFlags.JOINT_QD, "joint_qd", entry.joint_dof_world),
+    )
+    for flag, name, entity_world in fields:
+        src_array = getattr(src, name, None)
+        dst_array = getattr(dst, name, None)
+        if flags & flag and src_array is not None and dst_array is not None:
+            copy_selected_rows(src_array, dst_array, entity_world, world_mask)
+
+
+def _clear_selected_transient_state_buffers(
+    state: State,
+    entry: SolverEntry,
+    world_mask: wp.array,
+) -> None:
+    """Clear reset-selected force and acceleration rows in one entry state."""
+    fields = (
+        ("body_f", entry.view.body_world),
+        ("particle_f", entry.view.particle_world),
+        ("body_qdd", entry.view.body_world),
+        ("body_parent_f", entry.view.body_world),
+    )
+    for name, entity_world in fields:
+        array = getattr(state, name, None)
+        if array is not None:
+            zero_selected_rows(array, entity_world, world_mask)
+
+
 def _copy_forces(src: State, dst: State) -> None:
     """Copy force buffers without disturbing positions or velocities."""
     if dst.body_f is not None:
@@ -2748,6 +3242,45 @@ def _scatter_scalar_state_mapped(
 
 
 @wp.kernel(enable_backward=False)
+def _scatter_transform_state_mapped(
+    indices: wp.array[int],
+    global_to_local: wp.array[int],
+    src: wp.array[wp.transform],
+    dst: wp.array[wp.transform],
+):
+    global_id = indices[wp.tid()]
+    local_id = global_to_local[global_id]
+    if local_id >= 0:
+        dst[global_id] = src[local_id]
+
+
+@wp.kernel(enable_backward=False)
+def _scatter_spatial_state_mapped(
+    indices: wp.array[int],
+    global_to_local: wp.array[int],
+    src: wp.array[wp.spatial_vector],
+    dst: wp.array[wp.spatial_vector],
+):
+    global_id = indices[wp.tid()]
+    local_id = global_to_local[global_id]
+    if local_id >= 0:
+        dst[global_id] = src[local_id]
+
+
+@wp.kernel(enable_backward=False)
+def _scatter_vec3_state_mapped(
+    indices: wp.array[int],
+    global_to_local: wp.array[int],
+    src: wp.array[wp.vec3],
+    dst: wp.array[wp.vec3],
+):
+    global_id = indices[wp.tid()]
+    local_id = global_to_local[global_id]
+    if local_id >= 0:
+        dst[global_id] = src[local_id]
+
+
+@wp.kernel(enable_backward=False)
 def _add_mapped_body_forces_kernel(
     body_local_to_global: wp.array[int],
     src_f: wp.array[wp.spatial_vector],
@@ -2778,6 +3311,7 @@ def _add_mapped_particle_forces_kernel(
 @wp.kernel(enable_backward=False)
 def _prepare_filtered_contact_update_kernel(
     src_generation: wp.array[wp.int32],
+    dst_generation: wp.array[wp.int32],
     rigid_generation: wp.array[wp.int32],
     soft_generation: wp.array[wp.int32],
     rigid_update_out: wp.array[wp.int32],
@@ -2804,6 +3338,8 @@ def _prepare_filtered_contact_update_kernel(
             rigid_generation[0] = src_generation[0]
         if soft_update != 0:
             soft_generation[0] = src_generation[0]
+        if rigid_update != 0 or soft_update != 0:
+            dst_generation[0] += wp.int32(1)
         if rigid_update != 0 and counter_count > 0:
             dst_counters[0] = 0
         if soft_update != 0 and counter_count > 1:

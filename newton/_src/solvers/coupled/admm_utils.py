@@ -57,6 +57,46 @@ def _point_angular_lump(arm: wp.vec3) -> float:
 
 
 @wp.kernel(enable_backward=False)
+def reset_static_admm_rows_kernel(
+    world_ids: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    u: wp.array[wp.vec3],
+    lambda_: wp.array[wp.vec3],
+    Jv: wp.array[wp.vec3],
+    u_target: wp.array[wp.vec3],
+    has_u_target: int,
+):
+    """Zero reset-selected static ADMM rows while preserving global rows."""
+    row = wp.tid()
+    world = world_ids[row]
+    if world >= 0 and world_mask[world]:
+        u[row] = wp.vec3()
+        lambda_[row] = wp.vec3()
+        Jv[row] = wp.vec3()
+        if has_u_target != 0:
+            u_target[row] = wp.vec3()
+
+
+@wp.kernel(enable_backward=False)
+def reset_dynamic_admm_rows_kernel(
+    world_ids: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    u: wp.array[wp.vec3],
+    lambda_: wp.array[wp.vec3],
+    Jv: wp.array[wp.vec3],
+    u_min: wp.array[float],
+):
+    """Zero reset-selected dynamic ADMM rows while preserving row topology."""
+    row = wp.tid()
+    world = world_ids[row]
+    if world >= 0 and world_mask[world]:
+        u[row] = wp.vec3()
+        lambda_[row] = wp.vec3()
+        Jv[row] = wp.vec3()
+        u_min[row] = 0.0
+
+
+@wp.kernel(enable_backward=False)
 def scatter_effective_mass_kernel(
     global_id: wp.array[int],
     local_mass: wp.array[float],
@@ -1326,7 +1366,6 @@ def contact_rr_clear_contact_snapshot_kernel(
 
 @wp.kernel(enable_backward=False)
 def contact_rr_snapshot_by_contact_kernel(
-    active_count: wp.array[int],
     contact_id: wp.array[int],
     active: wp.array[int],
     W: wp.array[float],
@@ -1337,9 +1376,6 @@ def contact_rr_snapshot_by_contact_kernel(
 ):
     """Snapshot dynamic rigid-rigid ADMM dual state by collision contact row."""
     i = wp.tid()
-    if i >= active_count[0]:
-        return
-
     cid = contact_id[i]
     if cid < 0 or cid >= prev_contact_active.shape[0] or active[i] == 0:
         return
@@ -1352,6 +1388,7 @@ def contact_rr_snapshot_by_contact_kernel(
 @wp.kernel(enable_backward=False)
 def contact_rr_reset_kernel(
     active_count: wp.array[int],
+    world_ids: wp.array[int],
     body_a: wp.array[int],
     point_a_local: wp.array[wp.vec3],
     point_a_offset_local: wp.array[wp.vec3],
@@ -1375,6 +1412,7 @@ def contact_rr_reset_kernel(
     if i == 0:
         active_count[0] = 0
 
+    world_ids[i] = -1
     body_a[i] = 0
     point_a_local[i] = wp.vec3(0.0, 0.0, 0.0)
     point_a_offset_local[i] = wp.vec3(0.0, 0.0, 0.0)
@@ -1416,6 +1454,7 @@ def contact_rr_fill_from_rigid_contacts_kernel(
     body_mass_a: wp.array[float],
     body_mass_b: wp.array[float],
     shape_material_mu: wp.array[float],
+    body_world: wp.array[int],
     use_contact_matching: int,
     contact_matching_force_scale: float,
     capacity: int,
@@ -1424,6 +1463,7 @@ def contact_rr_fill_from_rigid_contacts_kernel(
     prev_contact_active: wp.array[int],
     prev_contact_lambda: wp.array[wp.vec3],
     prev_contact_W: wp.array[float],
+    world_ids: wp.array[int],
     body_a: wp.array[int],
     point_a_local: wp.array[wp.vec3],
     point_a_offset_local: wp.array[wp.vec3],
@@ -1495,11 +1535,16 @@ def contact_rr_fill_from_rigid_contacts_kernel(
 
     dst = wp.atomic_add(active_count, 0, 1)
     if dst >= capacity:
-        wp.atomic_min(active_count, 0, capacity)
         wp.atomic_max(active_count_max, 0, capacity)
         return
     wp.atomic_max(active_count_max, 0, dst + 1)
 
+    world_a = body_world[ba]
+    world_b = body_world[bb]
+    if world_a >= 0:
+        world_ids[dst] = world_a
+    else:
+        world_ids[dst] = world_b
     body_a[dst] = ba_local
     point_a_local[dst] = pa
     point_a_offset_local[dst] = oa
@@ -1665,6 +1710,7 @@ def contact_rp_snapshot_kernel(
 @wp.kernel(enable_backward=False)
 def contact_rp_reset_kernel(
     active_count: wp.array[int],
+    world_ids: wp.array[int],
     body_id: wp.array[int],
     point_body_local: wp.array[wp.vec3],
     particle_id: wp.array[int],
@@ -1683,6 +1729,7 @@ def contact_rp_reset_kernel(
     if i == 0:
         active_count[0] = 0
 
+    world_ids[i] = -1
     active[i] = 0
     body_id[i] = 0
     point_body_local[i] = wp.vec3(0.0, 0.0, 0.0)
@@ -1712,6 +1759,8 @@ def contact_rp_fill_from_soft_contacts_kernel(
     body_mass: wp.array[float],
     particle_mass: wp.array[float],
     shape_material_mu: wp.array[float],
+    body_world: wp.array[int],
+    particle_world: wp.array[int],
     particle_mu: float,
     capacity: int,
     active_count: wp.array[int],
@@ -1721,6 +1770,7 @@ def contact_rp_fill_from_soft_contacts_kernel(
     prev_active: wp.array[int],
     prev_W: wp.array[float],
     prev_lambda: wp.array[wp.vec3],
+    world_ids: wp.array[int],
     body_id: wp.array[int],
     point_body_local: wp.array[wp.vec3],
     particle_id: wp.array[int],
@@ -1760,7 +1810,6 @@ def contact_rp_fill_from_soft_contacts_kernel(
 
     dst = wp.atomic_add(active_count, 0, 1)
     if dst >= capacity:
-        wp.atomic_min(active_count, 0, capacity)
         wp.atomic_max(active_count_max, 0, capacity)
         return
     wp.atomic_max(active_count_max, 0, dst + 1)
@@ -1775,6 +1824,12 @@ def contact_rp_fill_from_soft_contacts_kernel(
             lambda0 = _rescale_lambda(prev_lambda[j], prev_W[j], weight)
             break
 
+    world_body = body_world[b]
+    world_particle = particle_world[p]
+    if world_body >= 0:
+        world_ids[dst] = world_body
+    else:
+        world_ids[dst] = world_particle
     active[dst] = 1
     body_id[dst] = b_local
     point_body_local[dst] = soft_contact_body_pos[i]
@@ -1884,6 +1939,7 @@ def contact_pp_snapshot_kernel(
 @wp.kernel(enable_backward=False)
 def contact_pp_reset_kernel(
     active_count: wp.array[int],
+    world_ids: wp.array[int],
     particle_a: wp.array[int],
     particle_b: wp.array[int],
     active: wp.array[int],
@@ -1899,6 +1955,7 @@ def contact_pp_reset_kernel(
     if i == 0:
         active_count[0] = 0
 
+    world_ids[i] = -1
     particle_a[i] = 0
     particle_b[i] = 0
     active[i] = 0
@@ -1932,6 +1989,7 @@ def particle_particle_contacts_hashgrid_kernel(
     particle_contact_particle0: wp.array[int],
     particle_contact_particle1: wp.array[int],
     particle_contact_normal: wp.array[wp.vec3],
+    particle_contact_world: wp.array[int],
     particle_contact_tids: wp.array[int],
 ):
     """Detect particle-particle contacts into a contacts-like stream."""
@@ -1972,7 +2030,6 @@ def particle_particle_contacts_hashgrid_kernel(
 
         dst = wp.atomic_add(particle_contact_count, 0, 1)
         if dst >= capacity:
-            wp.atomic_min(particle_contact_count, 0, capacity)
             wp.atomic_max(particle_contact_count_max, 0, capacity)
             continue
         wp.atomic_max(particle_contact_count_max, 0, dst + 1)
@@ -1980,6 +2037,10 @@ def particle_particle_contacts_hashgrid_kernel(
         particle_contact_particle0[dst] = pa
         particle_contact_particle1[dst] = pb
         particle_contact_normal[dst] = n
+        if world_a >= 0:
+            particle_contact_world[dst] = world_a
+        else:
+            particle_contact_world[dst] = world_b
         particle_contact_tids[dst] = tid
 
 
@@ -1991,6 +2052,7 @@ def contact_pp_fill_from_particle_contacts_kernel(
     particle_contact_normal: wp.array[wp.vec3],
     particle_mass_a: wp.array[float],
     particle_mass_b: wp.array[float],
+    particle_world: wp.array[int],
     particle_mu: float,
     capacity: int,
     active_count: wp.array[int],
@@ -2000,6 +2062,7 @@ def contact_pp_fill_from_particle_contacts_kernel(
     prev_active: wp.array[int],
     prev_W: wp.array[float],
     prev_lambda: wp.array[wp.vec3],
+    world_ids: wp.array[int],
     particle_a: wp.array[int],
     particle_b: wp.array[int],
     active: wp.array[int],
@@ -2017,7 +2080,6 @@ def contact_pp_fill_from_particle_contacts_kernel(
     pb = particle_contact_particle1[i]
     dst = wp.atomic_add(active_count, 0, 1)
     if dst >= capacity:
-        wp.atomic_min(active_count, 0, capacity)
         wp.atomic_max(active_count_max, 0, capacity)
         return
     wp.atomic_max(active_count_max, 0, dst + 1)
@@ -2032,6 +2094,12 @@ def contact_pp_fill_from_particle_contacts_kernel(
             lambda0 = _rescale_lambda(prev_lambda[j], prev_W[j], weight)
             break
 
+    world_a = particle_world[pa]
+    world_b = particle_world[pb]
+    if world_a >= 0:
+        world_ids[dst] = world_a
+    else:
+        world_ids[dst] = world_b
     particle_a[dst] = pa
     particle_b[dst] = pb
     active[dst] = 1

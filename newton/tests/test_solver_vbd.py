@@ -33,7 +33,7 @@ from newton._src.solvers.vbd.rigid_vbd_kernels import (
     update_duals_body_body_contacts,
     update_duals_joint,
 )
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 devices = get_test_devices()
 
@@ -1520,6 +1520,212 @@ def _self_contact_damping_uses_relative_gap_rate(test, device):
         np.testing.assert_allclose(hessians.numpy()[1], hessians.numpy()[0], rtol=1.0e-6, atol=1.0e-6)
 
 
+def _make_joint_constraint_mode_solver(device):
+    builder = newton.ModelBuilder(gravity=0.0)
+    joints = []
+    for i in range(4):
+        body = builder.add_link(xform=wp.transform(wp.vec3(float(i), 0.0, 0.0), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        if i < 3:
+            joint = builder.add_joint_fixed(-1, body)
+        else:
+            joint = builder.add_joint_ball(-1, body)
+        builder.add_articulation([joint])
+        joints.append(joint)
+    builder.color()
+    model = builder.finalize(device=device)
+    return newton.solvers.SolverVBD(model), joints
+
+
+def _joint_constraint_mode_state(solver):
+    names = ("joint_is_hard", "joint_lambda_lin", "joint_lambda_ang", "joint_C0_lin", "joint_C0_ang")
+    return {
+        name: (getattr(solver, name), getattr(solver, name).ptr, getattr(solver, name).numpy().copy()) for name in names
+    }
+
+
+def _assert_joint_constraint_mode_state_unchanged(test, solver, before):
+    for name, (array, ptr, values) in before.items():
+        test.assertIs(getattr(solver, name), array, name)
+        test.assertEqual(getattr(solver, name).ptr, ptr, name)
+        np.testing.assert_array_equal(getattr(solver, name).numpy(), values, err_msg=name)
+
+
+def _joint_constraint_modes_update_selected_with_heterogeneous_modes(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    solver.joint_is_hard.fill_(0)
+
+    solver.set_joint_constraint_modes([joints[0], joints[2]], [True, False], slot=1)
+
+    starts = solver.joint_constraint_start.numpy()
+    modes = solver.joint_is_hard.numpy()
+    test.assertEqual(modes[starts[joints[0]]], 0)
+    test.assertEqual(modes[starts[joints[0]] + 1], 1)
+    test.assertEqual(modes[starts[joints[1]] + 1], 0)
+    test.assertEqual(modes[starts[joints[2]]], 0)
+    test.assertEqual(modes[starts[joints[2]] + 1], 0)
+
+
+def _joint_constraint_modes_apply_scalar_mode(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    solver.joint_is_hard.fill_(1)
+
+    solver.set_joint_constraint_modes([joints[0], joints[2]], False, slot=0)
+
+    starts = solver.joint_constraint_start.numpy()
+    modes = solver.joint_is_hard.numpy()
+    test.assertEqual(modes[starts[joints[0]]], 0)
+    test.assertEqual(modes[starts[joints[0]] + 1], 1)
+    test.assertEqual(modes[starts[joints[1]]], 1)
+    test.assertEqual(modes[starts[joints[2]]], 0)
+    test.assertEqual(modes[starts[joints[2]] + 1], 1)
+
+
+def _joint_constraint_modes_soft_clears_only_selected_slot_state(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    state_value = wp.vec3(1.0, 2.0, 3.0)
+    solver.joint_lambda_lin.fill_(state_value)
+    solver.joint_lambda_ang.fill_(state_value)
+    solver.joint_C0_lin.fill_(state_value)
+    solver.joint_C0_ang.fill_(state_value)
+
+    solver.set_joint_constraint_modes([joints[0], joints[2]], False, slot=1)
+
+    expected_unchanged = np.tile(np.array([1.0, 2.0, 3.0], dtype=np.float32), (solver.model.joint_count, 1))
+    expected_selected_zero = expected_unchanged.copy()
+    expected_selected_zero[[joints[0], joints[2]]] = 0.0
+    np.testing.assert_array_equal(solver.joint_lambda_lin.numpy(), expected_unchanged)
+    np.testing.assert_array_equal(solver.joint_C0_lin.numpy(), expected_unchanged)
+    np.testing.assert_array_equal(solver.joint_lambda_ang.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_C0_ang.numpy(), expected_selected_zero)
+
+    solver.joint_lambda_lin.fill_(state_value)
+    solver.joint_lambda_ang.fill_(state_value)
+    solver.joint_C0_lin.fill_(state_value)
+    solver.joint_C0_ang.fill_(state_value)
+    solver.set_joint_constraint_modes([joints[0], joints[2]], False, slot=0)
+
+    np.testing.assert_array_equal(solver.joint_lambda_lin.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_C0_lin.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_lambda_ang.numpy(), expected_unchanged)
+    np.testing.assert_array_equal(solver.joint_C0_ang.numpy(), expected_unchanged)
+
+    solver.joint_lambda_lin.fill_(state_value)
+    solver.joint_lambda_ang.fill_(state_value)
+    solver.joint_C0_lin.fill_(state_value)
+    solver.joint_C0_ang.fill_(state_value)
+    solver.set_joint_constraint_modes([joints[0], joints[2]], False)
+
+    np.testing.assert_array_equal(solver.joint_lambda_lin.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_C0_lin.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_lambda_ang.numpy(), expected_selected_zero)
+    np.testing.assert_array_equal(solver.joint_C0_ang.numpy(), expected_selected_zero)
+
+
+def _joint_constraint_modes_preserve_state_and_array_identity(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    solver.joint_is_hard.fill_(0)
+    solver.joint_lambda_lin.fill_(wp.vec3(1.0, 2.0, 3.0))
+    solver.joint_lambda_ang.fill_(wp.vec3(4.0, 5.0, 6.0))
+    solver.joint_C0_lin.fill_(wp.vec3(7.0, 8.0, 9.0))
+    solver.joint_C0_ang.fill_(wp.vec3(10.0, 11.0, 12.0))
+    before = _joint_constraint_mode_state(solver)
+
+    solver.set_joint_constraint_modes([joints[1]], True, slot=0)
+
+    for name, (array, ptr, _) in before.items():
+        test.assertIs(getattr(solver, name), array, name)
+        test.assertEqual(getattr(solver, name).ptr, ptr, name)
+    modes = solver.joint_is_hard.numpy()
+    expected_modes = before["joint_is_hard"][2].copy()
+    start = int(solver.joint_constraint_start.numpy()[joints[1]])
+    expected_modes[start] = 1
+    np.testing.assert_array_equal(modes, expected_modes)
+    for name in ("joint_lambda_lin", "joint_lambda_ang", "joint_C0_lin", "joint_C0_ang"):
+        np.testing.assert_array_equal(getattr(solver, name).numpy(), before[name][2], err_msg=name)
+
+    arrays_after_hardening = {name: getattr(solver, name) for name in before}
+    solver.set_joint_constraint_modes([joints[0], joints[2]], False)
+    for name, array in arrays_after_hardening.items():
+        test.assertIs(getattr(solver, name), array, name)
+
+
+def _joint_constraint_mode_one_element_scalar_parity(test, device):
+    solver_single, joints = _make_joint_constraint_mode_solver(device)
+    solver_batch, _ = _make_joint_constraint_mode_solver(device)
+    for solver in (solver_single, solver_batch):
+        solver.joint_lambda_lin.fill_(wp.vec3(1.0, 2.0, 3.0))
+        solver.joint_lambda_ang.fill_(wp.vec3(4.0, 5.0, 6.0))
+        solver.joint_C0_lin.fill_(wp.vec3(7.0, 8.0, 9.0))
+        solver.joint_C0_ang.fill_(wp.vec3(10.0, 11.0, 12.0))
+
+    solver_single.set_joint_constraint_mode(joints[1], False, slot=1)
+    solver_batch.set_joint_constraint_modes([joints[1]], False, slot=1)
+
+    for name in ("joint_is_hard", "joint_lambda_lin", "joint_lambda_ang", "joint_C0_lin", "joint_C0_ang"):
+        np.testing.assert_array_equal(
+            getattr(solver_single, name).numpy(), getattr(solver_batch, name).numpy(), err_msg=name
+        )
+
+
+def _joint_constraint_modes_empty_selection_is_noop(test, device):
+    solver, _ = _make_joint_constraint_mode_solver(device)
+    before = _joint_constraint_mode_state(solver)
+
+    solver.set_joint_constraint_modes([], False, slot=1)
+    solver.set_joint_constraint_modes([], [])
+
+    _assert_joint_constraint_mode_state_unchanged(test, solver, before)
+
+
+def _joint_constraint_modes_validation_is_atomic(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    solver.joint_lambda_lin.fill_(wp.vec3(1.0))
+    solver.joint_lambda_ang.fill_(wp.vec3(2.0))
+    solver.joint_C0_lin.fill_(wp.vec3(3.0))
+    solver.joint_C0_ang.fill_(wp.vec3(4.0))
+    before = _joint_constraint_mode_state(solver)
+
+    invalid_calls = (
+        (ValueError, [joints[0], solver.model.joint_count], False, None),
+        (ValueError, [-1], False, None),
+        (TypeError, [True], False, None),
+        (TypeError, ["0"], False, None),
+        (ValueError, [joints[0], joints[1]], [False], None),
+        (TypeError, [joints[0], joints[1]], [False, 1], None),
+        (TypeError, [joints[0]], 0, None),
+        (ValueError, [joints[0]], False, -1),
+        (ValueError, [joints[0]], False, 2),
+        (TypeError, [joints[0]], False, "0"),
+        (TypeError, [joints[0]], False, True),
+        (ValueError, [joints[3]], False, 1),
+    )
+    for exception, indices, hard, slot in invalid_calls:
+        with test.subTest(indices=indices, hard=hard, slot=slot):
+            with test.assertRaises(exception):
+                solver.set_joint_constraint_modes(indices, hard, slot=slot)
+            _assert_joint_constraint_mode_state_unchanged(test, solver, before)
+
+
+def _joint_constraint_modes_reject_duplicate_indices(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    before = _joint_constraint_mode_state(solver)
+
+    with test.assertRaisesRegex(ValueError, "duplicate"):
+        solver.set_joint_constraint_modes([joints[0], joints[0]], [False, True])
+
+    _assert_joint_constraint_mode_state_unchanged(test, solver, before)
+
+
+def _joint_constraint_modes_reject_cuda_graph_capture(test, device):
+    solver, joints = _make_joint_constraint_mode_solver(device)
+    solver.set_joint_constraint_modes([joints[0]], True)
+
+    with test.assertRaisesRegex(RuntimeError, "before CUDA graph capture"):
+        with wp.ScopedCapture(device=device):
+            solver.set_joint_constraint_modes([joints[0]], False)
+
+
 def _d6_fully_free_structural_slots_are_inactive(test, device):
     """D6 structural slots should be inactive when all axes are free."""
     builder = newton.ModelBuilder(gravity=0.0)
@@ -2017,6 +2223,163 @@ def _collect_rigid_contact_forces_reports_surface_points(test, device):
     np.testing.assert_allclose(reported1_np[:count], expected1, atol=1.0e-5)
 
 
+def _prepare_cuda_graph_capture_preallocates_vbd_contacts(test, device):
+    """VBD preparation should size every contact buffer once without advancing state."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+    builder.add_shape_sphere(body=body, radius=0.1)
+    builder.add_particle(pos=(0.0, 0.0, 0.5), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
+    builder.color()
+
+    with wp.ScopedDevice(device):
+        model = builder.finalize()
+        solver = newton.solvers.SolverVBD(model, rigid_contact_history=True)
+
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=0,
+                soft_contact_max=0,
+                device=device,
+                contact_matching=True,
+            )
+        )
+        test.assertIsNotNone(solver._prev_contact_lambda)
+        test.assertGreaterEqual(solver._prev_contact_lambda.shape[0], 1)
+
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=2,
+                soft_contact_max=2,
+                device=device,
+                contact_matching=True,
+            )
+        )
+        solver.body_body_contact_penalty_k.fill_(11.0)
+        solver.body_body_contact_lambda.fill_(wp.vec3(1.0, 2.0, 3.0))
+        solver.body_particle_contact_penalty_k.fill_(13.0)
+        solver._rigid_contact_body0.fill_(17)
+        solver._prev_contact_penalty_k.fill_(19.0)
+        solver._prev_contact_lambda.fill_(wp.vec3(4.0, 5.0, 6.0))
+
+        rigid_capacity = max(7, solver.body_body_contact_penalty_k.shape[0] + 3)
+        soft_capacity = max(5, solver.body_particle_contact_penalty_k.shape[0] + 3)
+        contacts = newton.Contacts(
+            rigid_contact_max=rigid_capacity,
+            soft_contact_max=soft_capacity,
+            device=device,
+            contact_matching=True,
+        )
+
+        model_body_q_before = model.body_q.numpy().copy()
+        model_particle_q_before = model.particle_q.numpy().copy()
+        body_q_prev_before = solver.body_q_prev.numpy().copy()
+        particle_q_prev_before = solver.particle_q_prev.numpy().copy()
+
+        solver.prepare_cuda_graph_capture(contacts)
+
+        np.testing.assert_array_equal(solver.body_body_contact_penalty_k.numpy()[:2], [11.0, 11.0])
+        np.testing.assert_array_equal(
+            solver.body_body_contact_lambda.numpy()[:2],
+            np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(solver.body_particle_contact_penalty_k.numpy()[:2], [13.0, 13.0])
+        np.testing.assert_array_equal(solver._rigid_contact_body0.numpy()[:2], [17, 17])
+        np.testing.assert_array_equal(solver._prev_contact_penalty_k.numpy()[:2], [19.0, 19.0])
+        np.testing.assert_array_equal(
+            solver._prev_contact_lambda.numpy()[:2],
+            np.array([[4.0, 5.0, 6.0], [4.0, 5.0, 6.0]], dtype=np.float32),
+        )
+
+        rigid_names = (
+            "body_body_contact_penalty_k",
+            "body_body_contact_material_ke",
+            "body_body_contact_material_kd",
+            "body_body_contact_material_mu",
+            "body_body_contact_lambda",
+            "body_body_contact_C0",
+            "body_body_contact_stick_flag",
+        )
+        soft_names = (
+            "body_particle_contact_penalty_k",
+            "body_particle_contact_material_ke",
+            "body_particle_contact_material_kd",
+            "body_particle_contact_material_mu",
+        )
+        query_names = (
+            "_rigid_contact_body0",
+            "_rigid_contact_body1",
+            "_rigid_contact_point0_world",
+            "_rigid_contact_point1_world",
+        )
+        history_names = (
+            "_prev_contact_lambda",
+            "_prev_contact_stick_flag",
+            "_prev_contact_penalty_k",
+            "_prev_contact_point0",
+            "_prev_contact_point1",
+            "_prev_contact_offset0",
+            "_prev_contact_offset1",
+            "_prev_contact_normal",
+        )
+        all_names = rigid_names + soft_names + query_names + history_names
+
+        for name in rigid_names + query_names + history_names:
+            test.assertGreaterEqual(getattr(solver, name).shape[0], rigid_capacity, name)
+        for name in soft_names:
+            test.assertGreaterEqual(getattr(solver, name).shape[0], soft_capacity, name)
+
+        arrays_before = {name: getattr(solver, name) for name in all_names}
+        pointers_before = {name: array.ptr for name, array in arrays_before.items()}
+
+        solver.prepare_cuda_graph_capture(contacts)
+        solver.prepare_cuda_graph_capture(
+            newton.Contacts(
+                rigid_contact_max=rigid_capacity - 1,
+                soft_contact_max=soft_capacity - 1,
+                device=device,
+                contact_matching=True,
+            )
+        )
+
+        for name, array in arrays_before.items():
+            test.assertIs(getattr(solver, name), array, name)
+            test.assertEqual(getattr(solver, name).ptr, pointers_before[name], name)
+
+        np.testing.assert_array_equal(model.body_q.numpy(), model_body_q_before)
+        np.testing.assert_array_equal(model.particle_q.numpy(), model_particle_q_before)
+        np.testing.assert_array_equal(solver.body_q_prev.numpy(), body_q_prev_before)
+        np.testing.assert_array_equal(solver.particle_q_prev.numpy(), particle_q_prev_before)
+
+
+def _prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts(test, device):
+    """VBD should not allocate soft-contact state without both particles and shapes."""
+    with wp.ScopedDevice(device):
+        for topology in ("shape_only", "particle_only"):
+            with test.subTest(topology=topology):
+                builder = newton.ModelBuilder()
+                if topology == "shape_only":
+                    body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+                    builder.add_shape_sphere(body=body, radius=0.1)
+                else:
+                    builder.add_particle(
+                        pos=(0.0, 0.0, 0.0),
+                        vel=(0.0, 0.0, 0.0),
+                        mass=1.0,
+                        radius=0.05,
+                    )
+                builder.color()
+                model = builder.finalize()
+                solver = newton.solvers.SolverVBD(model)
+                contacts = newton.Contacts(rigid_contact_max=0, soft_contact_max=5, device=device)
+
+                solver.prepare_cuda_graph_capture(contacts)
+
+                test.assertEqual(solver.body_particle_contact_penalty_k.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_ke.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_kd.shape[0], 0)
+                test.assertEqual(solver.body_particle_contact_material_mu.shape[0], 0)
+
+
 class TestSolverVBD(unittest.TestCase):
     pass
 
@@ -2101,6 +2464,60 @@ add_function_test(
 )
 add_function_test(
     TestSolverVBD,
+    "test_joint_constraint_modes_update_selected_with_heterogeneous_modes",
+    _joint_constraint_modes_update_selected_with_heterogeneous_modes,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_apply_scalar_mode",
+    _joint_constraint_modes_apply_scalar_mode,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_soft_clears_only_selected_slot_state",
+    _joint_constraint_modes_soft_clears_only_selected_slot_state,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_preserve_state_and_array_identity",
+    _joint_constraint_modes_preserve_state_and_array_identity,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_mode_one_element_scalar_parity",
+    _joint_constraint_mode_one_element_scalar_parity,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_empty_selection_is_noop",
+    _joint_constraint_modes_empty_selection_is_noop,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_validation_is_atomic",
+    _joint_constraint_modes_validation_is_atomic,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_reject_duplicate_indices",
+    _joint_constraint_modes_reject_duplicate_indices,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_joint_constraint_modes_reject_cuda_graph_capture",
+    _joint_constraint_modes_reject_cuda_graph_capture,
+    devices=get_cuda_test_devices(),
+)
+add_function_test(
+    TestSolverVBD,
     "test_d6_fully_free_structural_slots_are_inactive",
     _d6_fully_free_structural_slots_are_inactive,
     devices=devices,
@@ -2161,6 +2578,18 @@ add_function_test(
     TestSolverVBD,
     "test_collect_rigid_contact_forces_reports_surface_points",
     _collect_rigid_contact_forces_reports_surface_points,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_prepare_cuda_graph_capture_preallocates_vbd_contacts",
+    _prepare_cuda_graph_capture_preallocates_vbd_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts",
+    _prepare_cuda_graph_capture_skips_unusable_vbd_soft_contacts,
     devices=devices,
 )
 

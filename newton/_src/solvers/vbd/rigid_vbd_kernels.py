@@ -1994,6 +1994,48 @@ def check_contact_overflow(
 
 
 @wp.kernel
+def set_joint_constraint_modes(
+    joint_indices: wp.array[wp.int32],
+    hard_modes: wp.array[wp.int32],
+    slot: int,
+    joint_constraint_start: wp.array[wp.int32],
+    joint_constraint_dim: wp.array[wp.int32],
+    joint_is_hard: wp.array[wp.int32],
+    joint_lambda_lin: wp.array[wp.vec3],
+    joint_lambda_ang: wp.array[wp.vec3],
+    joint_C0_lin: wp.array[wp.vec3],
+    joint_C0_ang: wp.array[wp.vec3],
+):
+    """Update selected structural modes and clear state for softened slots."""
+    selection_index = wp.tid()
+    joint_index = joint_indices[selection_index]
+    hard = hard_modes[selection_index]
+    constraint_start = int(joint_constraint_start[joint_index])
+    constraint_dim = int(joint_constraint_dim[joint_index])
+
+    if slot < 0:
+        if constraint_dim > 0:
+            joint_is_hard[constraint_start] = hard
+            if hard == 0:
+                joint_lambda_lin[joint_index] = wp.vec3(0.0)
+                joint_C0_lin[joint_index] = wp.vec3(0.0)
+        if constraint_dim > 1:
+            joint_is_hard[constraint_start + 1] = hard
+            if hard == 0:
+                joint_lambda_ang[joint_index] = wp.vec3(0.0)
+                joint_C0_ang[joint_index] = wp.vec3(0.0)
+    else:
+        joint_is_hard[constraint_start + slot] = hard
+        if hard == 0:
+            if slot == 0:
+                joint_lambda_lin[joint_index] = wp.vec3(0.0)
+                joint_C0_lin[joint_index] = wp.vec3(0.0)
+            else:
+                joint_lambda_ang[joint_index] = wp.vec3(0.0)
+                joint_C0_ang[joint_index] = wp.vec3(0.0)
+
+
+@wp.kernel
 def step_joint_C0_lambda(
     joint_enabled: wp.array[bool],
     joint_parent: wp.array[int],

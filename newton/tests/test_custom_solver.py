@@ -105,6 +105,18 @@ class TestCustomSolver(unittest.TestCase):
         self.assertTrue(solver.saw_body_properties)
         self.assertEqual(solver.model_epoch, 7)
 
+    def test_cuda_graph_capture_defaults(self):
+        """Base solvers support CUDA graph capture without preparation work."""
+        model = self._build_model()
+        solver = DummySolver(model)
+        body_q_before = model.body_q.numpy().copy()
+
+        self.assertTrue(solver.supports_cuda_graph_capture)
+
+        solver.prepare_cuda_graph_capture()
+
+        np.testing.assert_array_equal(model.body_q.numpy(), body_q_before)
+
     def test_reset_accepts_custom_int_flag(self):
         """State resets preserve custom integer bits."""
         model = self._build_model()

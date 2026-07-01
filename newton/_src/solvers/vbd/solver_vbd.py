@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -72,6 +73,7 @@ from .rigid_vbd_kernels import (
     init_body_body_contact_materials,
     init_body_body_contacts_avbd,
     init_body_particle_contacts,
+    set_joint_constraint_modes,
     snapshot_body_body_contact_history,
     solve_rigid_body,
     step_body_body_contact_C0_lambda,
@@ -781,6 +783,43 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
     @override
+    def prepare_cuda_graph_capture(self, contacts: Contacts | None = None) -> None:
+        """Preallocate contact-capacity-dependent buffers before graph capture.
+
+        Args:
+            contacts: Contact buffers whose capacities determine persistent
+                rigid-rigid, rigid-particle, history, and query storage.
+        """
+        if contacts is None:
+            return
+
+        rigid_contact_max = int(contacts.rigid_contact_max)
+        soft_contact_max = int(contacts.soft_contact_max)
+
+        body_body_state = getattr(self, "body_body_contact_penalty_k", None)
+        if body_body_state is not None:
+            self._init_body_body_contact_state(rigid_contact_max)
+
+        if self.model.particle_count > 0 and self.model.shape_count > 0:
+            self._init_body_particle_contact_state(soft_contact_max)
+
+        self._rigid_contact_body0 = self._grow_contact_array(
+            self._rigid_contact_body0, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_body1 = self._grow_contact_array(
+            self._rigid_contact_body1, rigid_contact_max, wp.int32, fill_value=-1
+        )
+        self._rigid_contact_point0_world = self._grow_contact_array(
+            self._rigid_contact_point0_world, rigid_contact_max, wp.vec3
+        )
+        self._rigid_contact_point1_world = self._grow_contact_array(
+            self._rigid_contact_point1_world, rigid_contact_max, wp.vec3
+        )
+
+        if self.rigid_contact_history and hasattr(self, "_prev_contact_lambda"):
+            self._init_rigid_contact_warmstart(max(1, rigid_contact_max))
+
+    @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
@@ -1052,34 +1091,67 @@ class SolverVBD(SolverBase, CouplingInterface):
     # Initialization Helper Methods
     # =====================================================
 
+    def _grow_contact_array(self, array, capacity: int, dtype, *, fill_value=None):
+        """Grow a contact array while preserving its existing prefix."""
+        if array is not None and array.shape[0] >= capacity:
+            return array
+
+        if fill_value is None:
+            grown = wp.zeros(capacity, dtype=dtype, device=self.device)
+        else:
+            grown = wp.full(capacity, fill_value, dtype=dtype, device=self.device)
+        if array is not None and array.shape[0] > 0:
+            wp.copy(grown, array, count=array.shape[0])
+        return grown
+
     def _init_body_body_contact_state(self, rigid_contact_max: int) -> None:
-        """Allocate body-body contact state arrays sized to the given contact buffer capacity."""
-        self.body_body_contact_penalty_k = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_ke = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_kd = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_material_mu = wp.zeros(rigid_contact_max, dtype=float, device=self.device)
-        self.body_body_contact_lambda = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_C0 = wp.zeros(rigid_contact_max, dtype=wp.vec3, device=self.device)
-        self.body_body_contact_stick_flag = wp.zeros(rigid_contact_max, dtype=wp.int32, device=self.device)
+        """Ensure body-body contact state arrays have the requested capacity."""
+        self.body_body_contact_penalty_k = self._grow_contact_array(
+            self.body_body_contact_penalty_k, rigid_contact_max, float
+        )
+        self.body_body_contact_material_ke = self._grow_contact_array(
+            self.body_body_contact_material_ke, rigid_contact_max, float
+        )
+        self.body_body_contact_material_kd = self._grow_contact_array(
+            self.body_body_contact_material_kd, rigid_contact_max, float
+        )
+        self.body_body_contact_material_mu = self._grow_contact_array(
+            self.body_body_contact_material_mu, rigid_contact_max, float
+        )
+        self.body_body_contact_lambda = self._grow_contact_array(
+            self.body_body_contact_lambda, rigid_contact_max, wp.vec3
+        )
+        self.body_body_contact_C0 = self._grow_contact_array(self.body_body_contact_C0, rigid_contact_max, wp.vec3)
+        self.body_body_contact_stick_flag = self._grow_contact_array(
+            self.body_body_contact_stick_flag, rigid_contact_max, wp.int32
+        )
 
     def _init_body_particle_contact_state(self, soft_contact_max: int) -> None:
-        """Allocate body-particle material arrays sized to the given soft contact capacity."""
-        self.body_particle_contact_penalty_k = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_ke = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_kd = wp.zeros(soft_contact_max, dtype=float, device=self.device)
-        self.body_particle_contact_material_mu = wp.zeros(soft_contact_max, dtype=float, device=self.device)
+        """Ensure body-particle material arrays have the requested capacity."""
+        self.body_particle_contact_penalty_k = self._grow_contact_array(
+            self.body_particle_contact_penalty_k, soft_contact_max, float
+        )
+        self.body_particle_contact_material_ke = self._grow_contact_array(
+            self.body_particle_contact_material_ke, soft_contact_max, float
+        )
+        self.body_particle_contact_material_kd = self._grow_contact_array(
+            self.body_particle_contact_material_kd, soft_contact_max, float
+        )
+        self.body_particle_contact_material_mu = self._grow_contact_array(
+            self.body_particle_contact_material_mu, soft_contact_max, float
+        )
 
     def _init_rigid_contact_warmstart(self, rigid_contact_max: int) -> None:
-        """Allocate rigid contact warm-start buffers."""
+        """Ensure rigid contact warm-start buffers have the requested capacity."""
         cap = max(1, rigid_contact_max)
-        self._prev_contact_lambda = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_stick_flag = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        self._prev_contact_penalty_k = wp.zeros(cap, dtype=float, device=self.device)
-        self._prev_contact_point0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_point1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset0 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_offset1 = wp.zeros(cap, dtype=wp.vec3, device=self.device)
-        self._prev_contact_normal = wp.zeros(cap, dtype=wp.vec3, device=self.device)
+        self._prev_contact_lambda = self._grow_contact_array(self._prev_contact_lambda, cap, wp.vec3)
+        self._prev_contact_stick_flag = self._grow_contact_array(self._prev_contact_stick_flag, cap, wp.int32)
+        self._prev_contact_penalty_k = self._grow_contact_array(self._prev_contact_penalty_k, cap, float)
+        self._prev_contact_point0 = self._grow_contact_array(self._prev_contact_point0, cap, wp.vec3)
+        self._prev_contact_point1 = self._grow_contact_array(self._prev_contact_point1, cap, wp.vec3)
+        self._prev_contact_offset0 = self._grow_contact_array(self._prev_contact_offset0, cap, wp.vec3)
+        self._prev_contact_offset1 = self._grow_contact_array(self._prev_contact_offset1, cap, wp.vec3)
+        self._prev_contact_normal = self._grow_contact_array(self._prev_contact_normal, cap, wp.vec3)
 
     def _raise_if_capturing_resize(self, name: str, current: int, required: int) -> None:
         if self.device.is_capturing and not wp.is_mempool_enabled(self.device):
@@ -1148,6 +1220,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 c += int(dim_np[j])
 
             self.joint_constraint_count = int(c)
+            self._joint_constraint_dim_host = tuple(int(dim) for dim in dim_np)
             self.joint_constraint_dim = wp.array(dim_np, dtype=wp.int32, device=self.device)
             self.joint_constraint_start = wp.array(start_np, dtype=wp.int32, device=self.device)
 
@@ -1757,7 +1830,127 @@ class SolverVBD(SolverBase, CouplingInterface):
         """
         self._update_rigid_history = update
 
-    def set_joint_constraint_mode(self, joint_index: int, hard: bool, slot: int | None = None):
+    def set_joint_constraint_modes(
+        self,
+        joint_indices: Sequence[int],
+        hard: bool | Sequence[bool],
+        slot: int | None = None,
+    ) -> None:
+        """Set hard or soft constraint modes for selected joints' structural slots.
+
+        All inputs are validated before device state is changed. Duplicate joint
+        indices are rejected. A scalar ``hard`` value applies to every selected
+        joint; otherwise, the mode sequence must match ``joint_indices`` in length.
+
+        Structural slots are LINEAR (slot 0) and ANGULAR (slot 1). Drive/limit
+        slots (slot 2+) are always soft and cannot be changed. Passing ``slot=None``
+        changes every structural slot present on each selected joint.
+
+        Softening a slot clears its persistent lambda and C0 state. Hardening a
+        slot preserves all existing lambda and C0 state.
+
+        Call this method before beginning CUDA graph capture. Calling it during
+        capture raises a RuntimeError.
+
+        Args:
+            joint_indices: Joint indices to modify.
+            hard: True for hard mode (AL), False for soft mode (penalty-only), or
+                one Boolean mode per selected joint.
+            slot: Specific structural slot to set, or None to set all structural
+                slots present on each joint.
+
+        Raises:
+            RuntimeError: If called during CUDA graph capture.
+            TypeError: If an index, mode, or slot has an invalid type.
+            ValueError: If an index is duplicated or out of range, the mode
+                sequence length differs from the index count, or the slot is not
+                a structural slot present on every selected joint.
+        """
+        if self.device.is_capturing:
+            raise RuntimeError("set_joint_constraint_modes() must be called before CUDA graph capture.")
+
+        if isinstance(joint_indices, (str, bytes)):
+            raise TypeError("joint_indices must be a sequence of integer joint indices.")
+        try:
+            raw_indices = list(joint_indices)
+        except TypeError as exc:
+            raise TypeError("joint_indices must be a sequence of integer joint indices.") from exc
+
+        normalized_indices = []
+        joint_count = self.model.joint_count
+        for selection_index, raw_index in enumerate(raw_indices):
+            if isinstance(raw_index, (bool, np.bool_)) or not isinstance(raw_index, (int, np.integer)):
+                raise TypeError(f"joint_indices[{selection_index}] must be an integer joint index, got {raw_index!r}.")
+            joint_index = int(raw_index)
+            if joint_index < 0 or joint_index >= joint_count:
+                raise ValueError(f"joint_indices[{selection_index}]={joint_index} out of range [0, {joint_count}).")
+            normalized_indices.append(joint_index)
+
+        if len(normalized_indices) != len(set(normalized_indices)):
+            raise ValueError("joint_indices contains duplicate joint indices.")
+
+        if isinstance(hard, (bool, np.bool_)):
+            normalized_modes = [int(bool(hard))] * len(normalized_indices)
+        else:
+            if isinstance(hard, (str, bytes)):
+                raise TypeError("hard must be a Boolean or a sequence of Booleans.")
+            try:
+                raw_modes = list(hard)
+            except TypeError as exc:
+                raise TypeError("hard must be a Boolean or a sequence of Booleans.") from exc
+            if len(raw_modes) != len(normalized_indices):
+                raise ValueError(
+                    f"hard mode count ({len(raw_modes)}) must match joint index count ({len(normalized_indices)})."
+                )
+            normalized_modes = []
+            for mode_index, mode in enumerate(raw_modes):
+                if not isinstance(mode, (bool, np.bool_)):
+                    raise TypeError(f"hard[{mode_index}] must be a Boolean, got {mode!r}.")
+                normalized_modes.append(int(bool(mode)))
+
+        if slot is None:
+            normalized_slot = -1
+        else:
+            if isinstance(slot, (bool, np.bool_)) or not isinstance(slot, (int, np.integer)):
+                raise TypeError(f"slot must be an integer structural slot or None, got {slot!r}.")
+            normalized_slot = int(slot)
+            if normalized_slot < 0 or normalized_slot >= 2:
+                raise ValueError(
+                    f"Cannot set constraint mode on slot={normalized_slot}. "
+                    "Only structural slots (LINEAR=0, ANGULAR=1) support hard mode."
+                )
+            for joint_index in normalized_indices:
+                constraint_dim = self._joint_constraint_dim_host[joint_index]
+                if normalized_slot >= constraint_dim:
+                    raise ValueError(
+                        f"slot={normalized_slot} exceeds joint constraint dimension ({constraint_dim}) "
+                        f"for joint_index={joint_index}."
+                    )
+
+        if not normalized_indices:
+            return
+
+        joint_indices_device = wp.array(normalized_indices, dtype=wp.int32, device=self.device)
+        hard_modes_device = wp.array(normalized_modes, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=set_joint_constraint_modes,
+            dim=len(normalized_indices),
+            inputs=[
+                joint_indices_device,
+                hard_modes_device,
+                normalized_slot,
+                self.joint_constraint_start,
+                self.joint_constraint_dim,
+                self.joint_is_hard,
+                self.joint_lambda_lin,
+                self.joint_lambda_ang,
+                self.joint_C0_lin,
+                self.joint_C0_ang,
+            ],
+            device=self.device,
+        )
+
+    def set_joint_constraint_mode(self, joint_index: int, hard: bool, slot: int | None = None) -> None:
         """Set hard or soft constraint mode for a joint's structural slots at runtime.
 
         Hard mode (augmented Lagrangian): uses persistent lambda + C0 stabilization
@@ -1791,52 +1984,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 drive/limit slot (>= 2), or the slot exceeds the joint's
                 constraint dimension.
         """
-        n_j = self.model.joint_count
-        if joint_index < 0 or joint_index >= n_j:
-            raise ValueError(f"joint_index={joint_index} out of range [0, {n_j}).")
-
-        with wp.ScopedDevice("cpu"):
-            c_start_np = self._to_numpy(self.joint_constraint_start, dtype=np.int32)
-            c_dim_np = self._to_numpy(self.joint_constraint_dim, dtype=np.int32)
-            is_hard_np = self._to_numpy(self.joint_is_hard, dtype=np.int32)
-
-            c0 = int(c_start_np[joint_index])
-            cdim = int(c_dim_np[joint_index])
-            val = 1 if hard else 0
-
-            if slot is not None:
-                if slot < 0 or slot >= 2:
-                    raise ValueError(
-                        f"Cannot set hard mode on slot={slot}. "
-                        "Only structural slots (LINEAR=0, ANGULAR=1) support hard mode."
-                    )
-                if slot >= cdim:
-                    raise ValueError(
-                        f"slot={slot} exceeds joint constraint dimension ({cdim}) for joint_index={joint_index}."
-                    )
-                is_hard_np[c0 + slot] = val
-            else:
-                structural_count = min(cdim, 2)
-                for s in range(structural_count):
-                    is_hard_np[c0 + s] = val
-
-            self.joint_is_hard = wp.array(is_hard_np, dtype=wp.int32, device=self.device)
-
-            if not hard:
-                lam_lin_np = self._to_numpy(self.joint_lambda_lin)
-                lam_ang_np = self._to_numpy(self.joint_lambda_ang)
-                C0_lin_np = self._to_numpy(self.joint_C0_lin)
-                C0_ang_np = self._to_numpy(self.joint_C0_ang)
-                if slot is None or slot == 0:
-                    lam_lin_np[joint_index] = [0.0, 0.0, 0.0]
-                    C0_lin_np[joint_index] = [0.0, 0.0, 0.0]
-                if (slot is None or slot == 1) and cdim > 1:
-                    lam_ang_np[joint_index] = [0.0, 0.0, 0.0]
-                    C0_ang_np[joint_index] = [0.0, 0.0, 0.0]
-                self.joint_lambda_lin = wp.array(lam_lin_np, dtype=wp.vec3, device=self.device)
-                self.joint_lambda_ang = wp.array(lam_ang_np, dtype=wp.vec3, device=self.device)
-                self.joint_C0_lin = wp.array(C0_lin_np, dtype=wp.vec3, device=self.device)
-                self.joint_C0_ang = wp.array(C0_ang_np, dtype=wp.vec3, device=self.device)
+        self.set_joint_constraint_modes([joint_index], hard, slot)
 
     @override
     def step(
