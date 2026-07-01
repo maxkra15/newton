@@ -12,6 +12,64 @@ from newton.solvers import SolverMuJoCo, SolverVBD
 
 
 class TestWaterhoseGeometry(unittest.TestCase):
+    def test_lift_phase_precedes_carry(self):
+        self.assertEqual(getattr(waterhose, "LIFT", None), 7)
+        self.assertEqual(waterhose.Example.Phase.LIFT + 1, waterhose.Example.Phase.CARRY)
+        self.assertEqual(waterhose.DONE, 14)
+
+    def test_lift_target_preserves_xy_and_reaches_preinsert_height(self):
+        phase_count = waterhose.DONE + 1
+        start = waterhose.wp.transform(waterhose.wp.vec3(1.0, 2.0, 3.0), waterhose.wp.quat_identity())
+        identity = waterhose.wp.transform()
+
+        phase = waterhose.wp.array([waterhose.LIFT], dtype=int, device="cpu")
+        target_position = waterhose.wp.zeros(1, dtype=waterhose.wp.vec3, device="cpu")
+        target_rotation = waterhose.wp.zeros(1, dtype=waterhose.wp.vec4, device="cpu")
+        gripper_blend = waterhose.wp.zeros(1, dtype=float, device="cpu")
+
+        waterhose.wp.launch(
+            waterhose._update_state_machine,
+            dim=1,
+            inputs=[
+                waterhose.wp.array([start, start], dtype=waterhose.wp.transform, device="cpu"),
+                phase,
+                waterhose.wp.array([2.0], dtype=float, device="cpu"),
+                waterhose.wp.ones(phase_count, dtype=float, device="cpu"),
+                waterhose.wp.array([start], dtype=waterhose.wp.transform, device="cpu"),
+                waterhose.wp.array([start], dtype=waterhose.wp.transform, device="cpu"),
+                waterhose.wp.zeros(1, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=float, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=int, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                waterhose.wp.zeros(phase_count, dtype=waterhose.wp.vec3, device="cpu"),
+                0,
+                1,
+                identity,
+                identity,
+                waterhose.wp.vec3(4.0, 5.0, 6.0),
+                waterhose.wp.quat_identity(),
+                waterhose.wp.vec3(),
+                waterhose.CONNECTOR_TIP_LENGTH,
+                waterhose.wp.quat_identity(),
+                waterhose.wp.vec3(),
+                0.01,
+                target_position,
+                target_rotation,
+                gripper_blend,
+            ],
+            device="cpu",
+        )
+
+        expected_z = 6.0 - 0.018 - waterhose.CONNECTOR_TIP_LENGTH
+        np.testing.assert_allclose(target_position.numpy()[0], [1.0, 2.0, expected_z], atol=1.0e-6)
+        self.assertEqual(int(phase.numpy()[0]), waterhose.CARRY)
+
     def test_robot_keeps_authored_collision_links(self):
         builder = newton.ModelBuilder()
         SolverMuJoCo.register_custom_attributes(builder)

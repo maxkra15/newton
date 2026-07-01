@@ -70,13 +70,14 @@ GRASP = 3
 HOLD_GRASP = 4
 RETRACT = 5
 SETTLE = 6
-CARRY = 7
-ALIGN = 8
-INSERT = 9
-HOLD_INSERTED = 10
-RELEASE = 11
-BACKOFF = 12
-DONE = 13
+LIFT = 7
+CARRY = 8
+ALIGN = 9
+INSERT = 10
+HOLD_INSERTED = 11
+RELEASE = 12
+BACKOFF = 13
+DONE = 14
 
 _RIGHT_FINGER_BODY_SUFFIXES = ("right_gripper_leftfinger", "right_gripper_rightfinger")
 
@@ -201,7 +202,7 @@ def _update_state_machine(
         frozen_tip_offset[0] = live_tip_offset
 
     tip_offset = static_tip_offset
-    if p == CARRY or p == ALIGN:
+    if p == LIFT or p == CARRY or p == ALIGN:
         tip_offset = live_tip_offset
     elif p == INSERT or p == HOLD_INSERTED:
         tip_offset = frozen_tip_offset[0]
@@ -209,6 +210,7 @@ def _update_state_machine(
     preinsert_tip = socket_position - 0.018 * insertion_axis
     inserted_tip = socket_position + 0.006 * insertion_axis
     preinsert_position = preinsert_tip - wp.quat_rotate(socket_grasp_rotation, tip_offset)
+    lift_position = wp.vec3(start_position[0], start_position[1], preinsert_position[2])
     coaxial_preinsert_position = preinsert_tip - wp.quat_rotate(coaxial_rotation, tip_offset)
     coaxial_insert_position = inserted_tip - wp.quat_rotate(coaxial_rotation, tip_offset)
 
@@ -226,6 +228,10 @@ def _update_state_machine(
         target_pos = start_position + wp.quat_rotate(entry_connector_rotation, wp.vec3(0.0, 0.05, 0.0))
         grip = 1.0
     elif p == SETTLE:
+        grip = 1.0
+    elif p == LIFT:
+        target_pos = lift_position
+        target_rot = socket_grasp_rotation
         grip = 1.0
     elif p == CARRY:
         target_pos = preinsert_position
@@ -365,13 +371,14 @@ class Example:
         HOLD_GRASP = 4
         RETRACT = 5
         SETTLE = 6
-        CARRY = 7
-        ALIGN = 8
-        INSERT = 9
-        HOLD_INSERTED = 10
-        RELEASE = 11
-        BACKOFF = 12
-        DONE = 13
+        LIFT = 7
+        CARRY = 8
+        ALIGN = 9
+        INSERT = 10
+        HOLD_INSERTED = 11
+        RELEASE = 12
+        BACKOFF = 13
+        DONE = 14
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -604,7 +611,8 @@ class Example:
             0.5,
             1.5,
             0.3,
-            5.0,
+            3.0,
+            2.0,
             2.0,
             4.0,
             1.0,
