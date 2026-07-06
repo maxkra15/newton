@@ -11,6 +11,9 @@ import warp as wp
 import warp.fem as fem
 
 import newton
+from newton._src.solvers.implicit_mpm.implicit_mpm_solver_kernels import (
+    supports_rebuildable_environment_nanogrid,
+)
 from newton.solvers import SolverImplicitMPM, SolverXPBD
 from newton.solvers.experimental.coupled import SolverCoupled, SolverCoupledProxy
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
@@ -372,6 +375,29 @@ def test_sparse_multiworld_constructs_environment_grid(test, device):
     test.assertLess(cell_capacity.max_upper_node_count, cell_capacity.max_voxel_count)
     test.assertLess(vertex_capacity.max_lower_node_count, vertex_capacity.max_voxel_count)
     test.assertLess(vertex_capacity.max_upper_node_count, vertex_capacity.max_voxel_count)
+
+
+def test_sparse_multiworld_node_capacities_are_total_reserves(test, device):
+    _require_sparse_capture_prerequisites(test, device)
+    if not supports_rebuildable_environment_nanogrid():
+        test.skipTest("Installed Warp does not expose rebuildable packed-environment Nanogrids.")
+    model = _make_two_world_particle_model(device)
+    positions = model.particle_q.numpy()
+    positions[::2, 1] = -0.06
+    positions[1::2, 1] = 0.06
+    model.particle_q.assign(positions)
+    config = _make_sparse_capture_config()
+    config.max_active_cell_count = 256
+    config.max_upper_node_count = 32
+    config.collider_basis = "Q1"
+    solver = SolverImplicitMPM(model, config=config, enable_timers=False)
+
+    capacity = solver._scratchpad.grid.cell_grid.get_rebuild_info()
+    test.assertEqual(solver._environment_count, 2)
+    test.assertEqual(capacity.max_voxel_count, 256)
+    test.assertEqual(capacity.max_leaf_node_count, 256)
+    test.assertEqual(capacity.max_lower_node_count, 32)
+    test.assertEqual(capacity.max_upper_node_count, 32)
 
 
 def test_cuda_graph_capture_capability_and_preparation(test, device):
@@ -891,6 +917,12 @@ add_function_test(
     TestImplicitMPMMultiworldSparse,
     "test_sparse_multiworld_constructs_environment_grid",
     test_sparse_multiworld_constructs_environment_grid,
+    devices=devices,
+)
+add_function_test(
+    TestImplicitMPMMultiworldSparse,
+    "test_sparse_multiworld_node_capacities_are_total_reserves",
+    test_sparse_multiworld_node_capacities_are_total_reserves,
     devices=devices,
 )
 add_function_test(

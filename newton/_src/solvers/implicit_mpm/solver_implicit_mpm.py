@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -85,6 +86,7 @@ from .implicit_mpm_solver_kernels import (
     scatter_field_dof_values,
     strain_delta_form,
     strain_rhs,
+    supports_rebuildable_environment_nanogrid,
     supports_rebuildable_nanogrid,
     update_particle_frames,
     update_particle_strains,
@@ -115,9 +117,19 @@ def _sparse_grid_rebuild_error(status: int) -> RuntimeError:
     if exceeded:
         details = ", ".join(exceeded)
         suggestions = []
-        if status & (wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED | wp.Volume.REBUILD_LEAF_CAPACITY_EXCEEDED):
+        if status & wp.Volume.REBUILD_VOXEL_CAPACITY_EXCEEDED:
             suggestions.append("increase Config.max_active_cell_count")
-        if status & (wp.Volume.REBUILD_LOWER_CAPACITY_EXCEEDED | wp.Volume.REBUILD_UPPER_CAPACITY_EXCEEDED):
+        if status & wp.Volume.REBUILD_LEAF_CAPACITY_EXCEEDED:
+            suggestions.append("set or increase Config.max_leaf_node_count")
+        if status & wp.Volume.REBUILD_LOWER_CAPACITY_EXCEEDED:
+            suggestions.append("set or increase Config.max_lower_node_count")
+        if status & wp.Volume.REBUILD_UPPER_CAPACITY_EXCEEDED:
+            suggestions.append("set or increase Config.max_upper_node_count")
+        if status & (
+            wp.Volume.REBUILD_LEAF_CAPACITY_EXCEEDED
+            | wp.Volume.REBUILD_LOWER_CAPACITY_EXCEEDED
+            | wp.Volume.REBUILD_UPPER_CAPACITY_EXCEEDED
+        ):
             suggestions.append("reduce the active grid's spatial spread")
         suggestion = " or ".join(suggestions)
         return RuntimeError(
@@ -125,6 +137,21 @@ def _sparse_grid_rebuild_error(status: int) -> RuntimeError:
             f"To avoid overflow, {suggestion}."
         )
     return RuntimeError(f"Implicit MPM sparse grid rebuild failed with status {status}.")
+
+
+def _validate_sparse_grid_node_capacity(name: str, value: int) -> int:
+    """Validate one optional NanoVDB hierarchy capacity."""
+    if isinstance(value, bool):
+        raise ValueError(f"Config.{name} must be -1 or a positive integer, got {value!r}.")
+    try:
+        capacity = operator.index(value)
+    except TypeError as error:
+        raise ValueError(f"Config.{name} must be -1 or a positive integer, got {value!r}.") from error
+    if capacity != -1 and not 0 < capacity <= np.iinfo(np.uint32).max:
+        raise ValueError(
+            f"Config.{name} must be -1 or a positive integer no greater than {np.iinfo(np.uint32).max}, got {capacity}."
+        )
+    return capacity
 
 
 def _make_grid_basis_space(grid: fem.Geometry, basis_str: str, family: fem.Polynomial | None = None):
@@ -786,6 +813,33 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         counts elsewhere. Call :meth:`check_sparse_grid_rebuild_status` after
         CUDA graph replay to detect sparse-grid overflow.
         """
+        max_leaf_node_count: int = -1
+        """Maximum NanoVDB leaf-node count across all worlds.
+
+        This independently bounds leaf topology for a rebuildable sparse grid.
+        ``-1`` reserves one leaf per :attr:`max_active_cell_count`, which is the
+        worst case for arbitrarily scattered active cells. Set an explicit
+        value only when application-level spatial bounds guarantee a tighter
+        limit. All node-capacity settings are validated at construction but
+        used only for rebuildable sparse grids.
+        """
+        max_lower_node_count: int = -1
+        """Maximum NanoVDB lower internal-node count across all worlds.
+
+        ``-1`` estimates the initial packed topology and reserves 16 times its
+        lower-node count. An explicit value budgets spatial-spread headroom
+        independently from active cells. Only used for rebuildable sparse
+        grids.
+        """
+        max_upper_node_count: int = -1
+        """Maximum NanoVDB upper internal-node count across all worlds.
+
+        ``-1`` estimates the initial packed topology and reserves 16 times its
+        upper-node count. Upper nodes cover regions 4096 voxels wide and are
+        substantially larger than lower or leaf nodes, so applications with
+        known spatial bounds can use this field to budget them explicitly.
+        Only used for rebuildable sparse grids.
+        """
         transfer_scheme: Literal["apic", "pic"] = "apic"
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
@@ -1093,6 +1147,16 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         self.grid_padding = config.grid_padding
         self.grid_type = config.grid_type
+        self.max_active_cell_count = config.max_active_cell_count
+        self.max_leaf_node_count = _validate_sparse_grid_node_capacity(
+            "max_leaf_node_count", config.max_leaf_node_count
+        )
+        self.max_lower_node_count = _validate_sparse_grid_node_capacity(
+            "max_lower_node_count", config.max_lower_node_count
+        )
+        self.max_upper_node_count = _validate_sparse_grid_node_capacity(
+            "max_upper_node_count", config.max_upper_node_count
+        )
         # Reuse requires every grid-backed space to retain valid Nanogrid topology.
         edge_topology_supported = getattr(fem.Nanogrid, "REBUILDABLE_EDGE_TOPOLOGY", False)
         strain_basis = config.strain_basis
@@ -1109,12 +1173,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         )
         self._sparse_rebuildable = (
             self.grid_type == "sparse"
-            and config.max_active_cell_count > 0
+            and self.max_active_cell_count > 0
             and self.grid_padding == 0
             and self.velocity_basis == "Q1"
             and strain_rebuild_safe
             and collider_rebuild_safe
             and supports_rebuildable_nanogrid()
+            and (not self._separate_worlds or supports_rebuildable_environment_nanogrid())
         )
         self._grid_status = None
         self._grid_accumulated_status = None
@@ -1123,7 +1188,6 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self.coloring = any("gauss-seidel" in solver or "gs" in solver for solver in self.solver)
         self.apic = config.transfer_scheme == "apic"
         self.gimp = config.integration_scheme == "gimp"
-        self.max_active_cell_count = config.max_active_cell_count
 
         self.collider_normal_from_sdf_gradient = config.collider_normal_from_sdf_gradient
         self.collider_basis = config.collider_basis
@@ -1985,6 +2049,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                             point_environment=self._particle_environment,
                             environment_count=self._environment_count,
                             guard_cells=guard_cells,
+                            max_leaf_node_count=self.max_leaf_node_count,
+                            max_lower_node_count=self.max_lower_node_count,
+                            max_upper_node_count=self.max_upper_node_count,
                         )
                         grid = fem.Nanogrid.from_environment_voxels(
                             positions,
@@ -2028,6 +2095,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                         max_active_voxels=self.max_active_cell_count if self._sparse_rebuildable else None,
                         status=self._grid_status,
                         point_mask=point_mask,
+                        max_leaf_node_count=self.max_leaf_node_count,
+                        max_lower_node_count=self.max_lower_node_count,
+                        max_upper_node_count=self.max_upper_node_count,
                     )
                     if self._sparse_rebuildable:
                         self.check_sparse_grid_rebuild_status()

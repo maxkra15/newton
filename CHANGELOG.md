@@ -54,6 +54,7 @@
 ### Fixed
 
 - Fix `SolverCoupled` to preserve BODY-, PARTICLE-, JOINT_COORD-, and JOINT_DOF-mapped custom state such as implicit-MPM history across steps, selectively reset and reconcile only requested worlds, and expose `reconcile_entry_state()` for public entry-local post-processing.
+- Add independent `max_leaf_node_count`, `max_lower_node_count`, and `max_upper_node_count` controls and level-specific overflow diagnostics to rebuildable sparse `SolverImplicitMPM`.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)

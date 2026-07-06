@@ -317,6 +317,34 @@ the number of worlds, and pass that total. Worlds may use the shared reserve
 unevenly. The sparse topology contains active local voxels and guard regions;
 it does not allocate all voxels spanning the physical distance between worlds.
 
+Rebuildable NanoVDB topology has four independent capacity levels: active
+voxels, leaf nodes, lower internal nodes, and upper internal nodes. Configure
+the latter three with ``max_leaf_node_count``, ``max_lower_node_count``, and
+``max_upper_node_count`` when application-level spatial bounds provide known
+limits. These are also total capacities shared by all worlds. Each override is
+independent, so an application may set one hierarchy level while leaving the
+others automatic. When ``max_upper_node_count`` is explicit and
+``max_lower_node_count`` remains automatic, Newton raises the automatic lower
+reserve to at least the requested upper reserve so that upper-node headroom is
+not bottlenecked by the default lower reserve. Explicit capacities are passed
+through independently, matching Warp; an explicit capacity above a smaller
+adjacent-level reserve is accepted, but may be unreachable and waste memory.
+The default ``-1`` keeps automatic sizing: leaf capacity equals
+``max_active_cell_count``. Lower and upper capacities reserve up to 16 times
+the initial packed topology at their respective hierarchy levels, capped by
+``max_active_cell_count`` and with minimum reserves of eight lower and four
+upper nodes when that active-cell capacity permits.
+
+Node capacity depends on spatial distribution, not just active-cell count. A
+single escaped particle can enter a new internal node without materially
+changing the active-voxel count; an upper node spans 4096 voxels along each
+axis. Increasing ``max_active_cell_count`` alone therefore does not resolve an
+internal-node overflow. Prefer application bounds or outflow handling, then
+set explicit node capacities from that bounded domain. Arbitrarily scattered
+particles require worst-case node capacities as large as the active-cell
+capacity, which is usually impractical because upper nodes are comparatively
+expensive.
+
 When Newton generates packed-environment offsets, a rebuild recomputes their
 values on the device from current per-world bounds. This lets independently
 moving worlds remain disjoint in packed NanoVDB coordinates. Offset values and
@@ -341,8 +369,9 @@ the following conditions hold:
   created before capture or ``"sparse"`` in the capacity-bounded rebuildable
   mode described above.
 - ``SolverImplicitMPM.Config.max_active_cell_count`` is positive and large
-  enough for every replay. Active subsets may change within that fixed total
-  capacity.
+  enough for every replay. Any explicit leaf, lower, and upper node capacities
+  are also large enough for the bounded particle distribution. Active subsets
+  may change within those fixed total capacities.
 - The installed Warp artifact provides capture-safe fixed-capacity FEM
   environment partitions and, for sparse grids, rebuildable topology for every
   selected basis.

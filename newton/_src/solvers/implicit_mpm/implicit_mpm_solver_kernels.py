@@ -992,10 +992,15 @@ def supports_rebuildable_volume() -> bool:
     try:
         allocate_parameters = inspect.signature(wp.Volume.allocate_by_voxels).parameters
         rebuild_parameters = inspect.signature(wp.Volume.rebuild).parameters
-        return {"rebuildable", "status", "point_mask"} <= allocate_parameters.keys() and {
+        return {
+            "rebuildable",
+            "max_active_voxels",
+            "max_leaf_nodes",
+            "max_lower_nodes",
+            "max_upper_nodes",
             "status",
             "point_mask",
-        } <= rebuild_parameters.keys()
+        } <= allocate_parameters.keys() and {"status", "point_mask"} <= rebuild_parameters.keys()
     except (AttributeError, ValueError, TypeError):
         return False
 
@@ -1010,6 +1015,28 @@ def supports_rebuildable_nanogrid() -> bool:
             supports_rebuildable_volume()
             and "rebuildable" in init_parameters
             and {"status", "point_mask"} <= rebuild_parameters.keys()
+        )
+    except (AttributeError, ValueError, TypeError):
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def supports_rebuildable_environment_nanogrid() -> bool:
+    """Whether Warp can construct rebuildable packed-environment Nanogrids."""
+    try:
+        environment_parameters = inspect.signature(fem.Nanogrid.from_environment_voxels).parameters
+        return (
+            supports_rebuildable_nanogrid()
+            and {
+                "rebuildable",
+                "max_active_voxels",
+                "max_leaf_nodes",
+                "max_lower_nodes",
+                "max_upper_nodes",
+                "status",
+                "point_mask",
+            }
+            <= environment_parameters.keys()
         )
     except (AttributeError, ValueError, TypeError):
         return False
@@ -1060,14 +1087,19 @@ def _rebuild_capacity(
     point_environment=None,
     environment_count: int | None = None,
     guard_cells: int = 3,
+    max_leaf_node_count: int = -1,
+    max_lower_node_count: int = -1,
+    max_upper_node_count: int = -1,
 ) -> dict[str, int]:
     """Estimate rebuildable-volume capacities (active voxels + NanoVDB node counts).
 
-    Active-voxel and leaf-node storage reserves ``max_active_voxels`` entries.
-    The lower/upper internal nodes each span 16x and 32x more cells, so their
-    counts are typically small; they are estimated from one throwaway build of
-    the current particles scaled by ``ratio`` for spreading headroom. Rebuild
-    status reports when any reserved capacity is exceeded.
+    Automatic leaf-node storage reserves ``max_active_voxels`` entries. The
+    lower/upper internal nodes each span 16x and 32x more cells, so their counts
+    are typically small; automatic capacities are estimated from one throwaway
+    build of the current particles scaled by ``ratio`` for spreading headroom.
+    Explicit node capacities allow applications with known spatial bounds to
+    budget each NanoVDB hierarchy level independently. Rebuild status reports
+    when any reserved capacity is exceeded.
     """
     if point_environment is None:
         initial = wp.Volume.allocate_by_voxels(
@@ -1089,19 +1121,30 @@ def _rebuild_capacity(
         )
 
     if ijk.shape[0] == 0:
-        return {
-            "max_active_voxels": max_active_voxels,
-            "max_leaf_nodes": max_active_voxels,
-            "max_lower_nodes": min(max_active_voxels, 8),
-            "max_upper_nodes": min(max_active_voxels, 4),
-        }
-    lower = np.unique(np.floor_divide(ijk, 8 * 16), axis=0).shape[0]
-    upper = np.unique(np.floor_divide(ijk, 8 * 16 * 32), axis=0).shape[0]
+        automatic_lower = min(max_active_voxels, 8)
+        automatic_upper = min(max_active_voxels, 4)
+    else:
+        lower = np.unique(np.floor_divide(ijk, 8 * 16), axis=0).shape[0]
+        upper = np.unique(np.floor_divide(ijk, 8 * 16 * 32), axis=0).shape[0]
+        automatic_lower = min(max_active_voxels, max(8, math.ceil(lower * ratio)))
+        automatic_upper = min(max_active_voxels, max(4, math.ceil(upper * ratio)))
+
+    lower_is_automatic = max_lower_node_count == -1
+    leaf_capacity = max_active_voxels if max_leaf_node_count == -1 else max_leaf_node_count
+    lower_capacity = automatic_lower if lower_is_automatic else max_lower_node_count
+    upper_capacity = automatic_upper if max_upper_node_count == -1 else max_upper_node_count
+
+    # Warp treats the four reserves as independent maxima. When only the upper
+    # reserve is explicit, preserve that requested headroom by growing the
+    # automatic lower reserve instead of silently bottlenecking it.
+    if max_upper_node_count != -1 and lower_is_automatic:
+        lower_capacity = max(lower_capacity, upper_capacity)
+
     return {
         "max_active_voxels": max_active_voxels,
-        "max_leaf_nodes": max_active_voxels,
-        "max_lower_nodes": min(max_active_voxels, max(8, math.ceil(lower * ratio))),
-        "max_upper_nodes": min(max_active_voxels, max(4, math.ceil(upper * ratio))),
+        "max_leaf_nodes": leaf_capacity,
+        "max_lower_nodes": lower_capacity,
+        "max_upper_nodes": upper_capacity,
     }
 
 
@@ -1114,12 +1157,24 @@ def allocate_by_voxels(
     capacity_ratio: float = 16.0,
     status=None,
     point_mask=None,
+    max_leaf_node_count: int = -1,
+    max_lower_node_count: int = -1,
+    max_upper_node_count: int = -1,
 ):
     if rebuildable:
         # Persistent capacity-sized volume refreshed in place each step so the sparse
         # grid build is CUDA-graph-capturable. Padding is unsupported here.
         capacity = max_active_voxels if max_active_voxels and max_active_voxels > 0 else particle_q.shape[0]
-        kwargs = _rebuild_capacity(particle_q, voxel_size, capacity_ratio, capacity, point_mask=point_mask)
+        kwargs = _rebuild_capacity(
+            particle_q,
+            voxel_size,
+            capacity_ratio,
+            capacity,
+            point_mask=point_mask,
+            max_leaf_node_count=max_leaf_node_count,
+            max_lower_node_count=max_lower_node_count,
+            max_upper_node_count=max_upper_node_count,
+        )
         if status is not None:
             kwargs["status"] = status
         if point_mask is not None:
