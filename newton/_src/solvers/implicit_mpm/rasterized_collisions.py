@@ -352,6 +352,15 @@ def collider_is_dynamic(collider_id: int, collider: Collider, body_mass: wp.arra
     return body_mass[body_id] > 0.0
 
 
+@wp.func
+def _clamp_vector_length(value: wp.vec3, max_length: float):
+    """Clamp a vector magnitude without changing its direction."""
+    value_length_sq = wp.length_sq(value)
+    if value_length_sq > max_length * max_length:
+        return value * (max_length / wp.sqrt(value_length_sq))
+    return value
+
+
 @wp.kernel
 def project_outside_collider(
     positions: wp.array[wp.vec3],
@@ -364,6 +373,7 @@ def project_outside_collider(
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
     body_q_prev: wp.array[wp.transform],
+    max_velocity: float,
     dt: float,
     positions_out: wp.array[wp.vec3],
     velocities_out: wp.array[wp.vec3],
@@ -388,6 +398,8 @@ def project_outside_collider(
         body_q: Rigid body transforms.
         body_qd: Rigid body velocities.
         body_q_prev: Previous rigid body transforms (for finite-difference velocity).
+        max_velocity: Maximum particle velocity and projection displacement rate. Deep penetration may require
+            multiple calls to resolve fully.
         dt: Timestep length.
         positions_out: Output particle positions.
         velocities_out: Output particle velocities.
@@ -396,6 +408,7 @@ def project_outside_collider(
     i = wp.tid()
 
     pos_adv = positions[i]
+    projection_origin = pos_adv
     p_vel = velocities[i]
     vel_grad = velocity_gradients[i]
 
@@ -404,6 +417,8 @@ def project_outside_collider(
         velocities_out[i] = p_vel
         velocity_gradients_out[i] = vel_grad
         return
+
+    p_vel = _clamp_vector_length(p_vel, max_velocity)
 
     environment_index = int(_ALL_COLLIDER_WORLDS)
     if particle_environment:
@@ -420,11 +435,20 @@ def project_outside_collider(
         friction = collider.material_friction[material_id]
         delta_vel = solve_coulomb_isotropic(friction, sdf_gradient, p_vel - sdf_vel) + sdf_vel - p_vel
 
-        p_vel += delta_vel
+        response_vel = _clamp_vector_length(p_vel + delta_vel, max_velocity)
+        delta_vel = response_vel - p_vel
+        p_vel = response_vel
         pos_adv += delta_vel * dt
 
         # project out
-        pos_adv -= wp.min(0.0, sdf_end + dt * wp.dot(delta_vel, sdf_gradient)) * sdf_gradient  # delta_vel * dt
+        projection_distance = -wp.min(0.0, sdf_end + dt * wp.dot(delta_vel, sdf_gradient))
+        projection_distance = wp.min(projection_distance, max_velocity * dt)
+        pos_adv += projection_distance * sdf_gradient
+
+        # A collision response follows the velocity-bounded MPM advection. Keep this second
+        # displacement bounded as well so a fast rigid collider cannot bypass particle_max_velocity.
+        projection_delta = _clamp_vector_length(pos_adv - projection_origin, max_velocity * dt)
+        pos_adv = projection_origin + projection_delta
 
         # make velocity gradient rigid
         vel_grad = 0.5 * (vel_grad - wp.transpose(vel_grad))

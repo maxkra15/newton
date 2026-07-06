@@ -1895,7 +1895,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         return self._mpm_model.collider.collider_body_index
 
     def project_outside(self, state_in: newton.State, state_out: newton.State, dt: float, gap: float | None = None):
-        """Project particles outside of colliders, and adjust their velocity and velocity gradients
+        """Project particles outside colliders and adjust velocity and velocity gradients.
+
+        Collision-response velocity and displacement are limited by
+        :attr:`Model.particle_max_velocity`, consistent with MPM advection. A
+        deeply embedded particle may therefore require multiple calls to leave
+        a collider completely.
 
         Args:
             state_in: The input state.
@@ -1923,6 +1928,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 state_in.body_q,
                 state_in.body_qd if self.collider_velocity_mode == "forward" else None,
                 self._last_step_data.body_q_prev if self.collider_velocity_mode == "backward" else None,
+                self.model.particle_max_velocity,
                 dt,
             ],
             outputs=[

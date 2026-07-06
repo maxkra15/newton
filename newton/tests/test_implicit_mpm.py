@@ -844,6 +844,49 @@ def test_multiworld_project_outside_filters_particle_world(test, device):
     )
 
 
+def test_project_outside_respects_particle_max_velocity(test, device):
+    model = _make_two_world_particle_model(device)
+    model.particle_max_velocity = 0.1
+    particle_flags = model.particle_flags.numpy()
+    particle_flags[0] = 0
+    model.particle_flags.assign(particle_flags)
+    particle_mass = model.particle_mass.numpy()
+    particle_mass[1] = 0.0
+    model.particle_mass.assign(particle_mass)
+    solver = SolverImplicitMPM(model, _make_mpm_config())
+    collider_mesh = _make_box_collider_mesh(device, half_extent=0.2, center=(0.05, 0.05, 0.05))
+    state_in = model.state()
+    input_velocities = state_in.particle_qd.numpy()
+    input_velocities[0] = (1.0, 2.0, 3.0)
+    input_velocities[1] = (-3.0, -2.0, -1.0)
+    state_in.particle_qd.assign(input_velocities)
+    initial_positions = state_in.particle_q.numpy()
+    particle_world = model.particle_world.numpy()
+
+    solver.setup_collider(collider_meshes=[collider_mesh], collider_world_ids=[0])
+    state_out = model.state()
+    dt = 0.01
+    solver.project_outside(state_in, state_out, dt=dt, gap=1.0)
+
+    world_positions = state_out.particle_q.numpy()[particle_world == 0]
+    world_velocities = state_out.particle_qd.numpy()[particle_world == 0]
+    displacements = np.linalg.norm(world_positions - initial_positions[particle_world == 0], axis=1)
+    speeds = np.linalg.norm(world_velocities, axis=1)
+    test.assertTrue(np.any(displacements > 0.0))
+    test.assertTrue(np.all(displacements[2:] <= model.particle_max_velocity * dt + 1.0e-7))
+    test.assertTrue(np.all(speeds[2:] <= model.particle_max_velocity + 1.0e-7))
+    np.testing.assert_array_equal(world_positions[:2], initial_positions[:2])
+    np.testing.assert_array_equal(world_velocities[:2], input_velocities[:2])
+
+    next_state = model.state()
+    solver.project_outside(state_out, next_state, dt=dt, gap=1.0)
+    next_world_positions = next_state.particle_q.numpy()[particle_world == 0]
+    next_displacements = np.linalg.norm(next_world_positions - world_positions, axis=1)
+    test.assertTrue(np.any(next_displacements[2:] > 0.0))
+    test.assertTrue(np.all(next_displacements[2:] <= model.particle_max_velocity * dt + 1.0e-7))
+    np.testing.assert_array_equal(next_world_positions[:2], world_positions[:2])
+
+
 def test_multiworld_render_grains_follow_particle_world(test, device):
     empty_world = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=0.0)
     empty_world.add_body(is_kinematic=True, label="empty_world_marker")
@@ -1614,6 +1657,13 @@ add_function_test(
     TestImplicitMPM,
     "test_multiworld_project_outside_filters_particle_world",
     test_multiworld_project_outside_filters_particle_world,
+    devices=basic_devices,
+)
+
+add_function_test(
+    TestImplicitMPM,
+    "test_project_outside_respects_particle_max_velocity",
+    test_project_outside_respects_particle_max_velocity,
     devices=basic_devices,
 )
 
