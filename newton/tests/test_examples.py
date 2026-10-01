@@ -1218,6 +1218,50 @@ class TestMPMExamples(unittest.TestCase):
 
 add_example_test(
     TestMPMExamples,
+    name="mpm.example_mpm_bowl",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "iterations": 10, "particle-radius": 0.025},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_bowl",
+    devices=cuda_test_devices,
+    test_options={
+        "num-frames": 60,
+        "solver": "particles",
+        "switch-time": 0.25,
+        "resize-time": 0.5,
+        "resize-voxel-size": 0.06,
+        "iterations": 10,
+        "particle-radius": 0.025,
+    },
+    use_viewer=True,
+    test_suffix="fidelity_and_resolution",
+)
+
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_bowl",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "solver": "particles", "particle-radius": 0.025, "fps": 20, "substeps": 1},
+    use_viewer=True,
+    test_suffix="large_dt",
+)
+
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_bowl",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "iterations": 1, "particle-radius": 0.025, "fps": 20, "substeps": 1},
+    use_viewer=True,
+    test_suffix="mpm_low_iterations_large_dt",
+)
+
+
+add_example_test(
+    TestMPMExamples,
     name="mpm.example_mpm_granular",
     devices=cuda_test_devices,
     test_options={"num-frames": 100},
