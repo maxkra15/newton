@@ -68,10 +68,16 @@ between the stages depends on the workload and is not established by the example
      - Pressure-dependent material friction coefficient
    * - ``--particle-cohesion``
      - Attraction range [m]
-     - Uses ``--yield-stress`` for cohesion
+     - Unused; calibrate tensile and shear strength separately
    * - ``--yield-stress``
      - Unused
-     - Cohesive yield stress [Pa]
+     - Deviatoric yield offset [Pa]
+   * - ``--yield-pressure``
+     - Unused
+     - Compressive pressure cap [Pa]
+   * - ``--tensile-yield-ratio``
+     - Unused
+     - Tensile pressure cap divided by compressive pressure cap
    * - ``--young-modulus``
      - Unused
      - Elastic stiffness [Pa]
@@ -335,14 +341,19 @@ and contact convergence, but does not test whether a particle crossed a mesh
 between two states.
 
 Residual checking is batched. The conditional CUDA graph checks after groups
-of five stress/contact sweeps, so a budget of one still executes five sweeps.
-The host loop uses the solver's own group size: 25 for Gauss-Seidel and 50 for
-Jacobi. It executes ``max_iterations // group_size`` groups; a smaller budget
-executes no iterative groups on that path. The graph and host paths therefore
-treat small budgets differently. ``--iterations 1`` is a deliberately low-budget
-CUDA test. Assess ``max_iterations`` and ``tolerance`` together with the actual
-convergence report and execution path, rather than interpreting the option as
-an exact kernel-launch count.
+of five stress/contact sweeps. The host loop uses the solver's own group size:
+25 for Gauss-Seidel and 50 for Jacobi. Both paths shorten the last group to
+respect ``max_iterations``, including budgets of one or two. Convergence can
+stop the solve at an earlier group boundary. A zero budget skips the nonlinear
+loop. CUDA graph replay resets its iteration counter before each solve.
+
+This branch fixes an earlier discrepancy: CUDA rounded small budgets up to
+five, while the host loop skipped a budget smaller than its group size. Use
+this corrected behavior when comparing low-iteration approximations.
+``max_iterations`` bounds the final nonlinear solve; chained warm-start stages
+add their own work. For example, ``("jacobi", "gs")`` adds five Jacobi smoother
+sweeps before the Gauss-Seidel budget. Assess tolerance, iteration budget,
+residuals, and the complete frame cost together.
 
 There are existing ``gs-soa`` and ``gs-batched`` variants. The former changes
 matrix memory layout; the latter trades some within-batch sequential
@@ -755,7 +766,9 @@ Resolution tests cover state preservation, invalid sizes, fixed-grid rejection,
 capture-time rejection, and rollback after sparse capacity overflow.
 The bowl tests cover full MPM, a particle-to-MPM handoff with resizing, and
 20 Hz frames with one substep in each fidelity. The low-budget MPM case requests
-one iteration; the batched solver-loop semantics described above still apply.
+and executes one nonlinear iteration. Iteration-loop tests count actual device
+sweeps for small and nondivisible budgets, early convergence, independent
+worlds, and repeated conditional graph launches.
 
 Profile a warmed-up rollout with fixed initial conditions, particle count,
 physical frame duration, material parameters, grid settings, and convergence
@@ -764,3 +777,380 @@ compilation/rendering. Compare retained mass and trajectories as well as time.
 For the fast/full comparison, record both the runtime gain and the material
 behavior difference. For optimizations within full MPM, verify matching
 residuals and history evolution.
+
+Development split: Newton and Isaac Lab
+-----------------------------------------
+
+The recommended split keeps numerical operations in Newton and training
+schedules in Isaac Lab. Inspection of Isaac Lab's ``develop`` branch at
+``e1988b935352d14fdcaddff996c8cd7ae6990a03`` (2026-10-01) found existing
+integration points:
+
+* `MPMSolverCfg <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab_newton/isaaclab_newton/physics/mpm_manager_cfg.py>`_
+  already exposes sparse-grid capacities, basis choices, solver chains, warm
+  starts, and optional post-step projection.
+* `NewtonMPMManager <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab_newton/isaaclab_newton/physics/mpm_manager.py>`_
+  owns stepping, capture compatibility, sparse rebuild status, and history resets.
+* `MPMObjectData <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab_newton/isaaclab_newton/assets/mpm_object/mpm_object_data.py>`_
+  gathers fixed-size particle position, velocity, and state buffers, and per-object
+  mean position/velocity. Its reads come from Newton's particle state.
+* `Curriculum terms <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab/isaaclab/envs/mdp/curriculums.py>`_
+  can schedule task parameters. Changing a configuration field alone does not
+  rebuild a live solver or update a recorded CUDA graph.
+
+.. list-table:: Ownership and implementation order
+   :header-rows: 1
+   :widths: 26 27 47
+
+   * - Work item
+     - Owner
+     - Next concrete change
+   * - Swept rigid collision projection
+     - Newton solver; Isaac Lab stepping adapter
+     - Propose the tested Newton API independently. Add previous-position and
+       previous-pose scratch buffers to the Isaac Lab manager before using it.
+   * - Runtime voxel size
+     - Newton solver; Isaac Lab curriculum
+     - Propose ``set_voxel_size`` independently. Add an Isaac Lab manager method
+       that updates the live solver, its config, and graph capture together.
+   * - Exact small iteration budgets
+     - Newton solver
+     - Submit the loop fix and regression tests separately from experimental
+       predictors or material changes.
+   * - Particle/MPM fidelity switching
+     - Newton demonstration; Isaac Lab task/manager
+     - Keep the bowl as a demonstration. Add the policy curriculum, observation
+       contract, reset semantics, and robot coupling in Isaac Lab.
+   * - Runtime particle radius
+     - Newton model properties; Isaac Lab curriculum
+     - Preserve the existing model update/notification path. Let the task choose
+       when to change radius and whether the density change is intentional.
+   * - Automatic particle splitting/merging
+     - Future Newton solver/model feature
+     - Design mass, momentum, constitutive-history transfer, and stable particle
+       identity before adding a training schedule. This branch does not do it.
+   * - Stress warm-start predictor and volume recovery
+     - Experimental benchmark first; Newton if validated
+     - Measure accuracy, contact residuals, energy, and cost on several granular
+       scenes before exposing a solver configuration parameter.
+
+Isaac Lab currently steps implicit MPM in place. Passing ``state_0`` as
+``state_prev`` after that step would use already-updated positions. The swept
+adapter must copy particle positions and collider poses before the substep,
+then use endpoint collider poses for projection. It must also account for
+prescribed kinematic motion and for a solver owned by a coupled manager.
+
+Runtime resolution and fidelity changes must happen at a physics boundary,
+outside capture. Isaac Lab's `NewtonManager <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab_newton/isaaclab_newton/physics/newton_manager.py>`_
+has graph invalidation and deferred recapture machinery. A manager-level
+voxel-size operation should call Newton's transactional resize, update its
+configuration only on success, and schedule capture before the next replay.
+It should preserve the asset's position/velocity buffers and invalidate any
+consumer caching grid-field pointers. Newton's voxel size is currently one
+setting for the whole solver, including separate worlds; a curriculum should
+therefore change it for the batch together.
+
+The particle/MPM training manager needs temporary XPBD working buffers because
+XPBD can overwrite its input positions. Keep particle IDs, count, mass,
+position/velocity layout, action units, observation ordering, policy timestep,
+and reward definitions stable. Publish the same asset data after either
+solver. Reset both MPM material-state buffers when returning from the particle
+stage, using the current configuration as the new strain reference. That
+preserves particle motion but introduces a deliberate material-history reset.
+
+The bowl and its stress predictor are single-world experiments. The current
+XPBD particle-pair kernel queries spatial neighbors without a world-ID filter.
+Training with overlapping world coordinates therefore needs world filtering
+in Newton or physically separated neighbor-query regions. Per-environment
+material randomization also needs an adapter: XPBD's particle-pair friction
+and attraction coefficients are model scalars, while MPM's material fields
+are particle arrays. A shared observation layout alone does not resolve
+either difference.
+
+For force observations, define a fixed probe or robot-wrench interface in SI
+units, with the same frame, averaging interval, filtering, and clipping in
+both stages. The fast stage can supply an analytical approximation; the full
+stage must read the appropriate MPM/rigid coupling reaction. The bowl's swept
+projector does not return reaction impulses to the bowl, and Isaac Lab's
+direct MPM manager is not a robot dynamics solver. An MPM stress tensor is
+also not a net robot force. Robot fine-tuning needs a coupling configuration
+and a verified wrench reduction before force observations can be treated as
+equivalent. This integration is planned; no policy-training or wrench adapter
+is implemented by the bowl example.
+
+Granular material matching should include tensile strength. Pair attraction
+range, tensile pressure cap, and deviatoric yield offset describe different
+effects. A tensile cap is
+``tensile_yield_ratio * yield_pressure``; a nonzero ratio with the default
+``1e15 Pa`` pressure cap would imply an enormous tensile strength. Choose
+finite pressure and tensile caps together, then calibrate shear offset and
+friction using settling, shear, pull-apart, and discharge measurements.
+The example exposes both controls so they can be explored independently.
+
+Low-iteration and volume-recovery experiments
+----------------------------------------------
+
+The standalone experiment compares identical two-second moving-bowl rollouts
+at 6,645 particles and two sparse-grid voxel sizes:
+
+.. code-block:: console
+
+   uv run --extra dev asv/benchmarks/simulation/bench_mpm_low_iterations.py \
+     --frames 120 --voxel-sizes 0.08 0.12 --output /tmp/mpm-low-iterations.json
+
+   uv run --extra dev asv/benchmarks/simulation/bench_mpm_low_iterations.py \
+     --paired --cases gs2 gs5 gs20 pic_captured2 pic_captured20 \
+     --cell-capacity 1024 --output /tmp/mpm-paired.json
+
+   uv run -m newton.examples mpm_bowl --iterations 2 --rheology-solver jacobi gs
+   uv run -m newton.examples mpm_bowl --iterations 2 --warmstart-mode none
+
+It fixes ``critical_fraction=1`` and ``tolerance=0`` to exercise the packing law
+and execute the requested number of final sweeps. It compares 2/5/10/20 sweeps
+to a 100-sweep reference at the same voxel size, cold starts, particle-backed
+stress history, existing Jacobi/CR chains, an XPBD stress predictor, and a
+bounded packing bias. Compilation and the first ten frames are excluded from
+timing. Measurement copies, sparse rebuild status, swept projection, and
+prescribed motion are included. This is a short trajectory comparison against
+another discretized simulation, rather than a physical ground-truth test.
+
+XPBD stress seed
+^^^^^^^^^^^^^^^^
+
+The experimental predictor copies the current state to temporary buffers and
+runs two XPBD particle iterations. At each iteration it estimates the pair
+constraint force from its displacement correction:
+
+.. math::
+
+   \mathbf f_{ij} \simeq
+   \frac{\omega}{(m_i^{-1}+m_j^{-1})\Delta t^2}
+   (\delta\mathbf x_t-\delta\mathbf x_n),
+   \qquad
+   \boldsymbol\sigma_i^{\mathrm{seed}} =
+   \frac{1}{2V_i}\sum_{j,I}
+   \operatorname{sym}(\mathbf f_{ij}^{I}\otimes\mathbf x_{ij}^{I}).
+
+Here :math:`\omega` is XPBD relaxation, :math:`I` indexes predictor iterations,
+and :math:`V_i=8r_i^3` matches MPM's reference particle volume. Compressive
+stress uses Newton's positive-pressure convention. The half factor shares
+each pair's virial between its two particles. The seed is rasterized through
+the same particle quadrature as a normal particle stress warm start, then
+projected onto MPM's yield surface by existing preprocessing.
+
+The predictor contributes an initial stress guess only. Its advanced
+positions/velocities are discarded; MPM still integrates the real state for
+one timestep and retains its elastic/plastic history. Gravity is consequently
+not applied twice to the live state. This initial prototype replaces the
+temporal stress guess and estimates particle-particle stress only. It does
+not predict wall-contact impulses, and its pair law is not a general mapping
+for elastic solids, snow, or fluids. If useful beyond the benchmark, the
+production implementation should reuse XPBD contact calculations and expose
+an explicit stress/impulse seed hook, rather than duplicate its pair law.
+
+Bounded packing bias
+^^^^^^^^^^^^^^^^^^^^
+
+The existing critical-fraction law adds a positive void allowance
+:math:`\max(\phi_c V_{\mathrm{free}}-V_p,0)`. It clamps an overfilled cell's
+allowance to zero; it does not request expansion to recover packing lost in
+earlier steps. Collision projection can increase particle concentration
+without appearing in the grid's strain solve.
+
+The experimental Baumgarte-style extension also measures that excess:
+
+.. math::
+
+   e = \max(V_p-\phi_c V_{\mathrm{free}},0),
+   \qquad
+   o = \max(\phi_c V_{\mathrm{free}}-V_p,0)
+       -\min(\beta e,c_{\max}V_p).
+
+The prototype uses :math:`\beta=0.2` and :math:`c_{\max}=0.05`. Volumes here are
+the existing normalized FEM integrals. The signed offset is mapped with
+Newton's ``unilateral_offset_to_strain_rhs`` and inserted into the strain
+right-hand side before the coupled solve. Existing postprocessing removes
+the offset from physical material strain. The negative component keeps
+cohesion enabled; only actual void allowance follows the existing cohesion
+disable rule. The strain matrix already includes :math:`\Delta t`, so the
+offset is a per-step volume correction; dividing it by timestep again would
+give the wrong scaling.
+
+This uses current packing as an error signal and therefore reacts on the
+next solve to concentration introduced by projection. It does not measure
+only projection-induced error, and it does not increase grid contact DOFs.
+It can also react to quadrature noise, ordinary underconvergence, or a changed
+grid resolution. Bounded correction prevents asking for complete recovery in
+one step, but does not guarantee energy stability. `Baumgarte stabilization
+in Box2D <https://box2d.org/posts/2024/02/solver2d/>`_ provides the analogous
+position-error velocity bias and discusses its energy/jitter tradeoff; applying
+that idea to MPM packing here is an experimental extension.
+
+Before merging a volume-recovery feature, compare this density signal with a
+projection-displacement divergence signal, test a timestep-aware recovery
+timescale, and evaluate damped or split position correction. Test static
+piles, driven walls, narrow gaps, large timesteps, resolution changes, and
+compliant/cohesive materials. Check packing, retained mass, contact work,
+particle kinetic energy, elastic strain, and wall-force bias together. A
+lower packing error alone is insufficient evidence of improved fidelity.
+
+Particle-based contact sampling
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The experiment also compares ``collider_basis="pic"`` with the default
+``"S2"`` basis. This changes the sampling of rigid contact while retaining
+the Q1 velocity grid, P0 strain basis, APIC transfer, constitutive model, and
+particle stress history. It does not replace MPM with particle dynamics.
+
+There are two differences relevant to a low iteration count. Contact is
+sampled at particles instead of the serendipity grid nodes. Additionally,
+the existing point-basis impulse history is stored by particle index and can
+be copied into a rebuilt grid's quadrature ordering. The rebuildable S2 path
+currently clears its grid impulse guess because the previous grid topology
+has been overwritten. The quality experiment changes both effects together;
+it does not isolate the contribution of contact sampling from warm starting.
+
+Warp 1.17.0 computes an unbounded point basis's maximum points per cell using
+a device-to-host readback. That readback prevents outer frame capture during
+grid rebuild. Newton already accepts ``"picN"`` with an integer upper bound;
+``collider_basis="pic512"`` bypasses the readback through the existing public
+configuration. The captured benchmark uses that form and records actual
+maximum cell occupancy on the GPU. If occupancy exceeds the bound, its status
+check raises and the rollout must be discarded. A bound without an overflow
+check could silently omit contact contributions.
+
+The measured maximum was 49 particles per cell at 8 cm voxels and 131 at
+12 cm voxels. These values apply to this rollout, particle spacing, and
+material, not arbitrary piles. A coarse grid can increase particles per cell
+even while reducing active cell count. A production change should add a
+checked point-basis capacity to Newton's existing status mechanism, including
+graph replay and per-world tests. The benchmark's subclass is a prototype of
+the check. Larger particle counts need separate cost and memory measurements.
+
+An alternative worth testing next is a warm start for S2 contact impulses
+keyed by stable world, collider, and grid-node coordinates, with validation
+when contact normals or active colliders change. It must gather from a cache
+that survives topology rebuild; interpolating through the overwritten grid
+is unsafe. That experiment could retain the default contact discretization
+and avoid the extra XPBD prediction. It is not implemented here.
+
+Recorded findings and next decisions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The records below were collected on an RTX 4090 with Warp 1.17.0, using the
+two-second protocol above. Other GPU jobs were present during several runs.
+Absolute timings vary substantially with that load; do not compare throughput
+across the serial and paired records. All records, including containment
+failures and the different load conditions, are available as
+:download:`raw experiment data <mpm_bowl_experiments.json>`.
+
+One lower-load serial run at 8 cm voxels produced:
+
+.. list-table:: Default S2 contact basis, 6,645 particles
+   :header-rows: 1
+   :widths: 40 20 20 20
+
+   * - Method
+     - Median frame [ms]
+     - Position RMS vs. 100 sweeps [cm]
+     - Grid packing excess [%]
+   * - GS 100
+     - 14.60
+     - 0.00
+     - 32.64
+   * - GS 20
+     - 7.13
+     - 2.61
+     - 43.08
+   * - GS 5
+     - 5.74
+     - 7.00
+     - 52.97
+   * - GS 2
+     - 5.60
+     - 11.23
+     - 68.17
+   * - XPBD stress seed + GS 2
+     - 6.50
+     - 8.33
+     - 52.32
+   * - Packing bias + GS 2
+     - 5.30
+     - 10.72
+     - 25.53
+
+Here packing excess is
+``sum(max(particle_volume - free_volume, 0)) / sum(particle_volume)``
+on the last substep's assembled grid. It is a quadrature/packing diagnostic,
+not a measurement of lost particle mass or conserved physical volume. The
+nonzero 100-sweep value illustrates why this metric needs independent physical
+validation. Position errors match particle identities at the rollout endpoint.
+
+The XPBD stress seed improved two-sweep position error by about 26%, but five
+ordinary GS sweeps were cheaper and more accurate in this run. The seed also
+increased projection RMS from 0.207 to 0.268 mm. At 12 cm voxels, the same
+comparison gave 11.00 cm without the seed and 8.50 cm with it. Replacing the
+temporal stress guess with this raw pair estimate is consequently not a good
+production default. Future predictors should consider contact impulses,
+temporal/predicted stress blending, and cost against a five-sweep control.
+
+The Jacobi-five-sweep/GS-two-sweep chain did not improve endpoint error in
+this scene. CR-two-sweep/GS-two-sweep failed the coarse-grid containment check
+with 48 particles outside below the rim and a 13.07 m/s maximum speed. That
+records an unsuccessful rollout; it does not by itself distinguish a wall
+crossing from particles launched through the open rim. The zero-sweep
+diagnostic collapsed the pile and required projection for every particle.
+It is not a useful substitute for the fast XPBD environment.
+
+The packing bias reduced its grid error substantially but increased motion:
+at 8 cm, RMS speed rose from 0.420 to 0.517 m/s for the two-sweep comparison,
+and projection RMS rose to 0.568 mm. The 20-sweep bias also moved the result
+farther from the unbiased 100-sweep reference. This prototype should remain
+experimental until recovery timescale, damping, energy, and wall-force tests
+show a favorable tradeoff.
+
+Particle-based contacts gave a more promising low-sweep approximation:
+
+.. list-table:: Endpoint position RMS against each basis's own 100-sweep reference
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * - Method
+     - 8 cm voxels [cm]
+     - 12 cm voxels [cm]
+   * - S2, GS 2
+     - 11.23
+     - 11.00
+   * - pic512, GS 2
+     - 1.92
+     - 1.17
+   * - pic512, GS 20
+     - 0.38
+     - 0.26
+
+Both captured and uncaptured point-basis runs passed containment and had
+matching recorded quality metrics. The point-basis 100-sweep result itself
+differs from the S2 reference by 3.02/3.23 cm, so the table compares convergence
+within each contact discretization. It does not establish greater physical
+accuracy for point contacts. Paired timing alternates cases in randomized
+order each frame. Under concurrent GPU load, S2 and point-contact two-sweep
+frames were approximately equal in cost (about 100 ms in one such run), with
+100-sweep frames around 128 ms. Isolated timing on an idle GPU and larger
+particle counts is needed before recommending a throughput advantage.
+
+Reducing reserved active cells from 4,096 to 1,024 preserved all recorded
+quality metrics for these two voxel sizes and passed the rebuild checks.
+It reduces reserved grid work and storage, but these runs do not isolate its
+timing gain from changing GPU load. Reserve capacity for the entire intended
+motion and resolution schedule, then keep checking overflow during replay.
+The example's larger default also supports its finer-grid resize schedule;
+the smaller tested bound is not a general replacement.
+
+The resulting implementation order is: propose runtime voxel changes, swept
+projection, and the exact iteration-budget fix as separate Newton changes;
+keep the XPBD/MPM demonstration available for pretraining; test checked point
+contact capacity and an S2 impulse cache next; refine volume recovery only
+after measuring energy and force effects. Isaac Lab should own the shared
+observation/wrench adapter and the curriculum that calls those numerical
+operations. Automatic particle splitting/merging remains a separate design
+task rather than a radius update.

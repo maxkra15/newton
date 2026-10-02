@@ -101,6 +101,10 @@ class Example:
             raise ValueError("Solver iteration counts must be positive.")
         if args.particle_cohesion < 0.0 or args.friction < 0.0 or args.density <= 0.0:
             raise ValueError("Cohesion and friction must be nonnegative and density must be positive.")
+        if args.yield_pressure < 0.0 or args.tensile_yield_ratio < 0.0 or not 0.0 <= args.critical_fraction <= 1.0:
+            raise ValueError(
+                "Yield pressure and tensile ratio must be nonnegative; critical fraction must be in [0, 1]."
+            )
         if args.max_active_cell_count < 128:
             raise ValueError("max-active-cell-count must be at least 128 for the bowl's reserved grid hierarchy.")
         if args.switch_time >= 0.0 and args.solver != "particles":
@@ -143,6 +147,8 @@ class Example:
         self.model.particle_cohesion = args.particle_cohesion
         self.model.mpm.friction.fill_(args.friction)
         self.model.mpm.young_modulus.fill_(args.young_modulus)
+        self.model.mpm.yield_pressure.fill_(args.yield_pressure)
+        self.model.mpm.tensile_yield_ratio.fill_(args.tensile_yield_ratio)
         self.model.mpm.yield_stress.fill_(args.yield_stress)
         self.model.mpm.viscosity.fill_(args.viscosity)
 
@@ -154,7 +160,9 @@ class Example:
             max_lower_node_count=64,
             max_upper_node_count=16,
             collider_basis="S2",
-            warmstart_mode="particles",
+            solver=tuple(args.rheology_solver),
+            warmstart_mode=args.warmstart_mode,
+            critical_fraction=args.critical_fraction,
             max_iterations=args.iterations,
             tolerance=args.tolerance,
         )
@@ -363,9 +371,29 @@ class Example:
             help="XPBD attraction range [m]; this is independent of MPM yield stress.",
         )
         parser.add_argument("--young-modulus", type=float, default=1.0e15)
-        parser.add_argument("--yield-stress", type=float, default=0.0, help="MPM cohesive yield stress [Pa].")
+        parser.add_argument("--yield-pressure", type=float, default=1.0e15, help="MPM compressive yield pressure [Pa].")
+        parser.add_argument(
+            "--tensile-yield-ratio",
+            type=float,
+            default=0.0,
+            help="MPM tensile yield pressure / compressive yield pressure.",
+        )
+        parser.add_argument("--yield-stress", type=float, default=0.0, help="MPM deviatoric yield offset [Pa].")
         parser.add_argument("--viscosity", type=float, default=0.0, help="MPM viscosity [Pa s].")
         parser.add_argument("--iterations", type=int, default=100, help="Maximum MPM rheology iterations.")
+        parser.add_argument(
+            "--rheology-solver",
+            nargs="+",
+            default=["gs"],
+            help="MPM rheology solver or warm-start chain, e.g. jacobi gs or cr gs.",
+        )
+        parser.add_argument("--warmstart-mode", choices=("particles", "none"), default="particles")
+        parser.add_argument(
+            "--critical-fraction",
+            type=float,
+            default=0.0,
+            help="MPM maximum packing fraction; zero disables the void law.",
+        )
         parser.add_argument("--particle-iterations", type=int, default=2, help="XPBD contact iterations.")
         parser.add_argument("--tolerance", type=float, default=1.0e-4)
         parser.add_argument("--motion-frequency", type=float, default=0.5, help="Bowl motion frequency [Hz].")
