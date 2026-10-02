@@ -252,7 +252,7 @@ def update_condition(
         converged = converged and residual[0, batch] < residual_threshold * l2_scale
         converged = converged and residual[1, batch] < residual_threshold
 
-    stop = converged or cur_it > max_iterations
+    stop = converged or cur_it >= max_iterations
 
     iteration[0] = cur_it
     condition[0] = wp.where(stop, 0, 1)
@@ -275,7 +275,7 @@ def update_batched_condition(
         converged = converged and residual[0, batch] < residual_threshold * scale * scale
         converged = converged and residual[1, batch] < residual_threshold
 
-    stop = converged or cur_it > max_iterations
+    stop = converged or cur_it >= max_iterations
 
     iteration[0] = cur_it
     condition[0] = wp.where(stop, 0, 1)
@@ -1799,21 +1799,21 @@ def _run_solver_loop(
     verbose: bool,
     temporary_store: fem.TemporaryStore,
 ):
+    """Respect the nonlinear iteration budget on host and captured device loops."""
+    if max_iterations <= 0:
+        return None
+
     solve_graph = None
     if use_graph:
         solve_granularity = 5
+        full_iterations = max_iterations - max_iterations % solve_granularity
+        remaining_iterations = max_iterations - full_iterations
 
         iteration_and_condition = fem.borrow_temporary(temporary_store, shape=(2,), dtype=int)
-        iteration_and_condition.fill_(1)
-
         iteration = iteration_and_condition[:1]
         condition = iteration_and_condition[1:]
 
-        def do_iteration_with_condition():
-            for _k in range(solve_granularity):
-                contact_solver.solve()
-                rheology_solver.solve()
-            residual = rheology_solver.eval_residual()
+        def update_iteration_condition(iteration_count, iteration_limit, residual):
             if rheology_solver.rheology.strain_environment_offsets is None:
                 wp.launch(
                     update_condition,
@@ -1821,8 +1821,8 @@ def _run_solver_loop(
                     inputs=[
                         tolerance * tolerance,
                         l2_tolerance_scale * l2_tolerance_scale,
-                        solve_granularity,
-                        max_iterations,
+                        iteration_count,
+                        iteration_limit,
                         residual,
                         iteration,
                         condition,
@@ -1835,22 +1835,49 @@ def _run_solver_loop(
                     inputs=[
                         tolerance * tolerance,
                         l2_tolerance_scale,
-                        solve_granularity,
-                        max_iterations,
+                        iteration_count,
+                        iteration_limit,
                         residual,
                         iteration,
                         condition,
                     ],
                 )
 
+        def do_iterations(iteration_count, iteration_limit):
+            for _k in range(iteration_count):
+                contact_solver.solve()
+                rheology_solver.solve()
+            update_iteration_condition(iteration_count, iteration_limit, rheology_solver.eval_residual())
+
+        def do_iteration_with_condition():
+            do_iterations(solve_granularity, full_iterations)
+
+        def do_remaining_iterations():
+            do_iterations(remaining_iterations, max_iterations)
+
+        def do_solve():
+            # Record initialization too, so each enclosing or returned graph replay starts fresh.
+            iteration.zero_()
+            condition.fill_(1)
+            if full_iterations:
+                wp.capture_while(condition, do_iteration_with_condition)
+            if remaining_iterations:
+                if full_iterations:
+                    # The main loop stops at its batch boundary. Run the tail only if
+                    # it stopped for the budget rather than convergence.
+                    update_iteration_condition(0, max_iterations, rheology_solver.eval_residual())
+                    wp.capture_if(condition, do_remaining_iterations)
+                else:
+                    do_remaining_iterations()
+
         device = rheology_solver.device
         if device.is_capturing:
             with _ScopedDisableGC():
-                wp.capture_while(condition, do_iteration_with_condition)
+                do_solve()
         else:
             with _ScopedDisableGC():
                 with wp.ScopedCapture(force_module_load=False) as capture:
-                    wp.capture_while(condition, do_iteration_with_condition)
+                    do_solve()
             solve_graph = capture.graph
             wp.capture_launch(solve_graph)
 
@@ -1875,8 +1902,9 @@ def _run_solver_loop(
             else l2_tolerance_scale.numpy()
         )
 
-        for batch in range(max_iterations // solve_granularity):
-            for _k in range(solve_granularity):
+        for batch_start in range(0, max_iterations, solve_granularity):
+            batch_iterations = min(solve_granularity, max_iterations - batch_start)
+            for _k in range(batch_iterations):
                 contact_solver.solve()
                 rheology_solver.solve()
 
@@ -1885,7 +1913,7 @@ def _run_solver_loop(
 
             if verbose:
                 print(
-                    f"{rheology_solver.name} iteration #{(batch + 1) * solve_granularity} \t res(l2)={res_l2}, res(linf)={res_linf}"
+                    f"{rheology_solver.name} iteration #{batch_start + batch_iterations} \t res(l2)={res_l2}, res(linf)={res_linf}"
                 )
             if res_l2 < tolerance and res_linf < tolerance:
                 break
