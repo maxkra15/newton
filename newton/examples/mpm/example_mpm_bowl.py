@@ -309,7 +309,7 @@ class Example:
         below_rim = local[:, 2] < -0.04
         # The mesh approximates the sphere with planar facets.
         assert np.all(np.linalg.norm(local[below_rim], axis=1) < self.bowl_radius + 0.01), (
-            "Particles tunneled through the bowl"
+            "Particles are outside the bowl below its rim"
         )
 
     def render(self):

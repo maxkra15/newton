@@ -12,7 +12,7 @@ live outside the production solver so their quality and cost can be compared fir
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
 
@@ -135,11 +135,14 @@ class _StressPredictor(SolverXPBD):
 class _ExperimentalMPM(SolverImplicitMPM):
     """Keep experimental predictors and stabilization out of the production API."""
 
-    def __init__(self, model, config, *, xpbd_seed=False, packing_beta=0.0, point_capacity=0):
+    def __init__(
+        self, model, config, *, xpbd_seed=False, packing_beta=0.0, point_capacity=0, clear_contact_warmstart=False
+    ):
         self.point_capacity = point_capacity
         self.max_points_per_cell = wp.zeros(1, dtype=int, device=model.device)
         super().__init__(model, config)
         self.packing_beta = packing_beta
+        self.clear_contact_warmstart = clear_contact_warmstart
         self.predictor = _StressPredictor(model) if xpbd_seed else None
         self.predictor_in = model.state() if xpbd_seed else None
         self.predictor_out = model.state() if xpbd_seed else None
@@ -191,6 +194,9 @@ class _ExperimentalMPM(SolverImplicitMPM):
 
     def _load_warmstart(self, state_in, last_step_data, scratch, pic, inv_cell_volume):
         super()._load_warmstart(state_in, last_step_data, scratch, pic, inv_cell_volume)
+        if self.clear_contact_warmstart:
+            # Isolate contact history while retaining the same particle stress guess.
+            scratch.impulse_field.dof_values.zero_()
         if self.predictor is not None:
             for name in ("particle_q", "particle_qd", "particle_f", "body_q", "body_qd"):
                 wp.copy(getattr(self.predictor_in, name), getattr(state_in, name))
@@ -227,6 +233,8 @@ class _Case:
     packing_beta: float = 0.0
     collider_basis: str = "S2"
     point_capacity: int = 0
+    cell_capacity: int | None = None
+    clear_contact_warmstart: bool = False
 
 
 _CASES = (
@@ -246,12 +254,14 @@ _CASES = (
     _Case("pic2", 2, collider_basis="pic"),
     _Case("pic20", 20, collider_basis="pic"),
     _Case("pic_captured100", 100, collider_basis="pic", point_capacity=512),
+    _Case("pic_cold_contact2", 2, collider_basis="pic", point_capacity=512, clear_contact_warmstart=True),
     _Case("pic_captured2", 2, collider_basis="pic", point_capacity=512),
     _Case("pic_captured20", 20, collider_basis="pic", point_capacity=512),
 )
 
 
 def _make_example(case, *, voxel_size, particle_radius, cuda_graph, cell_capacity=4096):
+    cell_capacity = case.cell_capacity if case.cell_capacity is not None else cell_capacity
     args = Example.create_parser().parse_args(
         [
             "--no-use-cuda-graph",
@@ -284,6 +294,7 @@ def _make_example(case, *, voxel_size, particle_radius, cuda_graph, cell_capacit
         xpbd_seed=case.xpbd_seed,
         packing_beta=case.packing_beta,
         point_capacity=case.point_capacity,
+        clear_contact_warmstart=case.clear_contact_warmstart,
     )
     example.use_cuda_graph = cuda_graph
     example.capture()
@@ -326,13 +337,26 @@ def main():
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--particle-radius", type=float, default=0.016)
     parser.add_argument("--cell-capacity", type=int, default=4096)
+    parser.add_argument(
+        "--compare-cell-capacity", type=int, help="Include a second grid capacity in paired measurements."
+    )
+    parser.add_argument(
+        "--point-capacity", type=int, default=512, help="Checked points-per-cell bound for captured contacts."
+    )
     parser.add_argument("--voxel-sizes", type=float, nargs="+", default=[0.08, 0.12])
     parser.add_argument("--cases", nargs="+", choices=[case.name for case in _CASES])
     parser.add_argument("--no-cuda-graph", action="store_true")
     parser.add_argument("--paired", action="store_true", help="Interleave captured MPM-only cases for paired timings.")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for the paired measurement order.")
     args = parser.parse_args()
     if args.frames <= 10:
         parser.error("--frames must exceed the 10 warmup frames")
+    if args.point_capacity < 1:
+        parser.error("--point-capacity must be positive")
+    if args.compare_cell_capacity is not None and (
+        not args.paired or args.compare_cell_capacity < 128 or args.compare_cell_capacity == args.cell_capacity
+    ):
+        parser.error("--compare-cell-capacity requires --paired and a different capacity of at least 128")
 
     wp.config.enable_backward = False
     wp.config.log_level = wp.LOG_WARNING
@@ -348,11 +372,14 @@ def main():
         "device": device.name,
         "particle_radius_m": args.particle_radius,
         "max_active_cell_count": args.cell_capacity,
+        "compare_cell_capacity": args.compare_cell_capacity,
+        "point_capacity": args.point_capacity,
         "frames": args.frames,
         "fps": 60,
         "substeps": 2,
         "cuda_graph": not args.no_cuda_graph,
         "paired": args.paired,
+        "seed": args.seed,
         "critical_fraction": 1.0,
         "tolerance": 0.0,
         "jacobi_seed_iterations": 5,
@@ -365,33 +392,42 @@ def main():
     required = {"reference"}
     if requested & {"pic2", "pic20"}:
         required.add("pic100")
-    if requested & {"pic_captured2", "pic_captured20"}:
+    if requested & {"pic_captured2", "pic_captured20", "pic_cold_contact2"}:
         required.add("pic_captured100")
     selected = [case for case in _CASES if case.name in requested | required]
+    selected = [replace(case, point_capacity=args.point_capacity) if case.point_capacity else case for case in selected]
+    if args.compare_cell_capacity is not None:
+        selected = [
+            variant for case in selected for variant in (case, replace(case, cell_capacity=args.compare_cell_capacity))
+        ]
     if args.paired and (
         args.no_cuda_graph
         or any(case.xpbd_seed or (case.collider_basis == "pic" and not case.point_capacity) for case in selected)
     ):
         parser.error("--paired requires captured MPM-only cases; exclude XPBD seeds and unbounded pic bases")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    def case_key(case):
+        return case.name, case.cell_capacity if case.cell_capacity is not None else args.cell_capacity
+
     for voxel_size in args.voxel_sizes:
         reference_q = reference_v = None
         basis_references = {}
         paired_examples, paired_times = {}, {}
         if args.paired:
             for case in selected:
-                paired_examples[case.name] = _make_example(
+                paired_examples[case_key(case)] = _make_example(
                     case,
                     voxel_size=voxel_size,
                     particle_radius=args.particle_radius,
                     cuda_graph=True,
                     cell_capacity=args.cell_capacity,
                 )
-                paired_times[case.name] = []
-            order = np.random.default_rng(42)
+                paired_times[case_key(case)] = []
+            order = np.random.default_rng(args.seed)
             for frame in range(args.frames):
                 for index in order.permutation(len(selected)):
-                    name = selected[index].name
+                    name = case_key(selected[index])
                     start = time.perf_counter()
                     paired_examples[name].step()
                     wp.synchronize_device(device)
@@ -402,8 +438,8 @@ def main():
             # every rebuild. Keep this diagnostic path outside outer capture.
             cuda_graph = not args.no_cuda_graph and (case.collider_basis != "pic" or case.point_capacity > 0)
             if args.paired:
-                example = paired_examples.pop(case.name)
-                times = paired_times[case.name]
+                example = paired_examples.pop(case_key(case))
+                times = paired_times[case_key(case)]
             else:
                 example = _make_example(
                     case,
@@ -430,7 +466,7 @@ def main():
                 raise RuntimeError(f"{case.name} produced nonfinite state; cannot compare rollout metrics")
             if reference_q is None:
                 reference_q, reference_v = q, velocity
-            basis_key = case.collider_basis, bool(case.point_capacity)
+            basis_key = case.collider_basis, bool(case.point_capacity), case_key(case)[1]
             if case.iterations == 100:
                 basis_references[basis_key] = q, velocity
             if basis_key in basis_references:
@@ -445,11 +481,13 @@ def main():
                 "case": case.name,
                 "voxel_size_m": voxel_size,
                 "particles": example.model.particle_count,
+                "max_active_cell_count": case_key(case)[1],
                 "final_iterations": case.iterations,
                 "solver": case.solver,
                 "collider_basis": example.mpm_solver.collider_basis,
                 "cuda_graph": cuda_graph,
                 "point_capacity": case.point_capacity,
+                "clear_contact_warmstart": case.clear_contact_warmstart,
                 "max_points_per_cell": int(example.mpm_solver.max_points_per_cell.numpy()[0])
                 if case.point_capacity
                 else None,

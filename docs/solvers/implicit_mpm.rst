@@ -1135,8 +1135,8 @@ within each contact discretization. It does not establish greater physical
 accuracy for point contacts. Paired timing alternates cases in randomized
 order each frame. Under concurrent GPU load, S2 and point-contact two-sweep
 frames were approximately equal in cost (about 100 ms in one such run), with
-100-sweep frames around 128 ms. Isolated timing on an idle GPU and larger
-particle counts is needed before recommending a throughput advantage.
+100-sweep frames around 128 ms. The isolated measurements below quantify
+cost at both particle counts.
 
 Reducing reserved active cells from 4,096 to 1,024 preserved all recorded
 quality metrics for these two voxel sizes and passed the rebuild checks.
@@ -1154,3 +1154,193 @@ after measuring energy and force effects. Isaac Lab should own the shared
 observation/wrench adapter and the curriculum that calls those numerical
 operations. Automatic particle splitting/merging remains a separate design
 task rather than a radius update.
+
+.. _mpm-bowl-idle-validation:
+
+Idle-GPU validation
+^^^^^^^^^^^^^^^^^^^
+
+The follow-up measurements use the same RTX 4090 with driver 610.43.02 and
+Warp 1.17.0. The competing grasp preview was terminated. Later compute jobs
+were stopped, and affected timing runs were rejected and repeated. Accepted
+runs contain no competing compute process in two-second GPU-monitor samples;
+the desktop CUDA service remained active. These are simulation timings,
+without policy inference, observation construction, or rendering.
+
+Each repeated trial runs 120 frames at 60 Hz and two substeps, excluding the
+first ten frames from timing. Results summarize three trial medians. Paired
+trials interleave both grid capacities and selected MPM variants in randomized
+order each frame, with seeds 42, 43, and 44. The XPBD stress predictor is
+measured serially to avoid Warp 1.17's captured hash-grid descriptor
+interference. The counts are regenerated from the same bowl emitter at radii
+16/8 mm; comparisons between methods keep particle count, mass, material,
+emitter, and frame duration fixed.
+
+The :download:`idle-GPU experiment records <mpm_bowl_idle_experiments.json>`
+include 318 case records, individual trial medians and p95 values, capacity
+checks, monitor summaries, contact-history ablations, failed candidates, and
+longer containment probes. Reproduce the paired capacity comparison with:
+
+.. code-block:: console
+
+   uv run --extra dev asv/benchmarks/simulation/bench_mpm_low_iterations.py \
+     --paired --frames 120 --particle-radius 0.016 --point-capacity 512 \
+     --cell-capacity 4096 --compare-cell-capacity 1024 --seed 42 \
+     --cases gs2 gs5 gs20 pic_captured2 pic_captured20 \
+     --output /tmp/mpm-idle-small.json
+
+   uv run --extra dev asv/benchmarks/simulation/bench_mpm_low_iterations.py \
+     --paired --frames 120 --particle-radius 0.008 --point-capacity 2048 \
+     --cell-capacity 4096 --compare-cell-capacity 1024 --seed 42 \
+     --cases gs2 gs5 gs20 pic_captured2 pic_captured20 \
+     --output /tmp/mpm-idle-large.json
+
+Repeat with seeds 43 and 44. These MPM cases use ``critical_fraction=1`` and
+``tolerance=0``. The table uses 8 cm voxels and 1,024 reserved active cells;
+each contact basis has its own 100-sweep reference:
+
+.. list-table:: MPM frame cost and endpoint convergence
+   :header-rows: 1
+   :widths: 28 18 18 18 18
+
+   * - Method
+     - 6,645 particles [ms]
+     - RMS [cm]
+     - 60,952 particles [ms]
+     - RMS [cm]
+   * - S2, GS 100
+     - 14.17
+     - 0.00
+     - 18.75
+     - 0.00
+   * - S2, GS 2
+     - 5.17
+     - 11.23
+     - 10.50
+     - 12.74
+   * - S2, GS 5
+     - 5.24
+     - 7.00
+     - 9.63
+     - 8.11
+   * - S2, GS 20
+     - 6.56
+     - 2.61
+     - 10.72
+     - 3.06
+   * - Point contacts, GS 100
+     - 13.98
+     - 0.00
+     - 20.78
+     - 0.00
+   * - Point contacts, GS 2
+     - 4.71
+     - 1.92
+     - 10.31
+     - 1.75
+   * - Point contacts, GS 20
+     - 6.33
+     - 0.38
+     - 12.28
+     - 0.40
+
+.. figure:: mpm_bowl_idle_tradeoff.png
+   :alt: Frame time and same-basis reference error for S2 and point contacts at two particle counts and voxel sizes.
+   :width: 100%
+
+   Repeated paired timings with 1,024 reserved cells. Error bars span the three
+   trial medians; they are not confidence intervals. Reference error measures
+   convergence within each contact basis, rather than physical accuracy.
+
+At 12 cm voxels and 60,952 particles, S2's two-sweep frame takes 19.87 ms and
+point contacts take 21.93 ms. S2's 20-sweep frame takes 18.58 ms in that
+rollout. More sweeps change packing and the subsequent assembly workload,
+so trajectory timings need not increase monotonically with iteration count.
+Coarsening did not improve throughput here. Point contacts improve low-sweep
+convergence but do not provide a general large-count speedup.
+
+Reducing reserved cells from 4,096 to 1,024 improved low-sweep point-contact
+time by approximately 6--15% across the four count/resolution combinations.
+All 84 paired capacity checks had identical recorded quality metrics and
+passed sparse rebuild status checks. The large coarse-grid point case reached
+1,041 particles per cell, exceeding the smaller scene's 512-point bound. Its
+2,048-point bound was checked during replay; grid-cell and point-per-cell
+capacity must be chosen independently.
+
+The contact-history ablation clears only impulses and retains the particle
+stress warm start. At 8 cm voxels, two-sweep point-contact error increases
+from 1.92 to 8.54 cm at 6,645 particles, and from 1.75 to 10.29 cm at 60,952.
+At 12 cm, the changes are 1.17 to 8.13 cm and 1.45 to 9.18 cm. Preserving
+contact impulses accounts for much of the improvement. These results support
+testing a stable S2 impulse cache before a more expensive stress predictor.
+Run the ablation with ``--cases pic_cold_contact2 pic_captured2`` and the
+appropriate checked point bound.
+
+At the larger count and 8 cm voxels, the XPBD stress seed increases two-sweep
+error from 12.74 to 14.11 cm and serial frame time from about 11.4 to 14.2 ms.
+The packing bias reproduces its energy tradeoff: kinetic energy rises from
+34.71 to 52.52 J while grid packing excess falls from 61.4% to 25.6%. These
+predictors remain benchmark experiments.
+
+Fast-stage settings and containment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The fast/full comparison uses the original example defaults
+``critical_fraction=0`` and ``tolerance=1e-4``, separately from the convergence
+experiment. It records containment independently of frame time:
+
+.. code-block:: console
+
+   uv run --extra dev asv/benchmarks/simulation/bench_mpm_bowl.py \
+     --frames 120 --repeats 3 --particle-iterations 2 4 \
+     --output /tmp/mpm-fast-full.json
+
+.. list-table:: Captured fast/full rollouts at 8 cm voxels
+   :header-rows: 1
+   :widths: 18 16 16 16 14 20
+
+   * - Particles
+     - XPBD iterations
+     - XPBD frame [ms]
+     - MPM 100 frame [ms]
+     - Speedup
+     - Final containment
+   * - 6,645
+     - 2
+     - 0.90
+     - 15.01
+     - 16.7x
+     - Pass
+   * - 60,952
+     - 2
+     - 1.64
+     - 18.38
+     - Rejected
+     - 214 outside below rim
+   * - 60,952
+     - 4
+     - 2.00
+     - 18.38
+     - 9.2x
+     - Pass
+
+The default two-iteration large scene first fails containment at 0.75 seconds.
+The escaped particles had previously reached above the open rim; the probe
+found no escaped particle that stayed below the rim throughout its sampled
+history. This indicates rim escape in approximate particle dynamics, rather
+than evidence of a wall crossing. The assertion now reports the containment
+failure without diagnosing tunneling from endpoint position alone.
+
+Separate ten-second probes with 60,952 particles remained contained with
+four XPBD iterations at two substeps, or two iterations at four substeps.
+Four iterations were cheaper. For this larger pretraining scene, use:
+
+.. code-block:: console
+
+   uv run -m newton.examples mpm_bowl --solver particles \
+     --particle-radius 0.008 --particle-iterations 4
+
+This is a measured setting for this scene, not a guarantee for other particle
+spacings, motions, cohesion laws, or timesteps. The fast model remains a
+different constitutive approximation even when its state and policy
+timestep interfaces match full MPM.
