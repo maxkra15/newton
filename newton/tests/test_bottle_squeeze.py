@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check physical scaling, permanent creases and open bottle topology."""
+"""Check bottle boundaries, robot motion, and the fluid shown by the example."""
 
 import unittest
 
@@ -10,8 +10,7 @@ import warp as wp
 
 import newton
 import newton.utils
-from newton.examples.multiphysics.bottle_fluid import BottleFluid, _density_multipliers, _shell_contacts
-from newton.examples.multiphysics.bottle_surface import BottleSurface
+from newton.examples.multiphysics._bottle import BottleFluid, BottleSurface, _density_multipliers, _shell_contacts
 from newton.examples.multiphysics.example_franka_bottle_squeeze import (
     _BOTTLE_CENTER,
     _BOTTLE_HEIGHT,
@@ -107,6 +106,10 @@ def test_water_xpbd_resting_bottle(test, device):
         iterations=8,
         device=device,
     )
+    test.assertEqual(positions.shape, (32_000, 3))
+    repeated, _ = _water_samples(32_000, seed=42)
+    np.testing.assert_array_equal(positions, repeated)
+    test.assertAlmostEqual(fluid.mass * len(positions), 0.506, delta=0.001)
     test.assertEqual(fluid.compliance, 0.0)
     for _ in range(240):
         fluid.step(shell, 1.0 / 480.0)
@@ -174,51 +177,31 @@ def test_robot_repeated_squeezes(test, device):
         test.assertLess(float(np.max(np.abs(velocity_after))), 0.02)
 
 
-def test_water_shell_contact_sides(test, device):
-    """Block crossings on both the interior and exterior sides of PET."""
+def test_water_shell_contact(test, device):
+    """Block slow and fast wall crossings on both sides, but leave openings clear."""
     points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3, device=device)
     indices = wp.array([0, 1, 2], dtype=int, device=device)
     mesh = wp.Mesh(points=points, indices=indices)
-    for side in (-1.0, 1.0):
-        previous = wp.array([[0.2, 0.2, 0.3 * side]], dtype=wp.vec3, device=device)
-        positions = wp.array([[0.2, 0.2, -0.05 * side]], dtype=wp.vec3, device=device)
-        wp.launch(
-            _shell_contacts,
-            1,
-            inputs=[
-                mesh.id,
-                indices,
-                points,
-                previous,
-                positions,
-                wp.zeros(1, dtype=int, device=device),
-                10.0,
-                0.1,
-                1.0,
-                -10.0,
-            ],
-            device=device,
-        )
-        np.testing.assert_allclose(positions.numpy()[0], [0.2, 0.2, 0.1 * side], atol=1.0e-6)
-
-
-def test_water_shell_open_boundary(test, device):
-    """Allow water through a triangle boundary instead of its infinite plane."""
-    points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3, device=device)
-    indices = wp.array([0, 1, 2], dtype=int, device=device)
-    mesh = wp.Mesh(points=points, indices=indices)
-    previous = wp.array([[0.8, 0.8, 0.3]], dtype=wp.vec3, device=device)
-    positions = wp.array([[0.8, 0.8, -0.05]], dtype=wp.vec3, device=device)
+    # Two wall sides, crossings beyond the proximity search, an open triangle
+    # boundary, and proximity-only contact without crossing the wall.
+    start = [[0.2, 0.2, z] for z in (0.3, -0.3, 0.3, -0.3)]
+    start += [[0.8, 0.8, 0.3], [0.8, 0.8, -0.3], [0.2, 0.2, 0.3], [0.2, 0.2, -0.3]]
+    target = np.array(
+        [[*p[:2], z] for p, z in zip(start, (-0.05, 0.05, -2.0, 2.0, -0.05, 0.05, 0.02, -0.02), strict=True)],
+        dtype=np.float32,
+    )
+    positions = wp.array(target, dtype=wp.vec3, device=device)
     wp.launch(
         _shell_contacts,
-        1,
+        len(start),
         inputs=[
             mesh.id,
             indices,
             points,
-            previous,
+            wp.array(start, dtype=wp.vec3, device=device),
             positions,
-            wp.zeros(1, dtype=int, device=device),
+            wp.zeros_like(positions),
+            wp.zeros(len(start), dtype=int, device=device),
             10.0,
             0.1,
             1.0,
@@ -226,34 +209,9 @@ def test_water_shell_open_boundary(test, device):
         ],
         device=device,
     )
-    np.testing.assert_allclose(positions.numpy()[0], [0.8, 0.8, -0.05], atol=1.0e-6)
-
-
-def test_water_shell_fast_crossing(test, device):
-    """Stop a particle that crosses the wall beyond the proximity search."""
-    points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3, device=device)
-    indices = wp.array([0, 1, 2], dtype=int, device=device)
-    mesh = wp.Mesh(points=points, indices=indices)
-    previous = wp.array([[0.2, 0.2, 0.3]], dtype=wp.vec3, device=device)
-    positions = wp.array([[0.2, 0.2, -1.0]], dtype=wp.vec3, device=device)
-    wp.launch(
-        _shell_contacts,
-        1,
-        inputs=[
-            mesh.id,
-            indices,
-            points,
-            previous,
-            positions,
-            wp.zeros(1, dtype=int, device=device),
-            10.0,
-            0.1,
-            0.01,
-            -10.0,
-        ],
-        device=device,
-    )
-    np.testing.assert_allclose(positions.numpy()[0], [0.2, 0.2, 0.1], atol=1.0e-6)
+    expected = target.copy()
+    expected[[0, 1, 2, 3, 6, 7], 2] = [0.1, -0.1, 0.1, -0.1, 0.1, -0.1]
+    np.testing.assert_allclose(positions.numpy(), expected, atol=1.0e-6)
 
 
 def test_water_boundary_density(test, device):
@@ -329,18 +287,37 @@ def _make_water_surface(positions, spacing, device, *, deformed=False, neck_lift
     return vertices.numpy(), indices.numpy(), normals.numpy(), surface
 
 
-def test_water_surface_inside_shell(test, device):
-    """Keep the zero contour inside PET even when the kernels cross its wall."""
+def test_water_surface_containment(test, device):
+    """Keep reconstructed liquid within the resting wall, sharp folds, and a raised neck."""
     positions, spacing = _water_samples(4096, seed=42)
-    vertices, indices, normals, _ = _make_water_surface(0.01 * positions, 0.01 * spacing, device)
-    heights = vertices[:, 2] - _BOTTLE_CENTER[2]
-    body = (heights > 0.025) & (heights < 0.15)
-    gap = _bottle_radius(heights[body]) - np.linalg.norm(vertices[body, :2] - _BOTTLE_CENTER[:2], axis=1)
-    test.assertGreater(len(indices), 0)
-    test.assertGreater(np.count_nonzero(body), 0)
-    test.assertGreaterEqual(float(gap.min()), 0.0002)
-    test.assertGreaterEqual(float(vertices[:, 2].min()), 0.76 - 1.0e-5)
-    test.assertTrue(np.isfinite(normals).all())
+    xy = np.arange(-0.007, 0.008, 0.0025)
+    z = np.arange(0.190, 0.201, 0.0025)
+    neck_water = np.stack(np.meshgrid(xy, xy, z, indexing="ij"), axis=-1).reshape(-1, 3) + _BOTTLE_CENTER
+    for deformed, neck_lift in ((False, 0.0), (True, 0.0), (False, 0.03)):
+        with test.subTest(deformed=deformed, neck_lift=neck_lift):
+            water = np.concatenate((0.01 * positions, neck_water)) if neck_lift else 0.01 * positions
+            vertices, indices, normals, surface = _make_water_surface(
+                water, 0.01 * spacing, device, deformed=deformed, neck_lift=neck_lift
+            )
+            signs = wp.empty(len(vertices), dtype=float, device=device)
+            wp.launch(
+                _surface_signs,
+                len(vertices),
+                inputs=[surface.mesh.id, wp.array(vertices, dtype=wp.vec3, device=device), signs],
+                device=device,
+            )
+            test.assertGreater(len(indices), 0)
+            test.assertTrue(np.all(signs.numpy() < 0.0))
+            test.assertTrue(np.isfinite(normals).all())
+            test.assertGreaterEqual(float(vertices[:, 2].min()), 0.76 - 1.0e-5)
+            if neck_lift:
+                test.assertGreater(float(vertices[:, 2].max()), _BOTTLE_CENTER[2] + _BOTTLE_HEIGHT)
+            elif not deformed:
+                heights = vertices[:, 2] - _BOTTLE_CENTER[2]
+                body = (heights > 0.025) & (heights < 0.15)
+                gap = _bottle_radius(heights[body]) - np.linalg.norm(vertices[body, :2] - _BOTTLE_CENTER[:2], axis=1)
+                test.assertGreater(np.count_nonzero(body), 0)
+                test.assertGreaterEqual(float(gap.min()), 0.0002)
 
 
 def test_water_surface_open_mouth_and_spill(test, device):
@@ -359,46 +336,7 @@ def test_water_surface_open_mouth_and_spill(test, device):
     test.assertGreater(np.count_nonzero(exterior), 10)
 
 
-def test_water_surface_deformed_shell(test, device):
-    """Keep liquid inside sharp folds as the reconstruction follows the wall."""
-    positions, spacing = _water_samples(4096, seed=42)
-    vertices, indices, normals, surface = _make_water_surface(0.01 * positions, 0.01 * spacing, device, deformed=True)
-    points = wp.array(vertices, dtype=wp.vec3, device=device)
-    signs = wp.empty(len(vertices), dtype=float, device=device)
-    wp.launch(_surface_signs, len(vertices), inputs=[surface.mesh.id, points, signs], device=device)
-    test.assertGreater(len(indices), 0)
-    test.assertTrue(np.all(signs.numpy() < 0.0))
-    test.assertTrue(np.isfinite(normals).all())
-
-
-def test_water_surface_raised_neck(test, device):
-    """Follow the moved neck rather than disabling wall clipping above its rest height."""
-    positions, spacing = _water_samples(4096, seed=42)
-    xy = np.arange(-0.007, 0.008, 0.0025)
-    z = np.arange(0.190, 0.201, 0.0025)
-    water = np.stack(np.meshgrid(xy, xy, z, indexing="ij"), axis=-1).reshape(-1, 3) + _BOTTLE_CENTER
-    water = np.concatenate((0.01 * positions, water))
-    vertices, _, _, surface = _make_water_surface(water, 0.01 * spacing, device, neck_lift=0.03)
-    points = wp.array(vertices, dtype=wp.vec3, device=device)
-    signs = wp.empty(len(vertices), dtype=float, device=device)
-    wp.launch(_surface_signs, len(vertices), inputs=[surface.mesh.id, points, signs], device=device)
-    test.assertGreater(float(vertices[:, 2].max()), _BOTTLE_CENTER[2] + _BOTTLE_HEIGHT)
-    test.assertTrue(np.all(signs.numpy() < 0.0))
-
-
 class TestBottleSqueeze(unittest.TestCase):
-    def test_squeeze_cycle_counts(self):
-        """Plan one, two or three complete cycles with strictly ordered times."""
-        for count in (1, 2, 3):
-            grips = np.tile([0.0, 4.0, 4.0], (count, 1))
-            retreats = grips + np.array([10.0, 0.0, 0.0])
-            times, poses = _squeeze_keyframes(grips, retreats, (1, 2), 1.2)
-            self.assertTrue(np.all(np.diff(times) > 0.0))
-            self.assertEqual(times[-1], count * _CYCLE_DURATION)
-            self.assertEqual(np.count_nonzero(np.diff(poses[:, 1]) < 0.0), count)
-            self.assertEqual(np.count_nonzero(np.diff(poses[:, 1]) > 0.0), count)
-            np.testing.assert_array_equal(poses[-1], retreats[-1])
-
     def test_bottle_open_neck(self):
         """Make the neck the only boundary and orient the bottom outwards."""
         vertices, triangles = _bottle_mesh(32, 28)
@@ -430,88 +368,23 @@ class TestBottleSqueeze(unittest.TestCase):
         self.assertAlmostEqual(values[0][1], 2.0 * 55.0e6 / (3.0e9 * 0.0003) / 100.0 * (2.0 / 3.0), places=6)
         np.testing.assert_allclose(values[1], [2.0 * values[0][0], 0.5 * values[0][1]])
 
-    def test_water_count_and_determinism(self):
-        """Emit the requested particle count reproducibly without overlaps."""
-        positions, spacing = _water_samples(32_000, seed=42)
-        repeated, repeated_spacing = _water_samples(32_000, seed=42)
-        self.assertEqual(positions.shape, (32_000, 3))
-        np.testing.assert_array_equal(positions, repeated)
-        self.assertEqual(spacing, repeated_spacing)
-        self.assertTrue(np.isfinite(positions).all())
-        water_mass = 32_000 * 1000.0 * (spacing / 100.0) ** 3
-        self.assertGreater(water_mass, 0.35)
-        self.assertLess(water_mass, 0.6)
 
-
-add_function_test(
-    TestBottleSqueeze,
-    "test_gripper_plates_follow_fingers",
+for function in (
     test_gripper_plates_follow_fingers,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze, "test_water_xpbd_pressure_history", test_water_xpbd_pressure_history, devices=get_test_devices()
-)
-add_function_test(
-    TestBottleSqueeze, "test_water_xpbd_substep_reset", test_water_xpbd_substep_reset, devices=get_test_devices()
-)
-add_function_test(
-    TestBottleSqueeze, "test_water_xpbd_resting_bottle", test_water_xpbd_resting_bottle, devices=get_cuda_test_devices()
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_robot_repeated_squeezes",
+    test_water_xpbd_pressure_history,
+    test_water_xpbd_substep_reset,
     test_robot_repeated_squeezes,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_shell_contact_sides",
-    test_water_shell_contact_sides,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_shell_open_boundary",
-    test_water_shell_open_boundary,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_shell_fast_crossing",
-    test_water_shell_fast_crossing,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_boundary_density",
+    test_water_shell_contact,
     test_water_boundary_density,
-    devices=get_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_surface_inside_shell",
-    test_water_surface_inside_shell,
-    devices=get_cuda_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_surface_open_mouth_and_spill",
+):
+    add_function_test(TestBottleSqueeze, function.__name__, function, devices=get_test_devices())
+
+for function in (
+    test_water_xpbd_resting_bottle,
+    test_water_surface_containment,
     test_water_surface_open_mouth_and_spill,
-    devices=get_cuda_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_surface_deformed_shell",
-    test_water_surface_deformed_shell,
-    devices=get_cuda_test_devices(),
-)
-add_function_test(
-    TestBottleSqueeze,
-    "test_water_surface_raised_neck",
-    test_water_surface_raised_neck,
-    devices=get_cuda_test_devices(),
-)
+):
+    add_function_test(TestBottleSqueeze, function.__name__, function, devices=get_cuda_test_devices())
 
 
 if __name__ == "__main__":

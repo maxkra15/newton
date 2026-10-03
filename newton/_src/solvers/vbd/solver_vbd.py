@@ -35,7 +35,7 @@ from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
 from ..xpbd import kernels as xpbd_kernels
 from ..xpbd.kernels import apply_joint_forces, project_joint_mimics
-from . import bending_plasticity, particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
+from . import particle_vbd_kernels, rigid_vbd_kernels, vbd_coupling_kernels
 from .particle_vbd_kernels import (
     NUM_THREADS_PER_COLLISION_PRIMITIVE,
     TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
@@ -896,7 +896,6 @@ class SolverVBD(SolverBase, CouplingInterface):
             if model.requires_grad:
                 raise ValueError("VBD bending plasticity does not support automatic differentiation")
             self._edge_rest_angles = wp.empty_like(model.edge_rest_angle)
-            self._set_module_options({"enable_backward": False}, module=bending_plasticity)
 
         # Initialize particle system
         self._init_particle_system(
@@ -2479,7 +2478,7 @@ class SolverVBD(SolverBase, CouplingInterface):
             plastic_in = self._get_edge_plastic_angle(state_in)
             plastic_out = self._get_edge_plastic_angle(state_out)
             wp.launch(
-                bending_plasticity.prepare_bending_rest_angles,
+                particle_vbd_kernels.prepare_bending_rest_angles,
                 dim=self.model.edge_count,
                 inputs=[self.model.edge_rest_angle, plastic_in],
                 outputs=[self._edge_rest_angles],
@@ -2529,7 +2528,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._finalize_particles(state_out, dt)
         if self._bending_plasticity_enabled:
             wp.launch(
-                bending_plasticity.update_bending_plasticity,
+                particle_vbd_kernels.update_bending_plasticity,
                 dim=self.model.edge_count,
                 inputs=[
                     state_out.particle_q,
@@ -2691,7 +2690,7 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         if plastic_reset is not None:
             wp.launch(
-                bending_plasticity.reset_bending_plasticity,
+                particle_vbd_kernels.reset_bending_plasticity,
                 dim=model.edge_count,
                 inputs=[world_mask, world_mask is None, model.world_count, model.particle_world, model.edge_indices],
                 outputs=[plastic_reset],

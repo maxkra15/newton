@@ -3,26 +3,21 @@
 
 """Squeeze an open PET bottle from three angles and retain permanent dents.
 
-The shell uses GPU VBD with vertex/triangle and edge/edge self-contact.
-Material inputs are SI: thickness 0.3 mm, Young's modulus 3 GPa, yield
-stress 55 MPa, assumed Poisson ratio 0.38 and density 1380 kg/m^3.
-Membrane coefficients are thickness-integrated plane-stress Lamé moduli.
-Hinge stiffness uses D = E t^3 / (12 (1 - nu^2)) and each edge's dual width.
-VBD's optional plastic bending return map updates state-local rest-angle
-offsets after each substep; the elastic yield strain is sigma_y / E. This illustrates
-permanent creases, not a calibrated, rate-dependent PET constitutive model.
-Membrane plasticity, fracture, air pressure and a cap are not modeled.
+GPU VBD solves a self-contacting 0.3 mm shell with PET inputs of 3 GPa
+Young's modulus and 55 MPa yield stress (assumed nu=0.38, density=1380 kg/m^3).
+Thickness-integrated membrane stiffness and dual-width bending coefficients
+preserve those SI material values. Optional VBD plasticity retains yielded
+bending curvature; it is an ideal bending-only law, not calibrated PET.
 
-Water uses 32,000 GPU XPBD density-constrained particles with zero compliance
-and one-way shell-to-water contact. Fluid pressure does not feed back onto the shell. Newton's
-ParticleSurface reconstructs the water with the same anisotropic kernels and
-marching cubes as the MPM water example.
-The robot follows smooth joint waypoints solved with IK for each grip; its base
-and the bottle's bottom are fixed. PET self-weight is neglected relative to
-the water; the water experiences Earth gravity. The label is only a visual overlay.
+32,000 XPBD density-constrained water particles receive one-way contact from
+the shell. Newton's ParticleSurface reconstructs the liquid and clips it to
+the moving bottle and table. Water pressure does not feed back onto the shell.
+The Franka follows checked IK waypoints with physical squeeze plates. Its
+base and the bottle bottom are fixed; the label is a visual overlay.
 
-Physics uses cm, kg and s to keep VBD well conditioned; the separate render
-model and reconstructed surface use meters. No material stiffness is reduced.
+Physics uses cm/kg/s for conditioning, while rendering uses meters. Water
+experiences Earth gravity; PET self-weight, fracture and enclosed air are
+omitted. See docs/guide/franka_bottle_squeeze.rst for equations and limitations.
 
 Command: python -m newton.examples franka_bottle_squeeze
 """
@@ -39,8 +34,7 @@ import newton
 import newton.examples
 import newton.ik
 import newton.utils
-from newton.examples.multiphysics.bottle_fluid import BottleFluid
-from newton.examples.multiphysics.bottle_surface import BottleSurface, compute_normals
+from newton.examples.multiphysics._bottle import BottleFluid, BottleSurface, bind_materials, compute_normals
 from newton.solvers import SolverBase, SolverVBD
 from newton.viewer import ViewerRTX
 
@@ -558,53 +552,6 @@ class Example:
         self.simulate()
         self.sim_time += self.frame_dt
 
-    def _bind_rtx_materials(self):
-        """Bind PET and dielectric water before the RTX stage is first loaded."""
-        if self._rtx_materials_bound or not isinstance(self.viewer, ViewerRTX):
-            return
-
-        from pxr import Sdf, UsdShade  # noqa: PLC0415
-
-        pet = self.viewer.stage.GetPrimAtPath("/root/bottle/pet")
-        water = self.viewer.stage.GetPrimAtPath("/root/water/surface")
-        if not pet or not water:
-            return
-
-        material = UsdShade.Material.Define(self.viewer.stage, "/root/Materials/BottlePET")
-        shader = UsdShade.Shader.Define(self.viewer.stage, "/root/Materials/BottlePET/PreviewSurface")
-        shader.CreateIdAttr("UsdPreviewSurface")
-        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set((0.90, 0.95, 0.97))
-        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.30)
-        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
-        shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(self.bottle_opacity)
-        shader.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(0.0)
-        shader.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(1.52)
-        shader.CreateInput("clearcoat", Sdf.ValueTypeNames.Float).Set(0.15)
-        shader.CreateInput("clearcoatRoughness", Sdf.ValueTypeNames.Float).Set(0.18)
-        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
-        UsdShade.MaterialBindingAPI.Apply(pet).Bind(material)
-
-        # MDL transmission traces light through the closed liquid volume.
-        # Preview-surface opacity only removes coverage; it does not model refraction.
-        material = UsdShade.Material.Define(self.viewer.stage, "/root/Materials/BottleWater")
-        shader = UsdShade.Shader.Define(self.viewer.stage, "/root/Materials/BottleWater/Glass")
-        shader.SetSourceAsset(Sdf.AssetPath("OmniGlass.mdl"), "mdl")
-        shader.SetSourceAssetSubIdentifier("OmniGlass", "mdl")
-        shader.CreateInput("glass_color", Sdf.ValueTypeNames.Color3f).Set(_WATER_COLOR)
-        shader.CreateInput("reflection_color", Sdf.ValueTypeNames.Color3f).Set(_WATER_COLOR)
-        shader.CreateInput("glass_ior", Sdf.ValueTypeNames.Float).Set(1.333)
-        shader.CreateInput("frosting_roughness", Sdf.ValueTypeNames.Float).Set(0.02)
-        shader.CreateInput("thin_walled", Sdf.ValueTypeNames.Bool).Set(False)
-        shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
-        material.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
-        material.CreateVolumeOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
-        material.CreateDisplacementOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
-        UsdShade.MaterialBindingAPI.Apply(water).Bind(material)
-        # The path tracer does not resolve focused caustics for these droplets.
-        # Let direct illumination through instead of casting opaque glass shadows.
-        water.CreateAttribute("primvars:doNotCastShadows", Sdf.ValueTypeNames.Bool).Set(True)
-        self._rtx_materials_bound = True
-
     def render(self):
         wp.launch(
             _scale_transforms,
@@ -612,18 +559,8 @@ class Example:
             inputs=[self.state_0.body_q, self.render_state.body_q],
             device=self.model.device,
         )
-        wp.launch(
-            _scale_positions,
-            self.model.particle_count,
-            inputs=[self.state_0.particle_q, self.render_shell],
-            device=self.model.device,
-        )
-        wp.launch(
-            _scale_positions,
-            len(self.water.positions),
-            inputs=[self.water.positions, self.render_water],
-            device=self.model.device,
-        )
+        for source, target in ((self.state_0.particle_q, self.render_shell), (self.water.positions, self.render_water)):
+            wp.launch(_scale_positions, len(source), inputs=[source, target], device=self.model.device)
         compute_normals(self.render_shell, self.shell_indices, self.shell_normals)
         wp.launch(
             _offset_label,
@@ -674,7 +611,8 @@ class Example:
                 radii=self.water.radius / _SCALE,
                 colors=_WATER_COLOR,
             )
-        self._bind_rtx_materials()
+        if not self._rtx_materials_bound:
+            self._rtx_materials_bound = bind_materials(self.viewer, self.bottle_opacity, _WATER_COLOR)
         self.viewer.end_frame()
         if self.save_frames is not None:
             from PIL import Image  # noqa: PLC0415
@@ -722,8 +660,8 @@ class Example:
             body = (self.initial_vertices[:, 2] - _BOTTLE_CENTER[2] * _SCALE > 8.0) & (
                 self.initial_vertices[:, 2] - _BOTTLE_CENTER[2] * _SCALE < 14.0
             )
-            if np.max(np.linalg.norm(shell[body] - self.initial_vertices[body], axis=1)) < 0.1:
-                raise ValueError("The bottle recovered completely after release")
+            if np.max(np.linalg.norm(shell[body] - self.initial_vertices[body], axis=1)) < _THICKNESS * _SCALE:
+                raise ValueError("The released bottle did not retain a dent larger than the PET wall thickness")
 
     @staticmethod
     def create_parser():

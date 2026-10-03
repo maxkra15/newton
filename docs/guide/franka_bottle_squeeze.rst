@@ -132,7 +132,7 @@ Install the RTX dependencies and run with:
 Fluid boundaries and reconstruction
 ------------------------------------
 
-The example-local XPBD solver in ``bottle_fluid.py`` uses PBF density kernels
+The example-local XPBD solver in ``_bottle.py`` uses PBF density kernels
 with a hash-grid neighbor search. Pressure multipliers accumulate within each
 substep, position corrections use multiplier increments, and history resets
 before the next substep. Clamping the density deficit and projecting the total
@@ -154,10 +154,10 @@ marching cubes. The kernel support can cross a thin shell even when all
 particle centers are contained; reducing particle collision radii alone does
 not solve this rendering artifact.
 
-``bottle_surface.py`` intersects the public sparse liquid field with the
-deformed PET boundary before marching cubes, then checks the final vertices
-at folds that are smaller than a voxel. It recomputes normals after this
-correction. The nearest actual particle determines whether to keep liquid
+``BottleSurface`` in the same helper intersects the public sparse liquid field
+with the deformed PET boundary before marching cubes, then checks the final
+vertices at folds that are smaller than a voxel. It recomputes normals after
+this correction. The nearest actual particle determines whether to keep liquid
 inside or outside the bottle, so escaped droplets remain visible. A temporary
 cap is used only for winding-number classification; distances come from the
 open PET mesh, and liquid above the neck is unconstrained. The reconstructed
@@ -195,14 +195,14 @@ surface chemistry.
 ``test_post_step()`` checks finite water positions, table penetration, initial
 containment, and absence of yielding before the squeeze. ``test_final()`` checks
 the fixed base, a valid reconstructed surface, yielded hinges, and a remaining
-dent after release. Unit tests cover elastic unloading, reverse yielding,
-material scaling, open topology, deterministic particle counts, wall density
-completion, contact on both sides including fast crossings, reconstructed
-surface containment at rest and sharp folds, preservation of the open-neck
-jet and real exterior droplets, and continuous robot motion with open fingers
-between one, two or three squeeze cycles. They also check XPBD pressure
-equilibrium and substep reset, and the attached plates' physical and visible
-opening in both simulation and render units.
+dent of at least one wall thickness after release. Unit tests cover elastic
+unloading, reverse yielding, material scaling, open topology, deterministic
+particle counts, wall density completion, contact on both sides including fast
+crossings, reconstructed surface containment at rest and sharp folds,
+preservation of the open-neck jet and real exterior droplets, and continuous
+robot motion with open fingers between successive squeeze cycles. They also
+check XPBD pressure equilibrium and substep reset, and the attached plates'
+physical and visible opening in both simulation and render units.
 
 Save rendered frames for a recording:
 
