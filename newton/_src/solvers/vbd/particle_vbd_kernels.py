@@ -702,6 +702,7 @@ def evaluate_dihedral_angle_based_bending_force_hessian(
     stiffness: float,
     damping: float,
     dt: float,
+    wrap_angle: bool = False,
 ):
     # Skip invalid edges (boundary edges with missing opposite vertices)
     if edge_indices[bending_index, 0] == -1 or edge_indices[bending_index, 1] == -1:
@@ -747,7 +748,10 @@ def evaluate_dihedral_angle_based_bending_force_hessian(
     theta = wp.atan2(sin_theta, cos_theta)
 
     k = stiffness * edge_rest_length[bending_index]
-    dE_dtheta = k * (theta - edge_rest_angle[bending_index])
+    angle_error = theta - edge_rest_angle[bending_index]
+    if wrap_angle:
+        angle_error = wp.atan2(wp.sin(angle_error), wp.cos(angle_error))
+    dE_dtheta = k * angle_error
 
     # Pre-compute skew matrices (shared across all angle derivative computations)
     skew_e = wp.skew(e)
@@ -2325,7 +2329,13 @@ def gather_particle_body_contact_force_and_hessian(
 
 
 @functools.cache
-def make_solve_elasticity_tile(include_triangles: bool, include_tets: bool, two_particles_per_warp: bool):
+def make_solve_elasticity_tile(
+    include_triangles: bool,
+    include_tets: bool,
+    two_particles_per_warp: bool,
+    *,
+    wrap_bending_angles: bool = False,
+):
     """Build the tiled per-particle elasticity kernel, specialized at code generation.
 
     One kernel source serves every tiled variant: ``include_triangles`` / ``include_tets``
@@ -2461,6 +2471,7 @@ def make_solve_elasticity_tile(include_triangles: bool, include_tets: bool, two_
                                 edge_bending_properties[nei_edge_index, 0],
                                 edge_bending_properties[nei_edge_index, 1],
                                 dt,
+                                wp.static(wrap_bending_angles),
                             )
 
                             f += f_edge
@@ -2548,6 +2559,7 @@ def make_solve_elasticity_tile(include_triangles: bool, include_tets: bool, two_
 @wp.kernel
 def solve_elasticity(
     dt: float,
+    wrap_bending_angles: bool,
     particle_ids_in_color: wp.array[wp.int32],
     pos_prev: wp.array[wp.vec3],
     pos: wp.array[wp.vec3],
@@ -2639,7 +2651,8 @@ def solve_elasticity(
             if edge_bending_properties[nei_edge_index, 0] > 0.0:
                 f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
                     nei_edge_index, vertex_order_on_edge, pos, pos_prev, edge_indices, edge_rest_angles, edge_rest_length,
-                    edge_bending_properties[nei_edge_index, 0], edge_bending_properties[nei_edge_index, 1], dt
+                    edge_bending_properties[nei_edge_index, 0], edge_bending_properties[nei_edge_index, 1], dt,
+                    wrap_bending_angles
                 )
 
                 f = f + f_edge
