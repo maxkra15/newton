@@ -1,0 +1,1 @@
+Add an experimental shared-XPBD fluid comparison to the Franka bottle example, retaining its deforming-wall density support, continuous shell contact and RTX surface reconstruction. Capture the fluid with the VBD shell using per-solver hash-grid ownership.

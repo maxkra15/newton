@@ -11,6 +11,7 @@ import warp as wp
 import newton
 import newton.utils
 from newton.examples.multiphysics._bottle import BottleFluid, BottleSurface, _density_multipliers, _shell_contacts
+from newton.examples.multiphysics._bottle_xpbd import BottleFluidXPBD
 from newton.examples.multiphysics.example_franka_bottle_squeeze import (
     _BOTTLE_CENTER,
     _BOTTLE_HEIGHT,
@@ -116,6 +117,31 @@ def test_water_xpbd_resting_bottle(test, device):
     test.assertLessEqual(float(np.max(radii - _bottle_radius(heights))), 0.001)
     test.assertLess(float(heights.max()), _BOTTLE_HEIGHT)
     np.testing.assert_array_equal(fluid.inside_bottle.numpy(), np.ones(len(positions), dtype=np.int32))
+
+
+def test_water_xpbd_moving_mouth(test, device):
+    """Release water through the displaced opening below its initial height."""
+    vertices, triangles = _bottle_mesh(32, 28)
+    initial = 100.0 * (vertices + _BOTTLE_CENTER)
+    rotation = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(0.1), -np.sin(0.1)], [0.0, np.sin(0.1), np.cos(0.1)]])
+    mouth = initial[-32:].mean(axis=0)
+    deformed = (initial - mouth) @ rotation.T + mouth - [0.0, 0.0, 0.5]
+    center = deformed[-32:].mean(axis=0)
+    normal = rotation[:, 2]
+    positions = center + np.array([-0.2, 0.2])[:, None] * normal
+    fluid = BottleFluidXPBD(
+        positions,
+        0.25,
+        wp.array(initial, dtype=wp.vec3, device=device),
+        triangles,
+        floor=76.0,
+        mouth_height=float(mouth[2]),
+        iterations=2,
+        device=device,
+        cohesion=0.0,
+    )
+    fluid.step(wp.array(deformed, dtype=wp.vec3, device=device), 1.0e-5)
+    np.testing.assert_array_equal(fluid.inside_bottle.numpy(), [1, 0])
 
 
 def test_water_xpbd_substep_reset(test, device):
@@ -368,6 +394,7 @@ for function in (
     test_gripper_plates_follow_fingers,
     test_water_xpbd_pressure_history,
     test_water_xpbd_substep_reset,
+    test_water_xpbd_moving_mouth,
     test_robot_repeated_squeezes,
     test_water_shell_contact,
     test_water_boundary_density,

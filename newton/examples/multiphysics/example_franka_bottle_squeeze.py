@@ -35,6 +35,7 @@ import newton.examples
 import newton.ik
 import newton.utils
 from newton.examples.multiphysics._bottle import BottleFluid, BottleSurface, bind_water_material, compute_normals
+from newton.examples.multiphysics._bottle_xpbd import BottleFluidXPBD
 from newton.solvers import SolverBase, SolverVBD
 
 _SCALE = 100.0
@@ -448,7 +449,11 @@ class Example:
             },
         )
         positions, spacing = _water_samples(args.water_particles, seed=args.seed)
-        self.water = BottleFluid(
+        fluid_type, fluid_options = BottleFluid, {}
+        if args.fluid_solver == "xpbd":
+            fluid_type = BottleFluidXPBD
+            fluid_options = {"cohesion": args.fluid_cohesion}
+        self.water = fluid_type(
             positions,
             spacing,
             self.state_0.particle_q,
@@ -457,6 +462,7 @@ class Example:
             mouth_height=(_BOTTLE_CENTER[2] + _BOTTLE_HEIGHT) * _SCALE,
             iterations=args.fluid_iterations,
             device=self.model.device,
+            **fluid_options,
         )
 
         render_builder = newton.ModelBuilder()
@@ -520,12 +526,15 @@ class Example:
         )
         self.surface_triangle_count = 0
         self.shell_graphs = []
+        self.graph_includes_fluid = args.fluid_solver == "xpbd"
         if args.cuda_graph:
-            # Capture each shell buffer direction separately. Keep fluid grids
-            # eager: Warp 1.18 shares host grid metadata with reconstruction.
+            # The experimental XPBD solver restores its own grid descriptor,
+            # permitting fluid capture alongside shell contact and plasticity.
             for _ in range(2):
                 with wp.ScopedCapture(device=self.model.device) as capture:
                     self._simulate_shell()
+                    if self.graph_includes_fluid:
+                        self.water.step(self.state_0.particle_q, self.sim_dt)
                 self.shell_graphs.append(capture.graph)
 
     def _solve_robot_poses(self, builder):
@@ -633,7 +642,8 @@ class Example:
                 self.state_0, self.state_1 = self.state_1, self.state_0
             else:
                 self._simulate_shell()
-            self.water.step(self.state_0.particle_q, self.sim_dt)
+            if not self.shell_graphs or not self.graph_includes_fluid:
+                self.water.step(self.state_0.particle_q, self.sim_dt)
 
     def step(self):
         self.simulate()
@@ -793,6 +803,15 @@ class Example:
         parser.add_argument("--vbd-iterations", type=int, default=320)
         parser.add_argument("--fluid-iterations", type=int, default=8)
         parser.add_argument(
+            "--fluid-solver",
+            choices=("local", "xpbd"),
+            default="local",
+            help="Fluid backend; xpbd selects the experimental shared SolverXPBD integration",
+        )
+        parser.add_argument(
+            "--fluid-cohesion", type=float, default=0.1, help="Bounded cohesion scale for the experimental XPBD backend"
+        )
+        parser.add_argument(
             "--minimum-opening",
             type=float,
             default=0.018,
@@ -811,7 +830,7 @@ class Example:
             "--cuda-graph",
             action=argparse.BooleanOptionalAction,
             default=True,
-            help="Capture robot and VBD shell substeps; fluid and surface extraction execute outside capture",
+            help="Capture physics substeps; the experimental XPBD fluid supports capture with the VBD shell",
         )
         parser.add_argument("--show-particles", action=argparse.BooleanOptionalAction, default=False)
         parser.add_argument(

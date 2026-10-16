@@ -1742,6 +1742,7 @@ add_example_batch(
                 "vbd-iterations": 20,
                 "surface-voxel-size": 0.003,
                 "surface-max-grid-cells": 200_000,
+                "fluid-solver": "xpbd",
                 "cuda-graph": use_cuda_graph,
             },
             "test_suffix": "graph" if use_cuda_graph else "no_graph",

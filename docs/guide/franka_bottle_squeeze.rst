@@ -50,6 +50,36 @@ within the Franka's joint velocity limits.
 Use ``--no-plasticity`` to compare with an elastic bottle under the same motion.
 Use ``--show-particles`` to inspect the underlying fluid samples.
 
+Experimental shared XPBD comparison
+----------------------------------
+
+This evaluation branch also accepts ``--fluid-solver xpbd``. It ports Eric
+Heiden's experimental fluid solver from commit ``3731ef5f`` onto the bottle
+branch, preserving the current VBD shell and rendering:
+
+.. code-block:: console
+
+   uv run --extra examples -m newton.examples franka_bottle_squeeze \
+       --fluid-solver xpbd --fluid-cohesion 0.1 --viewer rtx
+
+The shared solver handles bulk density, cohesion, viscosity and hash-grid
+ownership. The example adapter retains continuous contact with the moving
+PET triangles and completes density near the wall. Coupling remains one-way;
+water pressure does not feed back onto the VBD shell. The adapter uses a
+private per-iteration solver method for this evaluation and is not a proposed
+public extension API. Its extra boundary passes must be included in performance
+comparisons. ``--fluid-solver local`` selects the original example helper.
+The spill marker follows the moving neck plane so a droplet can leave a
+lowered or tilted opening without crossing the bottle's initial top height.
+
+With the experimental backend, CUDA graphs capture the robot, VBD shell and
+fluid substeps together. Surface reconstruction and rendering remain outside
+capture. The solver's private grid snapshot protects replay when reconstruction
+builds another Warp hash grid. ``--no-cuda-graph`` runs the same physics eagerly.
+
+Baseline graph capture
+----------------------
+
 CUDA graphs capture the robot and VBD shell substeps by default, including
 self-contact and plasticity. The XPBD water loop and surface reconstruction
 execute outside capture. Use ``--no-cuda-graph`` to run the shell eagerly as
