@@ -62,15 +62,33 @@ branch, preserving the current VBD shell and rendering:
    uv run --extra examples -m newton.examples franka_bottle_squeeze \
        --fluid-solver xpbd --fluid-cohesion 0.1 --viewer rtx
 
-The shared solver handles bulk density, cohesion, viscosity and hash-grid
-ownership. The example adapter retains continuous contact with the moving
-PET triangles and completes density near the wall. Coupling remains one-way;
+The shared solver handles density, cohesion, viscosity and hash-grid ownership.
+Its experimental ``fluid_boundary_mesh`` parameter completes missing Poly6
+support at the nearest locally planar wall, within the same pressure solve.
+The example adapter retains continuous contact with the moving PET triangles.
+Coupling remains one-way;
 water pressure does not feed back onto the VBD shell. The adapter uses a
 private per-iteration solver method for this evaluation and is not a proposed
-public extension API. Its extra boundary passes must be included in performance
+public extension API. Its boundary projection must be included in performance
 comparisons. ``--fluid-solver local`` selects the original example helper.
 The spill marker follows the moving neck plane so a droplet can leave a
 lowered or tilted opening without crossing the bottle's initial top height.
+
+The shared kernels specialize for uniform particles and grouped worlds using
+Newton's cached kernel-factory pattern. Mixed masses, inactive particles and
+separate worlds retain their general paths. Per-particle coincidence offsets
+are prepared once instead of generating random directions in neighbor loops.
+Pressure, cohesion and separation share intermediate geometry calculations;
+structured loops avoid repeated divergent exits. Diagnostic density ratios
+are computed only when requested.
+The bottle uses a pressure relaxation of 0.8 to damp simultaneous bulk/wall
+Jacobi updates without adding iterations.
+
+The boundary mesh is a runtime coupling input, with no new USD authoring schema.
+The fluid solver keeps a reference to its storage. Update its points and refit
+before stepping; the same geometry supplies pressure support to every world.
+Collision projection remains separate. This approximation uses the nearest
+locally planar wall, with no two-way pressure feedback or sum over nearby walls.
 
 With the experimental backend, CUDA graphs capture the robot, VBD shell and
 fluid substeps together. Surface reconstruction and rendering remain outside

@@ -131,6 +131,62 @@ def _density_corrections(
     corrections[i] = correction
 
 
+@wp.func
+def _project_shell_contact(
+    mesh: wp.uint64,
+    shell_indices: wp.array[int],
+    shell_previous: wp.array[wp.vec3],
+    previous: wp.vec3,
+    p: wp.vec3,
+    inside: int,
+    mouth_height: float,
+    radius: float,
+    search_radius: float,
+    floor: float,
+):
+    motion = p - previous
+    travel = wp.length(motion)
+    if travel > 1.0e-6:
+        direction = motion / travel
+        ray = wp.mesh_query_ray(mesh, previous, direction, travel)
+        if ray.result:
+            normal_ray = wp.mesh_eval_face_normal(mesh, ray.face)
+            side_ray = wp.where(wp.dot(direction, normal_ray) > 0.0, -1.0, 1.0)
+            target = previous + ray.t * direction + radius * side_ray * normal_ray
+            p = target
+    if p[2] > mouth_height + radius:
+        inside = 0
+    query = wp.mesh_query_point_no_sign(mesh, p, search_radius)
+    if query.result:
+        a = shell_indices[3 * query.face]
+        b = shell_indices[3 * query.face + 1]
+        c = shell_indices[3 * query.face + 2]
+        u = query.u
+        v = query.v
+        w = 1.0 - u - v
+        closest = wp.mesh_eval_position(mesh, query.face, u, v)
+        normal = wp.mesh_eval_face_normal(mesh, query.face)
+        closest_previous = u * shell_previous[a] + v * shell_previous[b] + w * shell_previous[c]
+        old_delta = previous - closest_previous
+        normal_previous = wp.normalize(
+            wp.cross(shell_previous[b] - shell_previous[a], shell_previous[c] - shell_previous[a])
+        )
+        side = wp.where(wp.dot(old_delta, normal_previous) >= 0.0, 1.0, -1.0)
+        # A local closest-face sign is ambiguous at concave bottle ribs.
+        # Interior particles retain their side until they cross the open mouth.
+        if inside != 0:
+            side = -1.0
+        delta = p - closest
+        signed_distance = wp.dot(delta, normal)
+        tangent = delta - signed_distance * normal
+        # Only the finite triangle blocks a crossing; the open mouth stays open.
+        if wp.length(tangent) < radius and side * signed_distance < radius:
+            correction = (radius - side * signed_distance) * side * normal
+            p += correction
+    p[2] = wp.max(p[2], floor + radius)
+    return p, inside
+
+
 @wp.kernel
 def _shell_contacts(
     mesh: wp.uint64,
@@ -146,48 +202,20 @@ def _shell_contacts(
     floor: float,
 ):
     i = wp.tid()
-    p = positions[i] + corrections[i]
-    motion = p - previous[i]
-    travel = wp.length(motion)
-    if travel > 1.0e-6:
-        direction = motion / travel
-        ray = wp.mesh_query_ray(mesh, previous[i], direction, travel)
-        if ray.result:
-            normal_ray = wp.mesh_eval_face_normal(mesh, ray.face)
-            side_ray = wp.where(wp.dot(direction, normal_ray) > 0.0, -1.0, 1.0)
-            target = previous[i] + ray.t * direction + radius * side_ray * normal_ray
-            p = target
-    if p[2] > mouth_height + radius:
-        inside_bottle[i] = 0
-    query = wp.mesh_query_point_no_sign(mesh, p, search_radius)
-    if query.result:
-        a = shell_indices[3 * query.face]
-        b = shell_indices[3 * query.face + 1]
-        c = shell_indices[3 * query.face + 2]
-        u = query.u
-        v = query.v
-        w = 1.0 - u - v
-        closest = wp.mesh_eval_position(mesh, query.face, u, v)
-        normal = wp.mesh_eval_face_normal(mesh, query.face)
-        closest_previous = u * shell_previous[a] + v * shell_previous[b] + w * shell_previous[c]
-        old_delta = previous[i] - closest_previous
-        normal_previous = wp.normalize(
-            wp.cross(shell_previous[b] - shell_previous[a], shell_previous[c] - shell_previous[a])
-        )
-        side = wp.where(wp.dot(old_delta, normal_previous) >= 0.0, 1.0, -1.0)
-        # A local closest-face sign is ambiguous at concave bottle ribs.
-        # Interior particles retain their side until they cross the open mouth.
-        if inside_bottle[i] != 0:
-            side = -1.0
-        delta = p - closest
-        signed_distance = wp.dot(delta, normal)
-        tangent = delta - signed_distance * normal
-        # Only the finite triangle blocks a crossing; the open mouth stays open.
-        if wp.length(tangent) < radius and side * signed_distance < radius:
-            correction = (radius - side * signed_distance) * side * normal
-            p += correction
-    p[2] = wp.max(p[2], floor + radius)
+    p, inside = _project_shell_contact(
+        mesh,
+        shell_indices,
+        shell_previous,
+        previous[i],
+        positions[i] + corrections[i],
+        inside_bottle[i],
+        mouth_height,
+        radius,
+        search_radius,
+        floor,
+    )
     positions[i] = p
+    inside_bottle[i] = inside
 
 
 @wp.kernel

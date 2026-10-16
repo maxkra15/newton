@@ -1,0 +1,1 @@
+Specialize experimental XPBD fluid kernels for uniform particles and world layout, reuse neighbor-loop calculations, and support optional mesh boundary density within the pressure solve. Remove redundant pressure passes and unused fluid buffers from the Franka bottle integration.

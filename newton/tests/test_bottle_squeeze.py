@@ -92,12 +92,12 @@ def test_water_xpbd_pressure_history(test, device):
     test.assertGreater(float(deltas.numpy()[0]), 0.0)
 
 
-def test_water_xpbd_resting_bottle(test, device):
+def test_water_xpbd_resting_bottle(test, device, fluid_type=BottleFluid):
     """Settle incompressible samples without spurious wall escape."""
-    vertices, triangles = _bottle_mesh(32, 28)
+    vertices, triangles = _bottle_mesh(64, 56)
     shell = wp.array(100.0 * (vertices + _BOTTLE_CENTER), dtype=wp.vec3, device=device)
-    positions, spacing = _water_samples(4096, seed=42)
-    fluid = BottleFluid(
+    positions, spacing = _water_samples(32_000, seed=42)
+    fluid = fluid_type(
         positions,
         spacing,
         shell,
@@ -107,8 +107,7 @@ def test_water_xpbd_resting_bottle(test, device):
         iterations=8,
         device=device,
     )
-    test.assertEqual(fluid.compliance, 0.0)
-    for _ in range(120):
+    for _ in range(240):
         fluid.step(shell, 1.0 / 480.0)
     settled = fluid.positions.numpy() * 0.01
     heights = settled[:, 2] - _BOTTLE_CENTER[2]
@@ -407,6 +406,14 @@ for function in (
     test_water_surface_open_mouth_and_spill,
 ):
     add_function_test(TestBottleSqueeze, function.__name__, function, devices=get_cuda_test_devices())
+
+add_function_test(
+    TestBottleSqueeze,
+    "test_water_xpbd_resting_bottle_shared",
+    test_water_xpbd_resting_bottle,
+    devices=get_cuda_test_devices(),
+    fluid_type=BottleFluidXPBD,
+)
 
 
 if __name__ == "__main__":

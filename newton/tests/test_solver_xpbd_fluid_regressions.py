@@ -98,6 +98,76 @@ def test_fluid_single_particle_viscosity_preserves_velocity(test, device):
     np.testing.assert_allclose(state_out.particle_qd.numpy(), [[1.0, 2.0, 3.0]], atol=1.0e-6)
 
 
+def test_fluid_boundary_density_projects_pressure(test, device):
+    """Release wall compression and follow an updated boundary mesh."""
+    h, rest_density = 0.04, 1000.0
+    mass = 0.7 * rest_density * (64.0 * np.pi * h**3) / 315.0
+    model = _build_particles([(0.0, 0.0, 0.1 * h)], [mass]).finalize(device=device)
+    points = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    boundary = wp.Mesh(
+        points=wp.array(points, dtype=wp.vec3, device=device),
+        indices=wp.array([0, 1, 2], dtype=int, device=device),
+    )
+    solver = newton.solvers.SolverXPBD(
+        model,
+        iterations=8,
+        fluid_rest_distance=0.02,
+        fluid_smoothing_length=h,
+        fluid_rest_density=rest_density,
+        fluid_cohesion=0.0,
+        fluid_boundary_mesh=boundary,
+    )
+    state_in, state_out = model.state(), model.state()
+    solver.step(state_in, state_out, None, None, 0.001)
+    test.assertGreater(float(state_out.particle_q.numpy()[0, 2]), 0.1 * h)
+    np.testing.assert_allclose(solver._fluid_density.numpy(), [rest_density], rtol=2.0e-4)
+
+    points[:, 2] = -h
+    boundary.points.assign(points)
+    boundary.refit()
+    state_in = model.state()
+    solver.step(state_in, state_out, None, None, 0.001)
+    np.testing.assert_allclose(state_out.particle_q.numpy(), [[0.0, 0.0, 0.1 * h]], atol=1.0e-7)
+    np.testing.assert_allclose(solver._fluid_density.numpy(), [0.7 * rest_density], rtol=1.0e-5)
+
+
+def test_fluid_uniform_path_matches_general_after_refresh(test, device):
+    """Preserve the general solve when particle mass or activity changes."""
+    positions = [(0.0, 0.0, 0.0)] * 2 + [(0.02, 0.0, 0.0), (0.0, 0.02, 0.0)]
+    model = _build_particles(positions).finalize(device=device)
+    reference_builder = _build_particles([*positions, (10.0, 0.0, 0.0)])
+    reference_builder.particle_flags[-1] = 0
+    reference_model = reference_builder.finalize(device=device)
+    options = {
+        "iterations": 2,
+        "fluid_rest_distance": 0.05,
+        "fluid_rest_density": 5000.0,
+        "fluid_cohesion": 0.1,
+        "fluid_viscosity": 0.1,
+        "fluid_vorticity_confinement": 0.03,
+    }
+    automatic = newton.solvers.SolverXPBD(model, **options)
+    general = newton.solvers.SolverXPBD(reference_model, **options)
+    for masses, flags in (
+        ([1.0] * 4, [FLUID_FLAGS] * 4),
+        ([1.0, 2.0, 1.0, 1.0], [FLUID_FLAGS] * 4),
+        ([1.0] * 4, [0, FLUID_FLAGS, FLUID_FLAGS, FLUID_FLAGS]),
+    ):
+        results = []
+        for current, solver, padding in ((model, automatic, 0), (reference_model, general, 1)):
+            current.particle_mass.assign(np.array(masses + [1.0] * padding, dtype=np.float32))
+            current.particle_inv_mass.assign(1.0 / np.array(masses + [1.0] * padding, dtype=np.float32))
+            current.particle_flags.assign(np.array(flags + [0] * padding, dtype=np.int32))
+            solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+            state_in, state_out = current.state(), current.state()
+            velocities = [[0.05, 0.1, 0.0], [-0.05, 0.0, 0.1], [0.0, -0.05, -0.1], [0.02, 0.03, 0.04]]
+            state_in.particle_qd.assign(velocities + [[0.0, 0.0, 0.0]] * padding)
+            solver.step(state_in, state_out, None, None, 0.002)
+            results.append((state_out.particle_q.numpy()[:4], state_out.particle_qd.numpy()[:4]))
+        for optimized, reference in zip(results[0], results[1], strict=True):
+            np.testing.assert_allclose(optimized, reference, rtol=1.0e-5, atol=1.0e-5)
+
+
 def test_fluid_viscosity_uses_projected_neighbors(test, device):
     """Find fluid neighbors brought together by the position constraints."""
     speeds = []
@@ -183,6 +253,8 @@ for _function in (
     test_fluid_reorder_preserves_forces,
     test_fluid_reorder_preserves_spring_topology,
     test_fluid_single_particle_viscosity_preserves_velocity,
+    test_fluid_boundary_density_projects_pressure,
+    test_fluid_uniform_path_matches_general_after_refresh,
     test_fluid_viscosity_uses_projected_neighbors,
     test_fluid_rejects_unsupported_gradients,
     test_fluid_rejects_nonfinite_material_parameters,

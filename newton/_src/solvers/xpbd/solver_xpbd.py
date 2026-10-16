@@ -18,12 +18,7 @@ from ..tendon_kernels import solve_tendon_material, update_tendon_attachments
 from ..tendon_state import TendonStateMixin
 from . import kernels, restitution_kernels, tendon_kernels
 from ._hash_grid import copy_hash_grid_descriptor
-from .fluid_kernels import (
-    compute_fluid_lambdas,
-    compute_fluid_vorticity,
-    solve_fluid_deltas,
-    solve_fluid_velocities,
-)
+from .fluid_kernels import initialize_fluid_offsets, make_fluid_kernels
 from .kernels import (
     accumulate_weighted_contact_impulse,
     apply_body_delta_velocities,
@@ -228,6 +223,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         fluid_vorticity_confinement: float = 0.0,
         fluid_relaxation: float = 1.0,
         fluid_max_neighbors: int = 0,
+        fluid_boundary_mesh: wp.Mesh | None = None,
         body_max_velocity: float = 0.0,
         body_max_angular_velocity: float = 0.0,
         deterministic: wp.DeterministicMode | None = None,
@@ -290,6 +286,12 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                 over-compressed clump cannot stall its whole warp. Set it above
                 the bulk neighbor count (so the rest state is never truncated and
                 stays consistent with the rest-density calibration).
+            fluid_boundary_mesh: Experimental, optional one-way boundary in world coordinates [m].
+                Complete missing Poly6 density support at the nearest locally planar mesh face.
+                This supplies pressure support, not collision projection or pressure feedback.
+                The same mesh applies to all worlds. Keep its storage fixed during graph replay
+                and refit it before stepping when its points change. This runtime coupling input
+                does not author model geometry.
             body_max_velocity: Per-substep cap on dynamic-body linear speed [m/s].
                 ``0`` (default) disables it. A small positive value prevents a
                 body slammed into deep penetration from receiving a divergent
@@ -361,6 +363,9 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         self.fluid_vorticity_confinement = max(float(fluid_vorticity_confinement), 0.0)
         self.fluid_relaxation = max(float(fluid_relaxation), 0.0)
         self.fluid_max_neighbors = int(fluid_max_neighbors)
+        if fluid_boundary_mesh is not None and fluid_boundary_mesh.device != model.device:
+            raise ValueError("fluid_boundary_mesh must be on the model device")
+        self.fluid_boundary_mesh = fluid_boundary_mesh
         self.body_max_velocity = max(float(body_max_velocity), 0.0)
         self.body_max_angular_velocity = max(float(body_max_angular_velocity), 0.0)
 
@@ -370,6 +375,9 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         self._fluid_q_init: wp.array[wp.vec3] | None = None
         self._fluid_deltas: wp.array[wp.vec3] | None = None
         self._fluid_velocity: wp.array[wp.vec3] | None = None
+        self._fluid_offsets: wp.array[wp.vec3] | None = None
+        self._fluid_boundary_gradient: wp.array[wp.vec3] | None = None
+        self._fluid_uniform_particles = False
         self._fluid_grid_descriptor: wp.array[wp.uint64] | None = None
         self._all_fluid = False
         # Lazily allocated scratch for reorder_particles (spatial sort buffers
@@ -434,8 +442,9 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         Effective inverse masses and inertia tensors are refreshed for body-property changes. The cached restitution
         state is refreshed for shape-property changes. Tendon-property changes refresh
         the authored tendon reset baseline.
-        ``MODEL_PROPERTIES`` refreshes fluid settings after particle flags,
-        masses, or fluid parameters change; call it outside CUDA graph capture.
+        ``MODEL_PROPERTIES`` refreshes fluid settings and kernel specialization
+        after particle flags, masses, or fluid parameters change. Call it outside
+        CUDA graph capture and recapture graphs affected by these changes.
 
         Args:
             flags: Bitmask of :class:`~newton.ModelFlags` or custom ``int`` bits indicating which model properties
@@ -479,6 +488,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         self._has_fluid = False
         self._all_fluid = False
         self._fluid_grid_grouped = False
+        self._fluid_uniform_particles = False
         if model.particle_count == 0 or model.particle_flags is None:
             return
 
@@ -508,6 +518,9 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
 
         fluid_masses = model.particle_mass.numpy()[fluid_mask]
         mean_mass = float(fluid_masses.mean())
+        if fluid_mask.all() and (fluid_masses == fluid_masses[0]).all():
+            inverse_masses = model.particle_inv_mass.numpy()
+            self._fluid_uniform_particles = bool((inverse_masses == inverse_masses[0]).all())
 
         rest_density = self.fluid_rest_density
         if rest_density is None:
@@ -559,6 +572,15 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
         # the incompressibility correction dominates in the bulk
         self._fluid_cohesion_step = 0.02 * rest_distance * self.fluid_cohesion
 
+        (
+            self._fluid_lambdas_kernel,
+            self._fluid_deltas_kernel,
+            self._fluid_vorticity_kernel,
+            self._fluid_velocities_kernel,
+        ) = make_fluid_kernels(
+            self._fluid_grid_grouped, self._fluid_uniform_particles, self.fluid_boundary_mesh is not None
+        )
+
         n = model.particle_count
         if self._fluid_density is None or len(self._fluid_density) != n:
             self._fluid_density = wp.zeros(n, dtype=wp.float32, device=model.device)
@@ -568,6 +590,18 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
             self._fluid_q_init = wp.empty(n, dtype=wp.vec3, device=model.device)
             self._fluid_deltas = wp.empty(n, dtype=wp.vec3, device=model.device)
             self._fluid_velocity = wp.empty(n, dtype=wp.vec3, device=model.device)
+            self._fluid_offsets = wp.empty(n, dtype=wp.vec3, device=model.device)
+        if self.fluid_boundary_mesh is not None:
+            if self._fluid_boundary_gradient is None or len(self._fluid_boundary_gradient) != n:
+                self._fluid_boundary_gradient = wp.empty(n, dtype=wp.vec3, device=model.device)
+        # Index-derived offsets remain fixed through spatial reordering. Keep
+        # random-number generation out of the hot neighbor loops.
+        wp.launch(
+            initialize_fluid_offsets,
+            dim=n,
+            inputs=[model.particle_world, model.particle_world_start, self._fluid_offsets],
+            device=model.device,
+        )
 
     def reorder_particles(self, state: State) -> None:
         """Sort fluid particles into spatial order to keep the density solve fast.
@@ -1186,7 +1220,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                         # position-based fluid density constraints
                         if self._has_fluid and model.particle_grid is not None:
                             wp.launch(
-                                kernel=compute_fluid_lambdas,
+                                kernel=self._fluid_lambdas_kernel,
                                 dim=model.particle_count,
                                 inputs=[
                                     model.particle_grid.id,
@@ -1195,18 +1229,19 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                                     model.particle_inv_mass,
                                     model.particle_flags,
                                     model.particle_world,
-                                    model.particle_world_start,
+                                    self._fluid_offsets,
                                     self._fluid_h,
                                     self._fluid_rest_density_eff,
                                     self._fluid_eps,
                                     self.fluid_max_neighbors,
                                     self._fluid_rest_distance_eff,
+                                    self.fluid_boundary_mesh.id if self.fluid_boundary_mesh is not None else 0,
                                 ],
-                                outputs=[self._fluid_density, self._fluid_lambda],
+                                outputs=[self._fluid_density, self._fluid_lambda, self._fluid_boundary_gradient],
                                 device=model.device,
                             )
                             wp.launch(
-                                kernel=solve_fluid_deltas,
+                                kernel=self._fluid_deltas_kernel,
                                 dim=model.particle_count,
                                 inputs=[
                                     model.particle_grid.id,
@@ -1215,7 +1250,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                                     model.particle_inv_mass,
                                     model.particle_flags,
                                     model.particle_world,
-                                    model.particle_world_start,
+                                    self._fluid_offsets,
                                     self._fluid_lambda,
                                     self._fluid_h,
                                     self._fluid_rest_density_eff,
@@ -1224,6 +1259,8 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                                     self.fluid_relaxation,
                                     self.fluid_max_neighbors,
                                     self._fluid_rest_distance_eff,
+                                    self.fluid_boundary_mesh.id if self.fluid_boundary_mesh is not None else 0,
+                                    self._fluid_boundary_gradient,
                                 ],
                                 outputs=[particle_deltas],
                                 device=model.device,
@@ -1796,7 +1833,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                 self._build_particle_grid(particle_q, search_radius)
                 if self.fluid_vorticity_confinement > 0.0:
                     wp.launch(
-                        kernel=compute_fluid_vorticity,
+                        kernel=self._fluid_vorticity_kernel,
                         dim=model.particle_count,
                         inputs=[
                             model.particle_grid.id,
@@ -1813,7 +1850,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                     )
                 new_particle_qd = self._fluid_velocity
                 wp.launch(
-                    kernel=solve_fluid_velocities,
+                    kernel=self._fluid_velocities_kernel,
                     dim=model.particle_count,
                     inputs=[
                         model.particle_grid.id,

@@ -9,9 +9,6 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.xpbd.fluid_kernels import (
-    compute_fluid_lambdas,
-)
 from newton._src.solvers.xpbd.kernels import apply_particle_deltas, clamp_body_motion, clamp_body_velocities
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
@@ -439,7 +436,7 @@ def test_fluid_max_neighbors_truncates_density(test, device):
         density = wp.zeros(n, dtype=wp.float32, device=device)
         lam = wp.zeros(n, dtype=wp.float32, device=device)
         wp.launch(
-            compute_fluid_lambdas,
+            solver._fluid_lambdas_kernel,
             dim=n,
             inputs=[
                 model.particle_grid.id,
@@ -448,14 +445,15 @@ def test_fluid_max_neighbors_truncates_density(test, device):
                 model.particle_inv_mass,
                 model.particle_flags,
                 model.particle_world,
-                model.particle_world_start,
+                solver._fluid_offsets,
                 h,
                 solver._fluid_rest_density_eff,
                 solver._fluid_eps,
                 cap,
                 solver._fluid_rest_distance_eff,
+                0,
             ],
-            outputs=[density, lam],
+            outputs=[density, lam, None],
             device=device,
         )
         return density.numpy()
