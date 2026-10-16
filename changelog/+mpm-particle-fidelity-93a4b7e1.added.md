@@ -1,0 +1,1 @@
+Add experimental particle fidelity to `SolverImplicitMPM.Config`, runtime fidelity and particle-radius controls, deferred MPM grid allocation, and rigid proxy reaction wrenches for granular pretraining.

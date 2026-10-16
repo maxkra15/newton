@@ -250,6 +250,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array[float],
     particle_radius: wp.array[float],
     particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -285,6 +286,7 @@ def solve_particle_particle_contacts(
         neighbor_flag = particle_flags[index]
         if (
             (neighbor_flag & ParticleFlags.ACTIVE) != 0
+            and (particle_world[i] == particle_world[index] or particle_world[i] < 0 or particle_world[index] < 0)
             and (is_proxy == 0 or ((neighbor_flag & ParticleFlags.PROXY) == 0 and particle_invmass[index] > 0.0))
             and index != i
         ):

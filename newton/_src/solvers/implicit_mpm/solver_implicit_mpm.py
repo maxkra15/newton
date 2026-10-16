@@ -9,7 +9,10 @@ import math
 import operator
 import re
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from enum import Enum
 from itertools import pairwise
 from typing import Any, Literal
 
@@ -25,7 +28,9 @@ from ...geometry.particle_surface import ParticleSurface
 from ...sim import ModelFlags, StateFlags
 from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
+from .contact_warmstart import ContactWarmstartCache
 from .implicit_mpm_model import ImplicitMPMModel
+from .particle_solver import _ParticleSolver
 from .particle_surface_colliders import extrapolate_surface_sdf_into_colliders
 from .rasterized_collisions import (
     Collider,
@@ -98,6 +103,27 @@ from .implicit_mpm_solver_kernels import (
 
 # Disabled until Warp includes the fix for NVIDIA/warp#2036 (see #4506).
 _ROW_COMPRESSED_CONTACT_CONSTRUCTION = False
+
+
+@wp.kernel(enable_backward=False)
+def _predict_particle_collider_poses(
+    dt: float,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_q_end: wp.array[wp.transform],
+):
+    body = wp.tid()
+    pose = body_q[body]
+    rotation = wp.transform_get_rotation(pose)
+    linear = wp.spatial_top(body_qd[body])
+    angular = wp.spatial_bottom(body_qd[body])
+    speed = wp.length(angular)
+    end_rotation = rotation
+    if speed > 0.0:
+        end_rotation = wp.normalize(wp.quat_from_axis_angle(angular / speed, speed * dt) * rotation)
+    center = wp.transform_point(pose, body_com[body]) + dt * linear
+    body_q_end[body] = wp.transform(center - wp.quat_rotate(end_rotation, body_com[body]), end_rotation)
 
 
 def _as_2d_array(array, shape, dtype):
@@ -258,6 +284,7 @@ class ImplicitMPMScratchpad:
 
     def __init__(self):
         self.grid = None
+        self.dt = 0.0
 
         self.velocity_test = None
         self.velocity_trial = None
@@ -691,6 +718,7 @@ class LastStepData:
         self.ws_impulse_field = None  # Warmstart for collision impulses
         self.ws_stress_field = None  # Warmstart for stress field
         self.body_q_prev = None  # Previous body transforms for finite-difference velocities
+        self.contact_cache: ContactWarmstartCache | None = None
 
     def _ws_stress_space(self, scratch: ImplicitMPMScratchpad, smoothed: bool):
         sym_strain_space = scratch.sym_strain_test.space
@@ -822,12 +850,53 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             or particles that are not stored contiguously by world.
     """
 
+    class Fidelity(str, Enum):
+        """Numerical model used to advance the shared particle state.
+
+        .. experimental::
+
+            Particle fidelity and fidelity switching may change without prior notice.
+        """
+
+        MPM = "mpm"
+        """Solve continuum stress, material history, and grid contact."""
+        PARTICLES = "particles"
+        """Use a local granular particle approximation with rigid contact reactions."""
+
     @dataclass
     class Config:
         """Configuration for :class:`SolverImplicitMPM`.
 
         Per-particle properties can be configured using custom attributes on the Model.
         See :meth:`SolverImplicitMPM.register_custom_attributes` for details.
+        """
+
+        fidelity: SolverImplicitMPM.Fidelity | str = dataclass_field(
+            default_factory=lambda: SolverImplicitMPM.Fidelity.MPM
+        )
+        """Particle dynamics model. Accepts :class:`SolverImplicitMPM.Fidelity`
+        or its ``"mpm"``/``"particles"`` string values.
+
+        ``MPM`` retains the full implicit solver. Experimental ``PARTICLES``
+        uses local XPBD granular contacts, preserves the particle state layout,
+        and returns approximate rigid proxy reactions through the coupling
+        interface. It skips grid allocation and assembly until MPM is enabled.
+        It supports static, kinematic, and proxy rigid colliders; deformable
+        colliders and unconstrained dynamic bodies are unsupported.
+
+        .. experimental::
+
+            Particle fidelity may change without prior notice.
+        """
+        particle_iterations: int = 2
+        """Positive number of local contact iterations in particle fidelity."""
+        particle_friction: float | None = None
+        """Particle-pair friction coefficient. ``None`` uses ``model.particle_mu``.
+        This does not change the rigid collider's material friction.
+        """
+        particle_cohesion: float | None = None
+        """Particle attraction range [m]. ``None`` uses ``model.particle_cohesion``.
+        This is independent of MPM's tensile and shear yield stresses [Pa].
         """
 
         # numerics
@@ -853,6 +922,22 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         and ``P1d``/``Q1d`` strain bases, and grid-backed stress otherwise.
         Grid-backed ``"grid"`` and ``"smoothed"`` modes are not supported for
         rebuildable sparse grids because their topology changes in place.
+        """
+        warmstart_contact_impulses: bool = False
+        """Preserve S2 contact impulses across rebuildable sparse-grid steps.
+
+        This option is independent of ``warmstart_mode``, which selects the
+        stress predictor.
+
+        .. experimental::
+
+            This option currently requires a capacity-bounded rebuildable
+            sparse grid and ``collider_basis="S2"``. History is matched by
+            FEM environment and half-voxel node coordinates, then rejected if
+            collider identity or contact normal changes substantially. It is
+            scaled by the timestep ratio; ratios outside [0.25, 4] start cold.
+            Normal Newton reset, collider reconfiguration, model notification,
+            and voxel-size changes invalidate the corresponding history.
         """
         collider_velocity_mode: Literal["forward", "backward"] = "forward"
         """Collider velocity computation mode. ``'forward'`` uses the current velocity,
@@ -1415,6 +1500,23 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         if self._initial_particle_count == 0:
             raise ValueError("SolverImplicitMPM requires at least one particle.")
 
+        self._fidelity = self.Fidelity(config.fidelity)
+        if isinstance(config.particle_iterations, (bool, np.bool_)):
+            raise ValueError("Config.particle_iterations must be a positive integer.")
+        try:
+            particle_iterations = operator.index(config.particle_iterations)
+        except TypeError as error:
+            raise ValueError("Config.particle_iterations must be a positive integer.") from error
+        if particle_iterations < 1:
+            raise ValueError("Config.particle_iterations must be a positive integer.")
+        for name in ("particle_friction", "particle_cohesion"):
+            value = getattr(config, name)
+            if value is not None and (not math.isfinite(value) or value < 0.0):
+                raise ValueError(f"Config.{name} must be finite and nonnegative, or None.")
+        self._particle_config = particle_iterations, config.particle_friction, config.particle_cohesion
+        self._particle_solver = None
+        self._particle_collider_end_poses = None
+
         self._separate_worlds = bool(config.separate_worlds and self._initial_world_count > 1)
         self._environment_count = self._initial_world_count if self._separate_worlds else 1
         self._particle_environment = model.particle_world if self._separate_worlds else None
@@ -1483,6 +1585,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             and strain_rebuild_safe
             and collider_rebuild_safe
         )
+        self._warmstart_contact_impulses = bool(config.warmstart_contact_impulses)
+        if self._warmstart_contact_impulses and (not self._sparse_rebuildable or collider_basis != "S2"):
+            raise ValueError(
+                "Config.warmstart_contact_impulses requires a rebuildable sparse grid and collider_basis='S2'."
+            )
         self._grid_status = None
         self._grid_accumulated_status = None
         self._grid_point_mask = None
@@ -1516,18 +1623,53 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # Materialize graph-persistent topology and buffers before callers can capture step().
         self._scratchpad = None
         self._last_step_data = LastStepData()
-        with wp.ScopedDevice(model.device):
-            pic = self._particles_to_cells(model.particle_q)
+        self._velocity_nodes_per_strain_sample = 8 if self.strain_basis != "Q1" and self.velocity_basis == "Q1" else -1
+        if self._fidelity == self.Fidelity.PARTICLES:
+            self._require_particle_solver()
+            self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
+        else:
+            self._initialize_mpm_grid(model.particle_q)
+
+    def _initialize_mpm_grid(self, particle_q: wp.array[wp.vec3]) -> None:
+        if self._scratchpad is not None:
+            return
+        with wp.ScopedDevice(self.model.device):
+            pic = self._particles_to_cells(particle_q)
             self._rebuild_scratchpad(pic)
             self._require_velocity_space_fields(self._scratchpad, self._mpm_model.has_compliant_particles)
             self._require_collision_space_fields(self._scratchpad, self._last_step_data)
             self._require_strain_space_fields(self._scratchpad, self._last_step_data)
 
-        self._velocity_nodes_per_strain_sample = (
-            self._scratchpad.velocity_nodes_per_element
-            if self.strain_basis != "Q1" and self.velocity_basis == "Q1"
-            else -1
-        )
+    def _require_particle_solver(self) -> None:
+        self._validate_particle_colliders(self._mpm_model)
+        if self._particle_solver is not None:
+            return
+        iterations, friction, cohesion = self._particle_config
+        self._particle_solver = _ParticleSolver(self.model, iterations=iterations, friction=friction, cohesion=cohesion)
+        if self.model.body_count:
+            self._particle_collider_end_poses = wp.empty_like(self.model.body_q)
+
+    def _validate_particle_colliders(self, mpm_model: ImplicitMPMModel) -> None:
+        if mpm_model.deformable_collider_vertex_ranges:
+            raise ValueError("Particle fidelity does not support deformable mesh colliders.")
+        if any(getattr(self.model, name, 0) > 0 for name in ("spring_count", "tri_count", "tet_count")):
+            raise ValueError(
+                "Particle fidelity supports granular particles without spring, cloth, or solid constraints."
+            )
+        collider_bodies = mpm_model.collider.collider_body_index.numpy()
+        collider_bodies = np.unique(collider_bodies[collider_bodies >= 0])
+        if len(collider_bodies):
+            if np.max(collider_bodies) >= self.model.body_count:
+                raise ValueError("Particle fidelity requires collider bodies to belong to its own model.")
+            flags = self.model.body_flags.numpy()[collider_bodies]
+            masses = self.model.body_inv_mass.numpy()[collider_bodies]
+            prescribed = flags & int(newton.BodyFlags.KINEMATIC | newton.BodyFlags.PROXY)
+            if np.any((prescribed == 0) & (masses > 0.0)):
+                raise ValueError(
+                    "Particle fidelity requires dynamic collider bodies to be kinematic or coupling proxies."
+                )
+        if mpm_model.collider.body_com.shape != (self.model.body_count,):
+            raise ValueError("Particle fidelity requires a center of mass for every model body.")
 
     def setup_collider(
         self,
@@ -1582,7 +1724,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 global body-backed collider is dynamic. Replicate a global dynamic collider per
                 world, make it static or kinematic, or disable ``Config.separate_worlds``.
         """
-        self._mpm_model.setup_collider(
+        # Stage geometry and derived flags so rejected configuration leaves the
+        # previous collider meshes and history usable by subsequent steps.
+        collider_model = copy(self._mpm_model)
+        collider_model.collider = Collider()
+        collider_model.collider.assign(self._mpm_model.collider)
+        collider_model.setup_collider(
             collider_meshes=collider_meshes,
             collider_body_ids=collider_body_ids,
             collider_thicknesses=collider_margins,
@@ -1597,8 +1744,94 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             body_q=body_q,
             collider_world_ids=collider_world_ids,
         )
+        if self._fidelity == self.Fidelity.PARTICLES:
+            self._validate_particle_colliders(collider_model)
+        self._mpm_model.collider.assign(collider_model.collider)
+        collider_model.collider = self._mpm_model.collider
+        self._mpm_model.__dict__.update(collider_model.__dict__)
 
         self._last_step_data.save_collider_current_position(self._mpm_model.collider_body_q)
+        if self._last_step_data.contact_cache is not None:
+            self._last_step_data.contact_cache.reset()
+
+    @property
+    def fidelity(self) -> SolverImplicitMPM.Fidelity:
+        """Numerical model currently advancing the particle state."""
+        return self._fidelity
+
+    def set_fidelity(self, fidelity: SolverImplicitMPM.Fidelity | str, *, state: newton.State) -> None:
+        """Change numerical fidelity at a step boundary without moving particles.
+
+        Keep particle IDs, count, position, velocity, mass, and radius. Reset
+        constitutive history using the current particle configuration as the
+        new material reference. Initial particle fidelity defers grid storage;
+        the first switch to MPM allocates it around the current positions.
+        Discard captured graphs and capture the new mode before replaying.
+
+        .. experimental::
+
+            Fidelity switching and particle approximation may change without prior notice.
+
+        Args:
+            fidelity: Requested numerical model, or its string value.
+            state: Current state whose material reference is reset in place.
+
+        Raises:
+            ValueError: If fidelity or the particle model is unsupported.
+            RuntimeError: If called during capture or grid allocation fails.
+        """
+        fidelity = self.Fidelity(fidelity)
+        if self.model.device.is_capturing:
+            raise RuntimeError("Cannot change MPM fidelity during graph capture.")
+        self._validate_reset_inputs(state)
+        if fidelity == self._fidelity:
+            return
+        if fidelity == self.Fidelity.PARTICLES:
+            self._require_particle_solver()
+        elif self._scratchpad is None:
+            old_resources = (
+                self._last_step_data,
+                self._grid_status,
+                self._grid_accumulated_status,
+                self._grid_point_mask,
+            )
+            self._last_step_data = LastStepData()
+            self._last_step_data.body_q_prev = old_resources[0].body_q_prev
+            try:
+                self._initialize_mpm_grid(state.particle_q)
+            except Exception:
+                self._scratchpad = None
+                self._last_step_data, self._grid_status, self._grid_accumulated_status, self._grid_point_mask = (
+                    old_resources
+                )
+                raise
+        self.reset(state)
+        self._fidelity = fidelity
+
+    def set_particle_radius(self, radius: float) -> None:
+        """Set a uniform support/contact radius while preserving particle mass.
+
+        Changing radius changes MPM's support volume ``8 * radius**3`` and
+        therefore density at fixed mass. Particle count and positions stay
+        fixed; this operation does not split or merge particles. Call between
+        steps and recapture graphs, since particle neighbor searches record
+        the maximum radius as a scalar argument.
+
+        .. experimental::
+
+            Runtime uniform particle-radius changes may change without prior notice.
+
+        Args:
+            radius: Finite positive support and contact radius [m].
+        """
+        radius = float(radius)
+        if not math.isfinite(radius) or radius <= 0.0:
+            raise ValueError("Particle radius must be finite and positive.")
+        if self.model.device.is_capturing:
+            raise RuntimeError("Cannot change particle radius during graph capture.")
+        self.model.particle_radius.fill_(radius)
+        self.model.particle_max_radius = radius
+        self.notify_model_changed(ModelFlags.MODEL_PROPERTIES)
 
     @property
     def voxel_size(self) -> float:
@@ -1639,6 +1872,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             raise RuntimeError("Cannot change MPM voxel size during graph capture.")
         self._validate_reset_inputs(state)
         if voxel_size == self.voxel_size:
+            return
+
+        if self._scratchpad is None:
+            self._mpm_model.voxel_size = voxel_size
+            self._mpm_model.collider.query_max_dist = voxel_size * math.sqrt(3.0)
             return
 
         old_size = self.voxel_size
@@ -1806,6 +2044,18 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     def _validate_reset_warmstart_fields(
         self, world_mask: wp.array[wp.bool] | None
     ) -> tuple[fem.SpacePartition | None, fem.SpacePartition | None]:
+        if self._scratchpad is None:
+            return None, None
+        if (
+            world_mask is not None
+            and self._last_step_data.contact_cache is not None
+            and self._initial_world_count > 1
+            and not self._separate_worlds
+        ):
+            raise RuntimeError(
+                "Masked reset cannot selectively clear contact warm starts on a shared multi-world grid; "
+                "set separate_worlds=True or reset all worlds."
+            )
         reset_partitions = []
         for name, field, scratch_field in (
             ("ws_impulse_field", self._last_step_data.ws_impulse_field, self._scratchpad.impulse_field),
@@ -1838,6 +2088,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         world_mask: wp.array[wp.bool] | None,
         reset_partitions: tuple[fem.SpacePartition | None, fem.SpacePartition | None],
     ) -> None:
+        if self._last_step_data.contact_cache is not None:
+            self._last_step_data.contact_cache.reset(world_mask)
         for field, partition in zip(
             (self._last_step_data.ws_impulse_field, self._last_step_data.ws_stress_field),
             reset_partitions,
@@ -1924,6 +2176,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         with wp.ScopedDevice(self.model.device):
             self._clear_reset_warmstarts(world_mask, reset_partitions)
+            if self._particle_solver is not None:
+                # Reaction impulses belong only to the most recently completed step.
+                self._particle_solver.body_impulse.zero_()
 
             if reset_particle_history and self.model.particle_count > 0:
                 if world_mask is None:
@@ -1990,6 +2245,34 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         model = self.model
 
         with wp.ScopedDevice(model.device):
+            if self._fidelity == self.Fidelity.PARTICLES:
+                if not math.isfinite(dt) or dt <= 0.0:
+                    raise ValueError("Particle fidelity requires a finite positive dt.")
+                body_q = state_in.body_q
+                body_q_prev = self._last_step_data.body_q_prev
+                if self.collider_velocity_mode == "forward" and self.model.body_count:
+                    wp.launch(
+                        _predict_particle_collider_poses,
+                        dim=self.model.body_count,
+                        inputs=[dt, state_in.body_q, state_in.body_qd, self._mpm_model.collider.body_com],
+                        outputs=[self._particle_collider_end_poses],
+                        device=model.device,
+                    )
+                    body_q_prev = state_in.body_q
+                    body_q = self._particle_collider_end_poses
+                self._particle_solver.step(
+                    state_in,
+                    state_out,
+                    dt,
+                    collider=self._mpm_model.collider,
+                    particle_flags=self._mpm_model.material_particle_flags,
+                    particle_environment=self._particle_environment,
+                    body_q_prev=body_q_prev,
+                    body_q=body_q,
+                    body_q_reference=state_in.body_q,
+                )
+                self._last_step_data.save_collider_current_position(state_in.body_q)
+                return
             pic = self._particles_to_cells(state_in.particle_q)
             scratch = self._rebuild_scratchpad(pic)
             self._step_impl(state_in, state_out, dt, pic, scratch)
@@ -1997,6 +2280,8 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        if self._last_step_data.contact_cache is not None:
+            self._last_step_data.contact_cache.reset()
         if flags & ModelFlags.MODEL_PROPERTIES:
             self._mpm_model.notify_particle_material_changed()
 
@@ -2114,6 +2399,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         del body_qd_before, state_out, contacts
         if dt <= 0.0:
             raise ValueError("MPM proxy wrench harvesting requires a positive dt")
+        if self._fidelity == self.Fidelity.PARTICLES:
+            self._particle_solver.harvest_proxy_wrenches(body_local_to_proxy_global, out_body_f, dt)
+            return
         out_body_f.zero_()
 
         impulses, positions, collider_ids = self.collect_collider_impulses(state)
@@ -2247,7 +2535,14 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             - Impulse values in world units.
             - Collider positions in world units.
             - Collider id, that can be mapped back to the model's body ids using the ``collider_body_index`` property.
+
+        Particle fidelity stores reduced body wrenches for the coupling
+        interface, rather than grid contact samples. This method is available
+        only in MPM fidelity.
         """
+
+        if self._fidelity == self.Fidelity.PARTICLES:
+            raise NotImplementedError("Particle fidelity exposes proxy-body reactions through the coupling interface.")
 
         # Not stepped yet, read from preallocated scratchpad
         if not hasattr(state, "impulse_field"):
@@ -3050,6 +3345,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         mpm_model = self._mpm_model
         last_step_data = self._last_step_data
+        scratch.dt = dt
 
         self._require_collision_space_fields(scratch, last_step_data)
         self._require_velocity_space_fields(scratch, mpm_model.has_compliant_particles)
@@ -3810,7 +4106,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
     def _require_collision_space_fields(self, scratch: ImplicitMPMScratchpad, last_step_data: LastStepData):
         """Ensure collision-space fields exist and match current spaces."""
         scratch.require_collision_space_fields()
-        last_step_data.require_collision_space_fields(scratch)
+        if self._warmstart_contact_impulses:
+            if last_step_data.contact_cache is None:
+                last_step_data.contact_cache = ContactWarmstartCache(
+                    scratch.impulse_field.dof_values.shape[0], device=self.model.device
+                )
+        else:
+            last_step_data.require_collision_space_fields(scratch)
         last_step_data.require_collider_previous_position(self._mpm_model.collider_body_q)
 
     def _require_strain_space_fields(self, scratch: ImplicitMPMScratchpad, last_step_data: LastStepData):
@@ -3870,7 +4172,17 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # particle/point paths below still apply since they go through the PIC quadrature.
         grid_to_grid_warmstart = not self._sparse_rebuildable
 
-        if isinstance(prev_impulse_field.space.basis, fem.PointBasisSpace):
+        if last_step_data.contact_cache is not None:
+            last_step_data.contact_cache.load(
+                scratch.collider_position_field.dof_values,
+                scratch.collider_environment_offsets,
+                scratch.collider_ids,
+                scratch.collider_normal_field.dof_values,
+                scratch.impulse_field.dof_values,
+                voxel_size=self.voxel_size,
+                dt=scratch.dt,
+            )
+        elif isinstance(prev_impulse_field.space.basis, fem.PointBasisSpace):
             # point-based collisions, simply copy the previous impulses
             scratch.impulse_field.dof_values.assign(prev_impulse_field.dof_values[pic.cell_particle_indices])
         elif grid_to_grid_warmstart:
@@ -3912,14 +4224,24 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self, scratch: ImplicitMPMScratchpad, pic: fem.PicQuadrature, last_step_data: LastStepData
     ):
         with self._timer("Save warmstart fields"):
-            last_step_data.rebind_collision_space_fields(scratch)
-
-            if isinstance(last_step_data.ws_impulse_field.space.basis, fem.PointBasisSpace):
+            if last_step_data.contact_cache is not None:
+                last_step_data.contact_cache.save(
+                    scratch.collider_position_field.dof_values,
+                    scratch.collider_environment_offsets,
+                    scratch.collider_ids,
+                    scratch.collider_normal_field.dof_values,
+                    scratch.impulse_field.dof_values,
+                    voxel_size=self.voxel_size,
+                    dt=scratch.dt,
+                )
+            elif isinstance(last_step_data.ws_impulse_field.space.basis, fem.PointBasisSpace):
                 # point-based collisions, simply copy the previous impulses
+                last_step_data.rebind_collision_space_fields(scratch)
                 last_step_data.ws_impulse_field.dof_values[pic.cell_particle_indices].assign(
                     scratch.impulse_field.dof_values
                 )
             else:
+                last_step_data.rebind_collision_space_fields(scratch)
                 last_step_data.ws_impulse_field.dof_values.zero_()
                 wp.launch(
                     scatter_field_dof_values,

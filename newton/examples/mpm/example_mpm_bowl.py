@@ -21,7 +21,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.solvers import SolverImplicitMPM, SolverXPBD
+from newton.solvers import SolverImplicitMPM
 
 
 @wp.kernel(enable_backward=False)
@@ -153,6 +153,8 @@ class Example:
         self.model.mpm.viscosity.fill_(args.viscosity)
 
         config = SolverImplicitMPM.Config(
+            fidelity=args.solver,
+            particle_iterations=args.particle_iterations,
             grid_type="sparse",
             voxel_size=args.voxel_size,
             max_active_cell_count=args.max_active_cell_count,
@@ -162,12 +164,12 @@ class Example:
             collider_basis="S2",
             solver=tuple(args.rheology_solver),
             warmstart_mode=args.warmstart_mode,
+            warmstart_contact_impulses=args.warmstart_contact_impulses,
             critical_fraction=args.critical_fraction,
             max_iterations=args.iterations,
             tolerance=args.tolerance,
         )
         self.mpm_solver = SolverImplicitMPM(self.model, config=config)
-        self.particle_solver = SolverXPBD(self.model, iterations=args.particle_iterations)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         # XPBD can use both input and output position buffers during its iterations.
@@ -249,7 +251,7 @@ class Example:
         if solver_type != self.solver_type:
             self.graph = None
             # MPM strain accumulated before a particle stage is no longer a valid reference.
-            self.mpm_solver.reset(self.state_0)
+            self.mpm_solver.set_fidelity(solver_type, state=self.state_0)
             self.mpm_solver.reset(self.state_1)
             self.solver_type = solver_type
             self.capture()
@@ -259,9 +261,7 @@ class Example:
         if not math.isfinite(radius) or not 0.0 < radius < 0.1:
             raise ValueError("Particle radius must be between 0 and 0.1 m.")
         self.graph = None
-        self.model.particle_radius.fill_(radius)
-        self.model.particle_max_radius = radius
-        self.mpm_solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+        self.mpm_solver.set_particle_radius(radius)
         self.particle_radius = radius
         self.capture()
 
@@ -272,12 +272,10 @@ class Example:
             wp.copy(self.state_prev.particle_q, self.state_0.particle_q)
             wp.copy(self.state_prev.body_q, self.state_0.body_q)
             self.state_0.clear_forces()
-            if self.solver_type == "particles":
-                self.particle_solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
-            else:
-                self.mpm_solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
+            self.mpm_solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
             self._move_bowl(self.state_1, time + self.sim_dt)
-            self.mpm_solver.project_outside(self.state_1, self.state_1, self.sim_dt, state_prev=self.state_prev)
+            if self.solver_type == "mpm":
+                self.mpm_solver.project_outside(self.state_1, self.state_1, self.sim_dt, state_prev=self.state_prev)
             self.state_0, self.state_1 = self.state_1, self.state_0
         wp.launch(advance_clock, dim=1, inputs=[self.sim_clock, self.frame_dt], device=self.model.device)
 
@@ -392,6 +390,12 @@ class Example:
             help="MPM rheology solver or warm-start chain, e.g. jacobi gs or cr gs.",
         )
         parser.add_argument("--warmstart-mode", choices=("particles", "none"), default="particles")
+        parser.add_argument(
+            "--warmstart-contact-impulses",
+            action=BooleanOptionalAction,
+            default=False,
+            help="Preserve S2 contact impulses across sparse-grid rebuilds.",
+        )
         parser.add_argument(
             "--critical-fraction",
             type=float,

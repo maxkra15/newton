@@ -7,6 +7,8 @@ Run ``uv run --extra dev asv/benchmarks/simulation/bench_mpm_low_iterations.py
 --output /tmp/mpm-low-iterations.json``. The XPBD stress seed and signed packing
 bias below are experiments, not supported Newton solver features. They deliberately
 live outside the production solver so their quality and cost can be compared first.
+The ``s2_cacheN`` cases exercise the public contact warm-start option and share
+the same 100-iteration cold-contact reference as the ordinary S2 cases.
 """
 
 import argparse
@@ -175,7 +177,8 @@ class _ExperimentalMPM(SolverImplicitMPM):
         for row, volume in enumerate(
             (scratch.strain_node_particle_volume, scratch.strain_node_collider_volume, scratch.strain_node_volume)
         ):
-            wp.copy(self.packing_volumes[row], volume, count=scratch.strain_node_count)
+            if volume is not None:
+                wp.copy(self.packing_volumes[row], volume, count=scratch.strain_node_count)
         if self.packing_beta > 0.0:
             wp.launch(
                 _apply_packing_bias,
@@ -235,6 +238,7 @@ class _Case:
     point_capacity: int = 0
     cell_capacity: int | None = None
     clear_contact_warmstart: bool = False
+    warmstart_contact_impulses: bool = False
 
 
 _CASES = (
@@ -244,6 +248,10 @@ _CASES = (
     _Case("gs5", 5),
     _Case("gs10", 10),
     _Case("gs20", 20),
+    _Case("s2_cache100", 100, warmstart_contact_impulses=True),
+    _Case("s2_cache2", 2, warmstart_contact_impulses=True),
+    _Case("s2_cache5", 5, warmstart_contact_impulses=True),
+    _Case("s2_cache20", 20, warmstart_contact_impulses=True),
     _Case("cold2", 2, warmstart="none"),
     _Case("jacobi_gs2", 2, solver=("jacobi", "gs")),
     _Case("cr_gs2", 2, solver=("cr", "gs")),
@@ -260,7 +268,9 @@ _CASES = (
 )
 
 
-def _make_example(case, *, voxel_size, particle_radius, cuda_graph, cell_capacity=4096):
+def _make_example(
+    case, *, voxel_size, particle_radius, cuda_graph, cell_capacity=4096, critical_fraction=1.0, tolerance=0.0
+):
     cell_capacity = case.cell_capacity if case.cell_capacity is not None else cell_capacity
     args = Example.create_parser().parse_args(
         [
@@ -283,10 +293,11 @@ def _make_example(case, *, voxel_size, particle_radius, cuda_graph, cell_capacit
         max_upper_node_count=16,
         collider_basis=f"pic{case.point_capacity}" if case.point_capacity else case.collider_basis,
         warmstart_mode=case.warmstart,
+        warmstart_contact_impulses=case.warmstart_contact_impulses,
         solver=case.solver,
         max_iterations=case.iterations,
-        tolerance=0.0,
-        critical_fraction=1.0,
+        tolerance=tolerance,
+        critical_fraction=critical_fraction,
     )
     example.mpm_solver = _ExperimentalMPM(
         example.model,
@@ -315,7 +326,9 @@ def _metrics(example):
     local = (q - pose[:3]) @ rotation
     return (
         {
-            "packing_excess_fraction": float(np.maximum(volume - available, 0.0).sum() / volume.sum()),
+            "packing_excess_fraction": float(np.maximum(volume - available, 0.0).sum() / volume.sum())
+            if solver._mpm_model.critical_fraction > 0.0 and volume.sum() > 0.0
+            else None,
             "projection_rms_m": float(np.sqrt(np.mean(np.sum(projection**2, axis=1)))),
             "projection_fraction": float(np.mean(np.linalg.norm(projection, axis=1) > 1.0e-6)),
             "speed_rms_m_s": float(np.sqrt(np.mean(np.sum(velocity**2, axis=1)))),
@@ -334,6 +347,9 @@ def _metrics(example):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/mpm-low-iterations.json"))
+    parser.add_argument(
+        "--state-output", type=Path, help="Optionally save final particle arrays for replay comparisons."
+    )
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--particle-radius", type=float, default=0.016)
     parser.add_argument("--cell-capacity", type=int, default=4096)
@@ -348,6 +364,10 @@ def main():
     parser.add_argument("--no-cuda-graph", action="store_true")
     parser.add_argument("--paired", action="store_true", help="Interleave captured MPM-only cases for paired timings.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for the paired measurement order.")
+    parser.add_argument("--critical-fraction", type=float, default=1.0, help="MPM packing fraction target.")
+    parser.add_argument(
+        "--tolerance", type=float, default=0.0, help="Zero disables convergence-based early termination."
+    )
     args = parser.parse_args()
     if args.frames <= 10:
         parser.error("--frames must exceed the 10 warmup frames")
@@ -380,8 +400,8 @@ def main():
         "cuda_graph": not args.no_cuda_graph,
         "paired": args.paired,
         "seed": args.seed,
-        "critical_fraction": 1.0,
-        "tolerance": 0.0,
+        "critical_fraction": args.critical_fraction,
+        "tolerance": args.tolerance,
         "jacobi_seed_iterations": 5,
         "xpbd_seed_iterations": 2,
         "packing_beta": 0.2,
@@ -395,6 +415,8 @@ def main():
     if requested & {"pic_captured2", "pic_captured20", "pic_cold_contact2"}:
         required.add("pic_captured100")
     selected = [case for case in _CASES if case.name in requested | required]
+    if args.critical_fraction <= 0.0 and any(case.packing_beta > 0.0 for case in selected):
+        parser.error("Packing-bias cases require a positive --critical-fraction")
     selected = [replace(case, point_capacity=args.point_capacity) if case.point_capacity else case for case in selected]
     if args.compare_cell_capacity is not None:
         selected = [
@@ -406,6 +428,7 @@ def main():
     ):
         parser.error("--paired requires captured MPM-only cases; exclude XPBD seeds and unbounded pic bases")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    final_states = {}
 
     def case_key(case):
         return case.name, case.cell_capacity if case.cell_capacity is not None else args.cell_capacity
@@ -422,6 +445,8 @@ def main():
                     particle_radius=args.particle_radius,
                     cuda_graph=True,
                     cell_capacity=args.cell_capacity,
+                    critical_fraction=args.critical_fraction,
+                    tolerance=args.tolerance,
                 )
                 paired_times[case_key(case)] = []
             order = np.random.default_rng(args.seed)
@@ -447,6 +472,8 @@ def main():
                     particle_radius=args.particle_radius,
                     cuda_graph=cuda_graph,
                     cell_capacity=args.cell_capacity,
+                    critical_fraction=args.critical_fraction,
+                    tolerance=args.tolerance,
                 )
                 times = []
                 for frame in range(args.frames):
@@ -468,7 +495,9 @@ def main():
                 reference_q, reference_v = q, velocity
             basis_key = case.collider_basis, bool(case.point_capacity), case_key(case)[1]
             if case.iterations == 100:
-                basis_references[basis_key] = q, velocity
+                # Keep all S2 cache variants tied to the same cold-contact
+                # reference; cache100 must not replace that comparison target.
+                basis_references.setdefault(basis_key, (q, velocity))
             if basis_key in basis_references:
                 basis_q, basis_v = basis_references[basis_key]
                 metrics["position_rms_error_same_basis_m"] = float(np.sqrt(np.mean(np.sum((q - basis_q) ** 2, axis=1))))
@@ -492,6 +521,17 @@ def main():
                 if case.point_capacity
                 else None,
                 "warmstart": case.warmstart,
+                "warmstart_contact_impulses": case.warmstart_contact_impulses,
+                "contact_cache_reserved_bytes": sum(
+                    array.capacity for array in example.mpm_solver._last_step_data.contact_cache._arguments()
+                )
+                if case.warmstart_contact_impulses
+                else 0,
+                "contact_cache_final_entries": int(
+                    np.count_nonzero(example.mpm_solver._last_step_data.contact_cache.slots.numpy() >= 0)
+                )
+                if case.warmstart_contact_impulses
+                else 0,
                 "validation_passed": validation_error is None,
                 "validation_error": validation_error,
                 "median_frame_ms": median(times),
@@ -499,11 +539,19 @@ def main():
                 **metrics,
             }
             report["cases"].append(result)
+            if args.state_output is not None:
+                state_key = f"{case.name}_h{voxel_size:g}_capacity{case_key(case)[1]}"
+                final_states[f"{state_key}_q"] = q
+                final_states[f"{state_key}_qd"] = velocity
             args.output.write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(result), flush=True)
             # Finish each scene before building another hash grid: Warp 1.17's
             # captured hash-grid descriptors can be affected by another grid build.
             del example
+
+    if args.state_output is not None:
+        args.state_output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(args.state_output, **final_states)
 
 
 if __name__ == "__main__":

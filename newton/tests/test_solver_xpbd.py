@@ -150,6 +150,32 @@ def test_particle_particle_friction_uses_relative_velocity(test, device):
     )
 
 
+def test_particle_contacts_respect_worlds(test, device):
+    """Separate particles within each world and allow contact with global particles."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_particle((10.0, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.5)
+    for world in range(2):
+        builder.begin_world()
+        for x in (0.0, 0.9):
+            builder.add_particle((x, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.5)
+        builder.add_particle((0.9 * world, 5.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.5)
+        if world == 0:
+            builder.add_particle((10.9, 0.0, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.5)
+        builder.end_world()
+    model = builder.finalize(device=device)
+    initial = model.particle_q.numpy().copy()
+    solver = newton.solvers.SolverXPBD(model, iterations=1)
+    state_in, state_out = model.state(), model.state()
+    solver.step(state_in, state_out, None, None, 0.01)
+    expected = initial.copy()
+    pair = initial[:, 1] == 0.0
+    left = pair & ((initial[:, 0] == 0.0) | (initial[:, 0] == 10.0))
+    right = pair & ~left
+    expected[left, 0] -= 0.045
+    expected[right, 0] += 0.045
+    np.testing.assert_allclose(state_out.particle_q.numpy(), expected, atol=1.0e-6)
+
+
 def test_distance_joint_limits(test, device):
     """Enforce distance-joint bounds from separated and coincident anchors."""
 
@@ -2630,6 +2656,14 @@ add_function_test(
     TestSolverXPBD,
     "test_particle_particle_friction_uses_relative_velocity",
     test_particle_particle_friction_uses_relative_velocity,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_particle_contacts_respect_worlds",
+    test_particle_contacts_respect_worlds,
     devices=devices,
     check_output=False,
 )

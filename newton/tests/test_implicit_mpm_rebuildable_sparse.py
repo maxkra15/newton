@@ -10,6 +10,7 @@ import warp as wp
 import warp.fem as fem
 
 import newton
+from newton._src.solvers.implicit_mpm.contact_warmstart import ContactWarmstartCache
 from newton._src.solvers.implicit_mpm.solver_implicit_mpm import ImplicitMPMScratchpad
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_selected_cuda_test_devices, get_test_devices
@@ -52,11 +53,166 @@ def _make_sparse_solver(
     return SolverImplicitMPM(model, config, verbose=False)
 
 
+def test_s2_contact_cache_remap(test, device):
+    """Remap numerical impulses by node and world while rejecting stale contacts."""
+    cache = ContactWarmstartCache(8, device=device)
+    positions = wp.array(
+        [(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.8, 0.0, 0.0), (0.0, 0.0, 0.0), (-0.05, 0.0, 0.0), (0.8, 0.0, 0.0)],
+        dtype=wp.vec3,
+        device=device,
+    )
+    offsets = wp.array([0, 3, 6], dtype=int, device=device)
+    colliders = wp.zeros(6, dtype=int, device=device)
+    normals = wp.full(6, wp.vec3(0.0, 1.0, 0.0), device=device)
+    impulses = wp.array([(0.0, float(i + 1), 0.0) for i in range(6)], dtype=wp.vec3, device=device)
+    cache.save(positions, offsets, colliders, normals, impulses, voxel_size=0.1, dt=0.01)
+
+    new_positions = wp.array(
+        [
+            (0.8, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (-0.05, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.8, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+        ],
+        dtype=wp.vec3,
+        device=device,
+    )
+    new_offsets = wp.array([0, 4, 8], dtype=int, device=device)
+    new_colliders = wp.array([0, 1, 0, 0, 0, 0, 0, 0], dtype=int, device=device)
+    new_normals = wp.array(
+        [
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.1, 0.995, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ],
+        dtype=wp.vec3,
+        device=device,
+    )
+    result = wp.empty(8, dtype=wp.vec3, device=device)
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.02)
+    expected = np.zeros((8, 3))
+    expected[:, 1] = [6.0, 0.0, 0.0, 0.0, 10.0, 8.0, 12.0, 0.0]
+    np.testing.assert_allclose(result.numpy(), expected)
+
+    cache.reset(wp.array([False, True, False], dtype=wp.bool, device=device))
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.02)
+    expected[4:] = 0.0
+    np.testing.assert_allclose(result.numpy(), expected)
+
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.1)
+    np.testing.assert_array_equal(result.numpy(), np.zeros((8, 3)))
+    cache.reset()
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.02)
+    np.testing.assert_array_equal(result.numpy(), np.zeros((8, 3)))
+
+    invalid_impulses = impulses.numpy()
+    invalid_impulses[2, 0] = np.nan
+    impulses.assign(invalid_impulses)
+    cache.save(positions, offsets, colliders, normals, impulses, voxel_size=0.1, dt=0.01)
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.02)
+    expected[:, 1] = [0.0, 0.0, 0.0, 0.0, 10.0, 8.0, 12.0, 0.0]
+    np.testing.assert_allclose(result.numpy(), expected)
+    cache.reset(wp.array([False, False, True], dtype=wp.bool, device=device))
+    cache.load(new_positions, new_offsets, new_colliders, new_normals, result, voxel_size=0.1, dt=0.02)
+    np.testing.assert_array_equal(result.numpy(), np.zeros((8, 3)))
+
+
 def test_rebuildable_sparse_s2_is_enabled(test, device):
     """Verify S2 collider bases enable rebuildable sparse grids."""
     model = _make_particle_model(device, [(0.01, 0.01, 0.01)])
     solver = _make_sparse_solver(model, max_active_cell_count=4, collider_basis="S2")
     test.assertTrue(solver._sparse_rebuildable)
+
+
+def test_rebuildable_sparse_s2_contact_cache(test, device):
+    """Preserve solved contact impulses when S2 topology moves to adjacent cells."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
+    SolverImplicitMPM.register_custom_attributes(builder)
+    for x in (0.02, 0.12):
+        builder.add_particle((x, 0.01, 0.02), (0.0, -1.0, 0.0), mass=0.01, radius=0.025)
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    solver = _make_sparse_solver(model, max_active_cell_count=8, collider_basis="S2", warmstart_contact_impulses=True)
+    current, next_state = model.state(), model.state()
+    solver.step(current, next_state, None, None, 0.01)
+    scratch = solver._scratchpad
+    previous_positions = scratch.collider_position_field.dof_values.numpy()
+    previous_impulses = scratch.impulse_field.dof_values.numpy()
+    previous_normals = scratch.collider_normal_field.dof_values.numpy()
+    previous_colliders = scratch.collider_ids.numpy()
+    test.assertGreater(np.linalg.norm(previous_impulses, axis=1).max(), 0.0)
+    previous = {
+        tuple(np.rint(position * 20.0).astype(int)): (impulse, normal, collider)
+        for position, impulse, normal, collider in zip(
+            previous_positions, previous_impulses, previous_normals, previous_colliders, strict=True
+        )
+        if collider >= 0 and np.linalg.norm(normal) > 0.5
+    }
+
+    # Moving the support by one cell changes compact node indices while keeping
+    # part of the physical grid shared with the preceding contact solve.
+    positions = current.particle_q.numpy()
+    positions[:, 0] += 0.1
+    current.particle_q.assign(positions)
+    with wp.ScopedDevice(device):
+        pic = solver._particles_to_cells(current.particle_q)
+        scratch = solver._rebuild_scratchpad(pic)
+        solver._require_velocity_space_fields(scratch, solver._mpm_model.has_compliant_particles)
+        solver._require_collision_space_fields(scratch, solver._last_step_data)
+        solver._require_strain_space_fields(scratch, solver._last_step_data)
+        scratch.dt = 0.01
+        solver._rasterize_colliders(current, 0.01, solver._last_step_data, scratch, 1000.0)
+        solver._warmstart_fields(solver._last_step_data, scratch, pic)
+
+        expected = np.zeros_like(scratch.impulse_field.dof_values.numpy())
+        for node, (position, normal, collider) in enumerate(
+            zip(
+                scratch.collider_position_field.dof_values.numpy(),
+                scratch.collider_normal_field.dof_values.numpy(),
+                scratch.collider_ids.numpy(),
+                strict=True,
+            )
+        ):
+            if collider < 0:
+                continue
+            key = tuple(np.rint(position * 20.0).astype(int))
+            if key in previous:
+                old_impulse, old_normal, old_collider = previous[key]
+                if old_collider == collider and np.dot(old_normal, normal) >= 0.95:
+                    expected[node] = old_impulse
+        test.assertGreater(np.linalg.norm(expected, axis=1).max(), 0.0)
+        np.testing.assert_allclose(scratch.impulse_field.dof_values.numpy(), expected, atol=1.0e-6)
+
+        solver.reset(current)
+        solver._warmstart_fields(solver._last_step_data, scratch, pic)
+        np.testing.assert_array_equal(scratch.impulse_field.dof_values.numpy(), np.zeros_like(expected))
+
+        for invalidate in (
+            lambda: solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES),
+            lambda: solver.setup_collider(model=model),
+        ):
+            scratch.impulse_field.dof_values.assign(expected)
+            solver._save_for_next_warmstart(scratch, pic, solver._last_step_data)
+            invalidate()
+            solver._warmstart_fields(solver._last_step_data, scratch, pic)
+            np.testing.assert_array_equal(scratch.impulse_field.dof_values.numpy(), np.zeros_like(expected))
+
+        scratch.impulse_field.dof_values.assign(expected)
+        solver._save_for_next_warmstart(scratch, pic, solver._last_step_data)
+        old_cache = solver._last_step_data.contact_cache
+        scratch.release_temporaries()
+        solver.set_voxel_size(0.2, state=current)
+        test.assertIsNot(solver._last_step_data.contact_cache, old_cache)
+        np.testing.assert_array_equal(solver._last_step_data.contact_cache.slots.numpy(), -1)
 
 
 def test_rebuildable_sparse_rejects_grid_warmstart(test, device):
@@ -294,7 +450,7 @@ def test_rebuildable_sparse_grid_reports_initial_overflow(test, device):
         _make_sparse_solver(model, max_active_cell_count=1)
 
 
-def _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis):
+def _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis, warmstart_contact_impulses=False):
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
     SolverImplicitMPM.register_custom_attributes(builder)
     builder.add_particle_grid(
@@ -320,6 +476,7 @@ def _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis):
         max_active_cell_count=64,
         collider_basis=collider_basis,
         solver="auto",
+        warmstart_contact_impulses=warmstart_contact_impulses,
     )
     test.assertEqual(eager_solver.solver, ("gs",))
     for _ in range(5):
@@ -335,6 +492,7 @@ def _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis):
         max_active_cell_count=64,
         collider_basis=collider_basis,
         solver="auto",
+        warmstart_contact_impulses=warmstart_contact_impulses,
     )
     test.assertEqual(solver.solver, ("gs",))
     grid = solver._scratchpad.grid
@@ -381,9 +539,9 @@ def test_rebuildable_sparse_auto_gs_cuda_graph(test, device):
     if not wp.is_mempool_enabled(device):
         test.skipTest("CUDA graph capture requires the Warp memory pool")
 
-    for collider_basis in ("Q1", "S2"):
-        with test.subTest(collider_basis=collider_basis):
-            _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis)
+    for collider_basis, warmstart_contact_impulses in (("Q1", False), ("S2", False), ("S2", True)):
+        with test.subTest(collider_basis=collider_basis, warmstart_contact_impulses=warmstart_contact_impulses):
+            _check_rebuildable_sparse_auto_gs_cuda_graph(test, device, collider_basis, warmstart_contact_impulses)
 
 
 def test_rebuildable_sparse_cuda_graph_reports_overflow(test, device):
@@ -418,6 +576,21 @@ class TestImplicitMPMRebuildableSparse(unittest.TestCase):
 
 devices = get_test_devices(mode="basic")
 cuda_devices = get_selected_cuda_test_devices(mode="basic")
+
+add_function_test(
+    TestImplicitMPMRebuildableSparse,
+    "test_s2_contact_cache_remap",
+    test_s2_contact_cache_remap,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestImplicitMPMRebuildableSparse,
+    "test_rebuildable_sparse_s2_contact_cache",
+    test_rebuildable_sparse_s2_contact_cache,
+    devices=devices,
+    check_output=False,
+)
 
 add_function_test(
     TestImplicitMPMRebuildableSparse,

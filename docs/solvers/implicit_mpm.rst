@@ -42,11 +42,50 @@ captured rollout before building a different hash grid.
 Fidelity choices
 ----------------
 
+The numerical fidelity is now a solver setting, shared by the bowl and downstream
+training integrations:
+
+.. code-block:: python
+
+   from newton.solvers import SolverImplicitMPM
+
+   config = SolverImplicitMPM.Config(
+       fidelity=SolverImplicitMPM.Fidelity.PARTICLES,
+       particle_iterations=2,
+       particle_friction=0.5,
+       particle_cohesion=0.0,  # attraction range [m]
+       grid_type="sparse",
+       voxel_size=0.08,
+       max_active_cell_count=4096,
+       collider_basis="S2",
+       warmstart_contact_impulses=True,
+   )
+   solver = SolverImplicitMPM(model, config)
+   # At a physics boundary, invalidate the enclosing graph before these calls.
+   solver.set_particle_radius(0.016)  # mass and particle count stay fixed
+   solver.set_voxel_size(0.06, state=state)
+   solver.set_fidelity(SolverImplicitMPM.Fidelity.MPM, state=state)
+   # Warm up and capture the new configuration before the next graph replay.
+
+The string values ``"particles"`` and ``"mpm"`` are also accepted for
+configuration serialization. Particle fidelity defers FEM grid allocation
+until the first switch to MPM. This matters for many-world training: reserving
+a full MPM grid during cheap particle pretraining can otherwise consume the
+memory intended for more environments. Existing MPM configuration defaults
+retain full MPM behavior, and contact caching is opt-in.
+
+Fidelity, particle approximation settings, and contact-cache policy are
+experimental runtime configuration. They are intentionally not authored through
+``NewtonMPMSceneAPI``: they describe a training/integration choice rather than
+the asset's target constitutive model. Existing USD grid and material settings
+remain the initial full-MPM configuration.
+
 The fast stage reuses Newton's XPBD particle contacts and Warp's spatial hash
 grid for neighbor searches. It integrates gravity, resolves local particle
 overlap and friction, and optionally attracts nearby particles. It skips MPM
 transfer, matrix assembly, and the global stress solve. This provides a cheap
-single-world granular approximation for policy pretraining. Its behavior
+granular approximation for policy pretraining. Isolated multi-world particle
+contacts use the same world IDs as MPM. Its behavior
 requires validation against the target MPM material and task.
 
 The MPM stage uses the same particle count, positions, velocities, and masses.
@@ -88,11 +127,18 @@ between the stages depends on the workload and is not established by the example
 Particle attraction range and continuum yield stress have different units and
 semantics. There is no universal conversion between them. Calibrate them with
 task measurements such as settling height, slip, and retained mass. The
-example's collision projection treats particle centers as points; XPBD uses
-the radii for particle-to-particle contacts.
+full-MPM collision projection treats particle centers as points. Particle
+fidelity additionally enforces finite-radius rigid-mesh contacts at endpoints;
+its swept guard still tests centers rather than complete sphere trajectories.
 
 Performance measurements
 ------------------------
+
+The tables in this section describe the original separate-XPBD bowl example
+with Warp 1.17.0. The reusable particle fidelity introduced later has different
+rigid contact handling and reports proxy reactions. Treat these records as
+historical measurements of that earlier implementation, rather than throughput
+claims for the current fidelity mode.
 
 Run the included benchmark with:
 
@@ -476,10 +522,22 @@ assumes bounded neighbor occupancy; large radii, cohesion ranges, or severe
 overlap increase :math:`k`. The hash grid is reused across those iterations,
 so large corrections and large timesteps can still miss new particle contacts.
 
-The example passes no external shape-contact array to XPBD. The common MPM
-mesh projector handles the bowl after either solver. Fast frames do not
-rebuild an MPM grid, although the MPM solver remains allocated for its collider
-data and for a later fidelity switch.
+The solver's internal particle path advances particles only; it does not
+integrate robot joints or rigid bodies. It queries the same MPM rigid meshes
+and material friction, guards center crossings, and resolves finite-radius
+endpoint contacts during local iterations. Real velocity corrections accumulate
+equal and opposite body impulses and torques. Position-only overlap repair
+contributes no artificial impulse or Baumgarte velocity bias.
+
+Rigid motion is prescribed during this approximate particle solve. Static,
+kinematic, and coupling-proxy colliders are supported; deformable colliders,
+unconstrained dynamic rigid bodies, and spring/cloth/solid constraints are
+rejected. Reaction wrenches use the existing proxy-coupling interface so a
+coupled robot can receive approximate material feedback. Particle fidelity
+does not produce grid contact samples, and ``collect_collider_impulses()``
+therefore remains available only in MPM fidelity. Fast frames allocate no FEM
+grid initially; collider geometry and particle buffers remain available for
+contact and a later MPM switch.
 
 Both stages are suitable for simulation-based policy training. The current MPM
 kernel modules and swept projector disable backward generation; this example
@@ -677,6 +735,10 @@ Particle radii can already be changed through the model:
    model.particle_max_radius = radius  # XPBD neighbor-search bound
    mpm_solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
 
+The experimental ``mpm_solver.set_particle_radius(radius)`` performs this
+uniform update through one public operation. It also rejects capture-time
+changes and invalid sizes. It applies to every particle in that solver.
+
 Newton derives MPM support volume as ``8 * radius**3`` and density as mass divided
 by this volume. Keeping mass fixed therefore changes density. Changing particle
 radius changes the modeled material and contact spacing; changing voxel size
@@ -818,9 +880,10 @@ integration points:
      - Submit the loop fix and regression tests separately from experimental
        predictors or material changes.
    * - Particle/MPM fidelity switching
-     - Newton demonstration; Isaac Lab task/manager
-     - Keep the bowl as a demonstration. Add the policy curriculum, observation
-       contract, reset semantics, and robot coupling in Isaac Lab.
+     - Newton numerical fidelity; Isaac Lab task/manager
+     - Select the experimental numerical model through ``Config.fidelity``.
+       Keep policy curricula, observation contracts, and task calibration in
+       Isaac Lab.
    * - Runtime particle radius
      - Newton model properties; Isaac Lab curriculum
      - Preserve the existing model update/notification path. Let the task choose
@@ -850,22 +913,21 @@ consumer caching grid-field pointers. Newton's voxel size is currently one
 setting for the whole solver, including separate worlds; a curriculum should
 therefore change it for the batch together.
 
-The particle/MPM training manager needs temporary XPBD working buffers because
-XPBD can overwrite its input positions. Keep particle IDs, count, mass,
+The native particle fidelity owns temporary working buffers so it can step
+in place without overwriting inputs required by contact. Keep particle IDs, count, mass,
 position/velocity layout, action units, observation ordering, policy timestep,
 and reward definitions stable. Publish the same asset data after either
 solver. Reset both MPM material-state buffers when returning from the particle
 stage, using the current configuration as the new strain reference. That
 preserves particle motion but introduces a deliberate material-history reset.
 
-The bowl and its stress predictor are single-world experiments. The current
-XPBD particle-pair kernel queries spatial neighbors without a world-ID filter.
-Training with overlapping world coordinates therefore needs world filtering
-in Newton or physically separated neighbor-query regions. Per-environment
-material randomization also needs an adapter: XPBD's particle-pair friction
-and attraction coefficients are model scalars, while MPM's material fields
-are particle arrays. A shared observation layout alone does not resolve
-either difference.
+The bowl and its stress predictor remain single-world experiments. The shared
+XPBD particle-pair kernel now filters different local world IDs, so native
+particle fidelity can isolate overlapping training worlds. Global particles
+retain their cross-world interaction semantics. Per-environment material
+randomization still needs an adapter: particle-pair friction and attraction
+are scalar settings, while MPM's material fields are particle arrays. Shared
+observation layout does not imply matching constitutive parameters.
 
 For force observations, define a fixed probe or robot-wrench interface in SI
 units, with the same frame, averaging interval, filtering, and clipping in
@@ -875,8 +937,18 @@ projector does not return reaction impulses to the bowl, and Isaac Lab's
 direct MPM manager is not a robot dynamics solver. An MPM stress tensor is
 also not a net robot force. Robot fine-tuning needs a coupling configuration
 and a verified wrench reduction before force observations can be treated as
-equivalent. This integration is planned; no policy-training or wrench adapter
-is implemented by the bowl example.
+equivalent. Native particle fidelity provides per-step rigid proxy wrenches
+through Newton's existing coupling interface. The bowl itself is a prescribed
+kinematic scene and does not train a policy or provide a generic wrench sensor.
+
+There is a separate, pre-existing coupling limitation when an entry runs more
+than one internal substep: the current MPM proxy harvest reads the last
+substep's impulse and divides by the outer coupling timestep. The particle
+mode follows the same contract. This does not aggregate every substep's
+impulse; steady feedback can be underreported and an earlier impact can be
+lost. Matched entry-substep settings permit throughput comparison, but do not
+validate physical force observations. Substep impulse aggregation must be
+fixed or explicitly calibrated before relying on absolute wrench equivalence.
 
 Granular material matching should include tensile strength. Pair attraction
 range, tensile pressure cap, and deviatoric yield offset describe different
@@ -1027,12 +1099,40 @@ checked point-basis capacity to Newton's existing status mechanism, including
 graph replay and per-world tests. The benchmark's subclass is a prototype of
 the check. Larger particle counts need separate cost and memory measurements.
 
-An alternative worth testing next is a warm start for S2 contact impulses
-keyed by stable world, collider, and grid-node coordinates, with validation
-when contact normals or active colliders change. It must gather from a cache
-that survives topology rebuild; interpolating through the overwritten grid
-is unsafe. That experiment could retain the default contact discretization
-and avoid the extra XPBD prediction. It is not implemented here.
+The subsequent ``Config.warmstart_contact_impulses`` option implements S2
+history transfer through a cache independent of the mutable FEM topology.
+It retains the default contact discretization and avoids an XPBD predictor.
+The initial measurements below predate that implementation.
+
+S2 contact history across sparse rebuilds
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``warmstart_contact_impulses=True`` with a rebuildable sparse grid and
+``collider_basis="S2"``. Existing stress ``warmstart_mode`` remains independent.
+The option is experimental and disabled by default; unsupported grid/basis
+combinations raise a configuration error rather than silently ignoring it.
+
+The solver saves contact impulses in a persistent bounded hash table. A key
+contains the FEM environment and integer coordinates on the half-voxel lattice.
+This retains a node's identity even when rebuilt sparse topology gives it a
+different compact index. It does not query the previous FEM topology after
+that topology has been mutated in place.
+
+A match additionally requires the same collider and normal cosine at least
+0.95. The guess is scaled by the new/previous timestep ratio; ratios outside
+``[0.25, 4]`` start cold. Existing contact preprocessing projects the guess
+onto the current friction/adhesion cone. Resets, changed model properties,
+collider reconfiguration, fidelity transitions, and voxel resizing invalidate
+the appropriate history. Isolated world IDs prevent overlapping worlds from
+sharing impulses. The global reset-mask entry clears history affected by
+global collider motion.
+
+All cache storage is reserved before graph capture. Every replay records its
+own load, solve, and save operations. Enabling the cache avoids allocating and
+scattering the legacy grid impulse-history field, but adds hash storage and
+load/store kernels. It aims to improve convergence at small iteration budgets;
+it does not guarantee a lower frame cost or identical trajectories under
+underconvergence. Compare error and time together against a converged control.
 
 Recorded findings and next decisions
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1148,8 +1248,8 @@ the smaller tested bound is not a general replacement.
 
 The resulting implementation order is: propose runtime voxel changes, swept
 projection, and the exact iteration-budget fix as separate Newton changes;
-keep the XPBD/MPM demonstration available for pretraining; test checked point
-contact capacity and an S2 impulse cache next; refine volume recovery only
+keep the XPBD/MPM demonstration available for pretraining; validate checked point
+contact capacity and the new S2 impulse cache; refine volume recovery only
 after measuring energy and force effects. Isaac Lab should own the shared
 observation/wrench adapter and the curriculum that calls those numerical
 operations. Automatic particle splitting/merging remains a separate design
@@ -1344,3 +1444,80 @@ This is a measured setting for this scene, not a guarantee for other particle
 spacings, motions, cohesion laws, or timesteps. The fast model remains a
 different constitutive approximation even when its state and policy
 timestep interfaces match full MPM.
+
+S2 cache validation on HORDE
+----------------------------
+
+The follow-up cache experiment uses 523 particles, a single L40, driver
+595.58.03, and Warp ``1.19.0.dev20261008``. It runs three paired 120-frame
+trials at 60 Hz with two substeps, excludes the first ten frames, and randomizes
+case order with seeds 42--44. Particle initialization remains fixed. No other
+compute process ran on that GPU during accepted timings; the desktop service
+remained active and the other workflow held CPU compilation. These timings
+are separate from the earlier RTX 4090 records.
+
+The :download:`complete cache experiment records <mpm_contact_cache_experiments.json>`
+include all 48 accepted timing cases, quality diagnostics, memory use, source
+hashes, monitoring, and reproduction commands. The primary comparison uses
+``critical_fraction=0`` and ``tolerance=0``; all requested iterations execute.
+The reference is cold-contact S2 with 100 iterations at the same voxel size.
+It is a numerical trajectory reference rather than physical ground truth.
+
+.. list-table:: Median of three trial medians; position RMS against the reference
+   :header-rows: 1
+   :widths: 28 18 18 18 18
+
+   * - Setting
+     - 8 cm frame [ms]
+     - RMS [cm]
+     - 12 cm frame [ms]
+     - RMS [cm]
+   * - Cold S2, 20 iterations
+     - 5.903
+     - 2.958
+     - 6.132
+     - 4.310
+   * - Cached S2, 5 iterations
+     - 4.456
+     - 2.522
+     - 4.871
+     - 2.370
+   * - Cached S2, 20 iterations
+     - 5.901
+     - 0.654
+     - 6.111
+     - 0.794
+   * - Cold S2, 100 iterations
+     - 13.566
+     - 0
+     - 12.817
+     - 0
+
+.. figure:: mpm_contact_cache_tradeoff.png
+   :alt: Cold and cached S2 frame time versus endpoint position error for 523 particles at two voxel sizes.
+   :width: 100%
+
+   Numbers label iteration counts. Horizontal error bars span three trial
+   medians, rather than confidence intervals. Both contact policies use the
+   same cold-contact reference.
+
+At five iterations the cache has lower tested endpoint error than 20 cold
+iterations, at approximately 1.32x/1.26x lower frame cost. Equal iteration
+budgets cost approximately the same; the gain comes from achieving useful
+convergence with less solve work. At the reserved 1,024-cell capacity, cache
+storage is 1,163,268 bytes.
+
+Two cached iterations are not a general recommendation: the fine-grid final
+kinetic energy is 53.25 J against the reference's 32.50 J. Cached 100-iteration
+rollouts also differ from cold 100 by approximately 1.2--2.0 cm. Warm starting
+changes the underconverged trajectory, and this experiment does not establish
+constitutive equivalence or convergence to ground truth. All 48 accepted
+cases pass endpoint containment.
+
+A separate packing-law diagnostic uses ``critical_fraction=1``. Its 16 records
+exclude performance claims because CPU compilation overlapped. Packing trends
+move toward the numerical reference but can increase in absolute value, and
+they do not establish physical volume conservation. Eager and captured
+120-frame primary runs have bit-identical final positions and velocities in
+all 32 compared arrays. GPU regressions additionally cover cache identity,
+actual S2 topology remapping, lifecycle invalidation, and graph replay.

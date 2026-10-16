@@ -714,6 +714,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                                     model.particle_inv_mass,
                                     model.particle_radius,
                                     model.particle_flags,
+                                    model.particle_world,
                                     model.particle_mu,
                                     model.particle_cohesion,
                                     model.particle_max_radius,

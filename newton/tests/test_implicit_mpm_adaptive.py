@@ -56,6 +56,16 @@ def test_swept_projection_thin_wall(test, device):
     test.assertGreaterEqual(current.particle_q.numpy()[0, 0], 0.009)
     test.assertAlmostEqual(float(current.particle_qd.numpy()[0, 0]), 0.0, places=5)
 
+    # Static meshes need swept queries even when no rigid-body pose arrays exist.
+    solver.set_fidelity("particles", state=current)
+    model.particle_max_velocity = 100.0
+    for _ in range(2):
+        current.particle_q.fill_(wp.vec3(0.5, 0.0, 0.0))
+        current.particle_qd.fill_(wp.vec3(-10.0, 0.0, 0.0))
+        solver.step(current, current, None, None, 0.1)
+        test.assertGreaterEqual(float(current.particle_q.numpy()[0, 0]), 0.0339)
+        test.assertAlmostEqual(float(current.particle_qd.numpy()[0, 0]), 0.0, places=5)
+
 
 def test_swept_projection_first_wall(test, device):
     """Select the earliest collision independently of collider ordering."""
@@ -286,6 +296,85 @@ def test_bowl_graph_and_runtime_changes(test, device):
         )
 
 
+def test_fidelity_handoff(test, device):
+    """Preserve particle motion across native fidelity changes and reset material history."""
+    model, solver = _make_solver(device, moving_wall=True)
+    state = model.state()
+    state.particle_qd.fill_(wp.vec3(0.2, 0.0, 0.0))
+    state.mpm.particle_stress.fill_(wp.mat33(3.0))
+    position = state.particle_q.numpy().copy()
+    velocity = state.particle_qd.numpy().copy()
+    solver.set_fidelity("particles", state=state)
+    test.assertEqual(solver.fidelity, SolverImplicitMPM.Fidelity.PARTICLES)
+    np.testing.assert_array_equal(state.particle_q.numpy(), position)
+    np.testing.assert_array_equal(state.particle_qd.numpy(), velocity)
+    np.testing.assert_array_equal(state.mpm.particle_stress.numpy(), 0.0)
+    solver.step(state, state, None, None, 0.01)
+    np.testing.assert_allclose(state.particle_q.numpy(), position + 0.01 * velocity, atol=1.0e-6)
+
+    # A rejected external collider must leave the original fast solver usable.
+    external_builder = newton.ModelBuilder()
+    external_builder.add_body(is_kinematic=True)
+    external_body = external_builder.add_body(is_kinematic=True)
+    external_builder.add_shape_box(external_body, hx=0.01, hy=1.0, hz=1.0)
+    external = external_builder.finalize(device=device)
+    collider_ids = solver.collider_body_index.numpy().copy()
+    previous_poses = solver._last_step_data.body_q_prev.numpy().copy()
+    with test.assertRaisesRegex(ValueError, "collider bodies to belong"):
+        solver.setup_collider(model=external)
+    np.testing.assert_array_equal(solver.collider_body_index.numpy(), collider_ids)
+    np.testing.assert_array_equal(solver._last_step_data.body_q_prev.numpy(), previous_poses)
+
+    # Static external geometry still needs the owning model's body COM layout
+    # because forward pose prediction visits every body in that model.
+    static_builder = newton.ModelBuilder()
+    static_builder.add_shape_box(-1, hx=0.01, hy=1.0, hz=1.0)
+    static_model = static_builder.finalize(device=device)
+    with test.assertRaisesRegex(ValueError, "center of mass for every model body"):
+        solver.setup_collider(model=static_model)
+    np.testing.assert_array_equal(solver.collider_body_index.numpy(), collider_ids)
+    np.testing.assert_array_equal(solver._last_step_data.body_q_prev.numpy(), previous_poses)
+    solver.step(state, state, None, None, 0.01)
+    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+    advanced = state.particle_q.numpy().copy()
+    solver.set_fidelity("mpm", state=state)
+    test.assertEqual(solver.fidelity, SolverImplicitMPM.Fidelity.MPM)
+    np.testing.assert_array_equal(state.particle_q.numpy(), advanced)
+    solver.step(state, state, None, None, 0.01)
+    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
+
+def test_particle_fidelity_lazy_grid(test, device):
+    """Defer grid allocation until MPM is enabled and preserve mass during runtime size changes."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particle((0.5, 0.0, 0.0), (0.2, 0.0, 0.0), mass=0.01, radius=0.025)
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(
+        model,
+        SolverImplicitMPM.Config(fidelity="particles", grid_type="dense", grid_padding=1, max_iterations=1),
+        verbose=False,
+    )
+    test.assertIsNone(solver._scratchpad)
+    state = model.state()
+    masses = model.particle_mass.numpy().copy()
+    solver.step(state, state, None, None, 0.01)
+    test.assertIsNone(solver._scratchpad)
+    solver.set_voxel_size(0.2, state=state)
+    test.assertIsNone(solver._scratchpad)
+    solver.set_particle_radius(0.02)
+    np.testing.assert_array_equal(model.particle_mass.numpy(), masses)
+    np.testing.assert_allclose(model.particle_radius.numpy(), 0.02)
+    test.assertAlmostEqual(model.particle_max_radius, 0.02)
+    position = state.particle_q.numpy().copy()
+    solver.set_fidelity(SolverImplicitMPM.Fidelity.MPM, state=state)
+    test.assertIsNotNone(solver._scratchpad)
+    np.testing.assert_array_equal(state.particle_q.numpy(), position)
+    test.assertAlmostEqual(solver.voxel_size, 0.2)
+    solver.step(state, state, None, None, 0.01)
+    test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
+
+
 class TestImplicitMPMAdaptive(unittest.TestCase):
     pass
 
@@ -301,6 +390,8 @@ for _device in get_test_devices():
         test_resize_validation,
         test_resize_fixed_grid,
         test_swept_projection_world_isolation,
+        test_fidelity_handoff,
+        test_particle_fidelity_lazy_grid,
     ):
         add_function_test(TestImplicitMPMAdaptive, _test.__name__, _test, devices=[_device])
 
