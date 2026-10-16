@@ -150,6 +150,19 @@ def _solve_mesh_contacts(
 
 
 @wp.kernel(enable_backward=False)
+def _reset_body_impulses(
+    body_world: wp.array[int],
+    world_mask: wp.array[wp.bool],
+    body_impulse: wp.array[wp.spatial_vector],
+):
+    body = wp.tid()
+    world = body_world[body]
+    mask_index = wp.where(world < 0, world_mask.shape[0] - 1, world)
+    if world_mask[mask_index]:
+        body_impulse[body] = wp.spatial_vector()
+
+
+@wp.kernel(enable_backward=False)
 def _harvest_proxy_wrenches(
     mapping: wp.array[int],
     body_flags: wp.array[wp.int32],
@@ -190,6 +203,18 @@ class _ParticleSolver:
         self._velocities = wp.empty_like(self._previous_positions)
         self._deltas = wp.empty_like(self._previous_positions)
         self.body_impulse = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
+
+    def reset(self, world_mask: wp.array[wp.bool] | None = None) -> None:
+        """Clear the most recent reaction impulses for all or selected worlds."""
+        if world_mask is None:
+            self.body_impulse.zero_()
+        elif self.model.body_count:
+            wp.launch(
+                _reset_body_impulses,
+                dim=self.model.body_count,
+                inputs=[self.model.body_world, world_mask, self.body_impulse],
+                device=self.model.device,
+            )
 
     def step(
         self,

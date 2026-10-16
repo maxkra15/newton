@@ -90,6 +90,69 @@ def _check_builder_method_matches_importer_function_signature(func, method):
 
 
 class TestApi(unittest.TestCase):
+    def test_mpm_config_positional_compatibility(self):
+        """Preserve legacy MPM positional options while adding keyword-only fidelity settings."""
+        from newton.solvers import SolverImplicitMPM  # noqa: PLC0415
+
+        config = SolverImplicitMPM.Config(100, 1.0e-5, "jacobi")
+        self.assertEqual(config.max_iterations, 100)
+        self.assertEqual(config.tolerance, 1.0e-5)
+        self.assertEqual(config.solver, "jacobi")
+        parameters = inspect.signature(SolverImplicitMPM.Config).parameters
+        positional = tuple(
+            name for name, parameter in parameters.items() if parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+        self.assertEqual(
+            positional,
+            (
+                "max_iterations",
+                "tolerance",
+                "solver",
+                "warmstart_mode",
+                "collider_velocity_mode",
+                "voxel_size",
+                "grid_type",
+                "grid_padding",
+                "max_active_cell_count",
+                "max_leaf_node_count",
+                "max_lower_node_count",
+                "max_upper_node_count",
+                "transfer_scheme",
+                "integration_scheme",
+                "critical_fraction",
+                "air_drag",
+                "collider_normal_from_sdf_gradient",
+                "collider_basis",
+                "strain_basis",
+                "velocity_basis",
+                "separate_worlds",
+            ),
+        )
+        for name in (
+            "fidelity",
+            "particle_iterations",
+            "particle_friction",
+            "particle_cohesion",
+            "warmstart_contact_impulses",
+        ):
+            with self.subTest(parameter=name):
+                self.assertEqual(parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+        approximation = SolverImplicitMPM.Config(
+            100,
+            1.0e-5,
+            "jacobi",
+            fidelity=SolverImplicitMPM.Fidelity.PARTICLES,
+            particle_iterations=5,
+            particle_friction=0.3,
+            particle_cohesion=0.01,
+            warmstart_contact_impulses=True,
+        )
+        self.assertEqual(approximation.fidelity, SolverImplicitMPM.Fidelity.PARTICLES)
+        self.assertEqual(approximation.particle_iterations, 5)
+        self.assertEqual(approximation.particle_friction, 0.3)
+        self.assertEqual(approximation.particle_cohesion, 0.01)
+        self.assertTrue(approximation.warmstart_contact_impulses)
+
     def test_collision_pipeline_flattens_speculative_contact_config(self):
         """Configure speculative contacts without a single-field wrapper."""
         import newton  # noqa: PLC0415

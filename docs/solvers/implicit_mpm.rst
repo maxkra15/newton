@@ -84,9 +84,11 @@ The fast stage reuses Newton's XPBD particle contacts and Warp's spatial hash
 grid for neighbor searches. It integrates gravity, resolves local particle
 overlap and friction, and optionally attracts nearby particles. It skips MPM
 transfer, matrix assembly, and the global stress solve. This provides a cheap
-granular approximation for policy pretraining. Isolated multi-world particle
-contacts use the same world IDs as MPM. Its behavior
-requires validation against the target MPM material and task.
+granular approximation for policy pretraining. Particle-pair contacts always
+honor Newton world IDs, as XPBD does; ``separate_worlds`` controls full-MPM grid
+and collider partitioning. Use ``separate_worlds=True`` for isolated training
+environments in both modes. Its behavior requires validation against the target
+MPM material and task.
 
 The MPM stage uses the same particle count, positions, velocities, and masses.
 Changing fidelity initializes a fresh MPM strain reference and clears stress

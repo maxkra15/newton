@@ -872,7 +872,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """
 
         fidelity: SolverImplicitMPM.Fidelity | str = dataclass_field(
-            default_factory=lambda: SolverImplicitMPM.Fidelity.MPM
+            default_factory=lambda: SolverImplicitMPM.Fidelity.MPM, kw_only=True
         )
         """Particle dynamics model. Accepts :class:`SolverImplicitMPM.Fidelity`
         or its ``"mpm"``/``"particles"`` string values.
@@ -888,13 +888,13 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
             Particle fidelity may change without prior notice.
         """
-        particle_iterations: int = 2
+        particle_iterations: int = dataclass_field(default=2, kw_only=True)
         """Positive number of local contact iterations in particle fidelity."""
-        particle_friction: float | None = None
+        particle_friction: float | None = dataclass_field(default=None, kw_only=True)
         """Particle-pair friction coefficient. ``None`` uses ``model.particle_mu``.
         This does not change the rigid collider's material friction.
         """
-        particle_cohesion: float | None = None
+        particle_cohesion: float | None = dataclass_field(default=None, kw_only=True)
         """Particle attraction range [m]. ``None`` uses ``model.particle_cohesion``.
         This is independent of MPM's tensile and shear yield stresses [Pa].
         """
@@ -923,7 +923,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         Grid-backed ``"grid"`` and ``"smoothed"`` modes are not supported for
         rebuildable sparse grids because their topology changes in place.
         """
-        warmstart_contact_impulses: bool = False
+        warmstart_contact_impulses: bool = dataclass_field(default=False, kw_only=True)
         """Preserve S2 contact impulses across rebuildable sparse-grid steps.
 
         This option is independent of ``warmstart_mode``, which selects the
@@ -2178,7 +2178,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             self._clear_reset_warmstarts(world_mask, reset_partitions)
             if self._particle_solver is not None:
                 # Reaction impulses belong only to the most recently completed step.
-                self._particle_solver.body_impulse.zero_()
+                self._particle_solver.reset(world_mask)
 
             if reset_particle_history and self.model.particle_count > 0:
                 if world_mask is None:

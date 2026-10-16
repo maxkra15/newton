@@ -186,6 +186,71 @@ def test_particle_contact_corrections_swept(test, device):
     test.assertGreaterEqual(float(state.particle_q.numpy()[:, 0].min()), 0.05899)
 
 
+def test_particle_reaction_masked_reset(test, device):
+    """Preserve unselected proxy reactions during masked and captured resets."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    for world in range(2):
+        builder.begin_world()
+        body = builder.add_body(is_kinematic=True)
+        builder.add_shape_box(body, hx=0.01, hy=1.0, hz=1.0, cfg=newton.ModelBuilder.ShapeConfig(mu=0.5, margin=0.0))
+        builder.add_particle((0.06, 0.2, 0.0), (-2.0, 1.0, 0.0), mass=1.0, radius=0.05)
+        if world == 0:
+            builder.add_particle((1.06, 0.2, 0.0), (-2.0, 1.0, 0.0), mass=1.0, radius=0.05)
+        builder.end_world()
+    global_body = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), is_kinematic=True)
+    builder.add_shape_box(global_body, hx=0.01, hy=1.0, hz=1.0, cfg=newton.ModelBuilder.ShapeConfig(mu=0.5, margin=0.0))
+    model = builder.finalize(device=device)
+    model.body_flags.fill_(int(newton.BodyFlags.KINEMATIC | newton.BodyFlags.PROXY))
+    solver = SolverImplicitMPM(
+        model,
+        SolverImplicitMPM.Config(fidelity="particles", grid_type="dense", separate_worlds=True),
+        verbose=False,
+    )
+    mapping = wp.array([0, 1, 2], dtype=int, device=device)
+    forces = wp.empty(3, dtype=wp.spatial_vector, device=device)
+    body_world = model.body_world.numpy()
+    mask = wp.empty(3, dtype=wp.bool, device=device)
+    for selected in ([True, False, False], [False, True, False], [False, False, True], [False, False, False], None):
+        with test.subTest(selected=selected):
+            state = model.state()
+            solver.step(state, state, None, None, 0.01)
+            before = solver._particle_solver.body_impulse.numpy()
+            test.assertTrue(np.all(np.linalg.norm(before[:, :3], axis=1) > 1.0))
+            expected = before.copy()
+            if selected is None:
+                expected.fill(0.0)
+                world_mask = None
+            else:
+                mask.assign(np.asarray(selected, dtype=bool))
+                expected[np.asarray(selected)[np.where(body_world < 0, 2, body_world)]] = 0.0
+                world_mask = mask
+            solver.reset(state, world_mask=world_mask, flags=newton.StateFlags.BODY_Q)
+            np.testing.assert_array_equal(solver._particle_solver.body_impulse.numpy(), expected)
+            solver._particle_solver.harvest_proxy_wrenches(mapping, forces, 0.01)
+            np.testing.assert_allclose(forces.numpy(), expected / 0.01, atol=1.0e-5)
+
+    if device.is_cuda:
+        state = model.state()
+        solver.step(state, state, None, None, 0.01)
+        before = solver._particle_solver.body_impulse.numpy()
+        mask.assign(np.asarray([True, False, False], dtype=bool))
+        with wp.ScopedCapture(device=device) as capture:
+            solver.reset(state, world_mask=mask, flags=newton.StateFlags.BODY_Q)
+        wp.capture_launch(capture.graph)
+        expected = before.copy()
+        expected[0] = 0.0
+        np.testing.assert_array_equal(solver._particle_solver.body_impulse.numpy(), expected)
+        next_state = model.state()
+        solver.step(next_state, next_state, None, None, 0.01)
+        before = solver._particle_solver.body_impulse.numpy()
+        mask.assign(np.asarray([False, False, True], dtype=bool))
+        wp.capture_launch(capture.graph)
+        expected = before.copy()
+        expected[2] = 0.0
+        np.testing.assert_array_equal(solver._particle_solver.body_impulse.numpy(), expected)
+
+
 class TestParticleSolver(unittest.TestCase):
     """Verify particle-only solver kernels on available devices."""
 
@@ -195,6 +260,7 @@ for _test in (
     test_particle_mesh_reactions,
     test_particle_swept_moving_mesh,
     test_particle_contact_corrections_swept,
+    test_particle_reaction_masked_reset,
 ):
     add_function_test(TestParticleSolver, _test.__name__, _test, devices=get_test_devices(), check_output=False)
 
