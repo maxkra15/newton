@@ -1742,11 +1742,12 @@ add_example_batch(
                 "vbd-iterations": 20,
                 "surface-voxel-size": 0.003,
                 "surface-max-grid-cells": 200_000,
-                "fluid-solver": "xpbd",
+                "fluid-solver": fluid_solver,
                 "cuda-graph": use_cuda_graph,
             },
-            "test_suffix": "graph" if use_cuda_graph else "no_graph",
+            "test_suffix": f"{fluid_solver}_{'graph' if use_cuda_graph else 'no_graph'}",
         }
+        for fluid_solver in ("local", "xpbd")
         for use_cuda_graph in (True, False)
     ],
 )

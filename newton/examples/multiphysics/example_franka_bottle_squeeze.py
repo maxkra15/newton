@@ -826,7 +826,7 @@ class Example:
         parser.add_argument(
             "--fluid-solver",
             choices=("local", "xpbd"),
-            default="local",
+            default="xpbd",
             help="Fluid backend; xpbd selects the experimental shared SolverXPBD integration",
         )
         parser.add_argument(

@@ -53,9 +53,18 @@ Use ``--show-particles`` to inspect the underlying fluid samples.
 Experimental shared XPBD comparison
 ----------------------------------
 
-This evaluation branch also accepts ``--fluid-solver xpbd``. It ports Eric
-Heiden's experimental fluid solver from commit ``3731ef5f`` onto the bottle
-branch, preserving the current VBD shell and rendering:
+This evaluation branch supports both fluid backends with the same PET shell,
+robot motion, thin-wall contacts and liquid surface reconstruction. The default
+``--fluid-solver xpbd`` uses the optimized port of Eric Heiden's experimental
+fluid solver from commit ``3731ef5f``. Use ``--fluid-solver local`` to select
+the original example-local density solver:
+
+.. code-block:: console
+
+   uv run --extra examples -m newton.examples franka_bottle_squeeze \
+       --fluid-solver local --viewer rtx
+
+To select the shared solver explicitly:
 
 .. code-block:: console
 
@@ -70,8 +79,8 @@ Coupling remains one-way;
 water pressure does not feed back onto the VBD shell. The adapter uses a
 private per-iteration solver method for this evaluation and is not a proposed
 public extension API. Its boundary projection must be included in performance
-comparisons. ``--fluid-solver local`` selects the original example helper.
-The spill marker follows the moving neck plane so a droplet can leave a
+comparisons. Both backends share the moving-neck spill marker and continuous
+thin-wall projection. The spill marker follows the moving neck plane so a droplet can leave a
 lowered or tilted opening without crossing the bottle's initial top height.
 
 The shared kernels specialize for uniform particles and grouped worlds using
@@ -95,13 +104,13 @@ fluid substeps together. Surface reconstruction and rendering remain outside
 capture. The solver's private grid snapshot protects replay when reconstruction
 builds another Warp hash grid. ``--no-cuda-graph`` runs the same physics eagerly.
 
-Baseline graph capture
-----------------------
+Local backend graph capture
+---------------------------
 
-CUDA graphs capture the robot and VBD shell substeps by default, including
-self-contact and plasticity. The XPBD water loop and surface reconstruction
-execute outside capture. Use ``--no-cuda-graph`` to run the shell eagerly as
-well. This option does not claim capture of the full simulation or rendering.
+With ``--fluid-solver local``, CUDA graphs capture the robot and VBD shell
+substeps, including self-contact and plasticity. The local water loop and
+surface reconstruction execute outside capture. Use ``--no-cuda-graph`` to
+run the shell eagerly as well. This option does not claim capture of the full simulation or rendering.
 
 The default solve uses 320 VBD iterations per substep. Under-solving this stiff
 shell changes the buckling mode and the plastic loading path. Increasing the

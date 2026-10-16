@@ -14,21 +14,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.multiphysics._bottle import _project_shell_contact
+from newton.examples.multiphysics._bottle import _project_shell_contact, _update_mouth_plane
 from newton.solvers import SolverXPBD
-
-
-@wp.kernel
-def _update_mouth_plane(points: wp.array[wp.vec3], indices: wp.array[int], plane: wp.array[wp.vec4]):
-    count = indices.shape[0]
-    center = wp.vec3(0.0)
-    for j in range(count):
-        center += points[indices[j]] / float(count)
-    normal = wp.vec3(0.0)
-    for j in range(count):
-        normal += wp.cross(points[indices[j]] - center, points[indices[(j + 1) % count]] - center)
-    normal = wp.normalize(normal)
-    plane[0] = wp.vec4(normal[0], normal[1], normal[2], -wp.dot(normal, center))
 
 
 @wp.kernel
@@ -47,12 +34,17 @@ def _project_boundary(
     inside_bottle: wp.array[int],
 ):
     i = wp.tid()
-    mouth = mouth_plane[0]
-    inside = inside_bottle[i]
-    if wp.dot(wp.vec3(mouth[0], mouth[1], mouth[2]), positions[i]) + mouth[3] > radius:
-        inside = 0
     p, inside = _project_shell_contact(
-        mesh, indices, shell_previous, previous[i], positions[i], inside, wp.inf, radius, search_radius, floor
+        mesh,
+        indices,
+        shell_previous,
+        previous[i],
+        positions[i],
+        inside_bottle[i],
+        mouth_plane[0],
+        radius,
+        search_radius,
+        floor,
     )
     positions[i] = p
     velocities[i] = (p - previous[i]) / dt
