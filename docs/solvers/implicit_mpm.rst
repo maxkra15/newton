@@ -601,6 +601,17 @@ pressure or atomic contention. Require convergence and trajectory comparisons
 before claiming a speedup of the same physical model. Particle-count reduction
 is a separate resampling problem that must preserve mass and momentum.
 
+For large particle-training batches, also profile neighbor-search candidate
+counts. The current particle stage uses a fixed 128-by-128-by-128 hash grid
+over all worlds and rejects incompatible world IDs after iterating bucket
+candidates. Distant worlds can alias the same buckets. Warp 1.18 supports
+grouped builds and queries; using world IDs as groups is a candidate optimization
+for isolated worlds, with a fallback needed for global particles. Larger hash
+dimensions are another candidate, with additional header storage and clearing
+cost. Neither change is implemented or benchmarked here. Compare valid-neighbor
+sets and contact corrections, then time grid construction and pair kernels
+separately before attributing the measured scaling behavior to this search.
+
 Collision tunneling
 -------------------
 
@@ -1546,8 +1557,10 @@ The Isaac Lab ``develop`` integration exercises the native fidelity setting in
 the existing coupled Franka Pour task: MuJoCo advances the arm and cups, while
 the MPM entry advances 468 particles per environment. Both material modes retain
 84 actor observations, 86 critic observations, eight actions, particle ordering,
-mass, reward terms, and the checkpoint interface. The saved policy and optimizer
-load at learning iteration 6997.
+mass, reward terms, and the checkpoint interface. The historical experiments in
+this section load the saved policy and optimizer at learning iteration 6997.
+The later :ref:`official-checkpoint PPO study <mpm-franka-official-ppo>` uses
+the published iteration-7450 checkpoint and keeps these earlier results separate.
 
 The following measurements use an L40, driver 595.58.03, Warp 1.18.0, seed 42,
 and one sequential run per point. Sixteen policy steps warm up each process;
@@ -1809,3 +1822,224 @@ The guard detects workspace exits, including non-finite values; it is not a
 wall-tunneling detector. Adaptive reset populations and grid alignment remain
 confounds. A within-run particle-to-MPM schedule must fit the eventual MPM
 memory budget; otherwise resume the policy checkpoint with fewer environments.
+
+.. _mpm-franka-official-ppo:
+
+PPO scaling with the official checkpoint
+----------------------------------------
+
+The October 16, 2026 follow-up verifies the task's published checkpoint before
+comparing a single L40 with an RTX PRO 6000 Blackwell Workstation Edition. Isaac
+Lab's normal playback command resolves it with ``--checkpoint pretrained``.
+For task ``IsaacContrib-Franka-Pour`` and the ``newtonmjwarpmpmproxy`` physics,
+``none`` renderer, and ``rsl_rl`` workflow, the
+`official checkpoint asset
+<https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/PretrainedCheckpoints/rsl_rl/IsaacContrib-Franka-Pour_newtonmjwarpmpmproxy_none_rsl_rl.pt>`__
+contains learning iteration 7450. A fresh download is byte-identical to the
+benchmark reference, with SHA-256
+``52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643``.
+The original training configuration is not embedded in this checkpoint, so
+loading it does not establish a constitutive match to the current task.
+
+Both systems use Newton numerical commit ``d183ffaa``, Warp 1.18.0, PyTorch
+2.11.0+cu130, MuJoCo Warp 3.15.0, RSL-RL 5.5.1, seed 42, and one CPU/BLAS
+thread. The numerical Newton and Isaac Lab source fingerprints match across
+the two deployments. The L40 system uses an Ice Lake Xeon, driver 595.58.03,
+and a 300 W GPU power limit; the RTX system uses a Core Ultra 9 285K, driver
+615.71.09, and a 600 W limit. This is a comparison of those tested systems.
+The particle stage uses two contact iterations, effective pair
+friction 0.5, zero cohesion, and 468 particles per environment. Radius, particle
+count, mass, voxel setting, and fidelity remain fixed throughout these tests.
+
+The rigid entry also retains the task's ``njmax=2560`` and ``nconmax=400``.
+MuJoCo Warp reserves ``400 * num_envs`` shared contact slots and per-world
+constraint storage. Its dense constraint Jacobian alone scales as
+``4 * num_envs * njmax_padded * nv_padded`` bytes. At 16,384 environments,
+Newton's separate collision pipeline additionally reports 10,731,520 contact
+slots, approximately 982.5 MiB for its base buffers. These are capacity-scaled
+allocations outside the material solver. Tighter reservations are a separate
+optimization candidate: establish occupancy and accumulate overflow flags at
+every rigid substep before reducing them. The current benchmark does not
+record that telemetry and establishes no safe smaller capacity.
+
+Each primary run performs 16 warmup policy steps, 96 inference steps, and then
+five actual PPO iterations with 96 transitions per environment per iteration.
+Five epochs and four minibatches give 100 Adam updates. The synchronized outer
+training timer includes rollout collection, generalized advantage estimation
+(GAE), optimization, logging, and checkpoint saving. It excludes process
+construction, compilation, warmup,
+and the preceding inference window. Reported training throughput is
+``480 * num_envs / training_wall_seconds``. The policy step counter advances
+from 112 to 592; observations remain 84 actor inputs, 86 critic inputs, and eight
+actions. No rendering runs during these measurements.
+
+A fresh 512-environment comparison uses the official checkpoint in both modes.
+MPM retains the task's ``pic27`` contacts, Jacobi budget 24, and tolerance
+``1e-4``. Particles use two contact iterations. Each process performs the full
+five-iteration protocol and collects 245,760 training transitions:
+
+.. list-table:: Official-checkpoint comparison on one L40 at 512 environments
+   :header-rows: 1
+   :widths: 24 18 18 23 17
+
+   * - Fidelity
+     - PPO [env/s]
+     - Peak GPU [MiB]
+     - Pre-PPO successes
+     - Pre-PPO spills
+   * - MPM
+     - 1,753
+     - 7,517
+     - 1,157/1,207
+     - 4
+   * - Particles, 2 iterations
+     - 5,272
+     - 2,665
+     - 891/1,197
+     - 263
+
+Particle fidelity delivers 3.01x the PPO throughput in this pair. The preceding
+96-step rollout has 95.9% terminal success for MPM and 74.4% for particles.
+These independently adapting episode populations illustrate the behavior gap;
+they do not evaluate the final trained checkpoints or establish convergence.
+Both final checkpoints retain the policy interface and pass the 100-update
+Adam verification described below.
+
+.. list-table:: Particle-fidelity PPO scaling; one run per point
+   :header-rows: 1
+   :widths: 24 16 20 20 20
+
+   * - System
+     - Environments
+     - Training [env/s]
+     - Training wall [s]
+     - Peak GPU [MiB]
+   * - L40
+     - 4,096
+     - 12,093
+     - 162.581
+     - 10,565
+   * - L40
+     - 8,192
+     - 10,501
+     - 374.440
+     - 19,339
+   * - L40
+     - 21,504
+     - 6,825
+     - 1,512.465
+     - 47,915
+   * - RTX PRO 6000
+     - 4,096
+     - 20,616
+     - 95.369
+     - 11,108
+   * - RTX PRO 6000
+     - 8,192
+     - 19,155
+     - 205.278
+     - 19,884
+   * - RTX PRO 6000
+     - 16,384
+     - 16,653
+     - 472.251
+     - 37,402
+
+.. figure:: mpm_franka_pour_ppo_scaling.png
+   :alt: Official checkpoint 7450 PPO throughput and sampled whole-GPU memory across environment counts on an L40 and RTX PRO 6000.
+   :width: 100%
+
+   Completed five-iteration training runs form the throughput curves. Hollow
+   squares show one-iteration capacity probes on the memory panel only.
+
+The :download:`PPO records <mpm_franka_pour_ppo_scaling.json>` include raw
+reports, commands, and source hashes. A :download:`CSV summary
+<mpm_franka_pour_ppo_scaling.csv>` covers the particle scaling runs. Separate
+:download:`verification records <mpm_franka_pour_ppo_verification.json>` include checkpoint/Adam proofs,
+independent failure-phase audits, and source-level allocation analysis.
+
+At the matched 8,192-environment batch, the RTX system delivers 1.82x the
+training throughput. Both runs collect exactly 3,932,160 training transitions.
+At 4,096 environments, the RTX system delivers 1.70x the L40 throughput. The
+L40's largest confirmed batch has 43.6% lower aggregate throughput than its
+4,096-environment batch.
+
+These are aggregate environment transitions: 19,155 transitions/s at 8,192
+environments corresponds to 2.34 vector policy steps/s. The fastest local batch
+tested is 4,096 environments, at 5.03 vector steps/s. Doubling the batch
+from 8,192 to 16,384 reduces aggregate local throughput by 13.1%; more memory
+does not imply that the largest fitting batch trains fastest.
+
+CPU inspection of the completed checkpoints verifies changed actor weights,
+finite actor/critic/optimizer tensors, exactly 100 additional updates
+in all 20 Adam parameter states, and five finite PPO loss records per tag.
+The original checkpoint bytes remain unchanged. Final saves are named
+``model_7454.pt`` under RSL-RL's iteration-label convention.
+
+The RSL learning timer, including GAE and optimization, accounts for approximately
+0.81% of the L40's 8,192-environment outer training wall time. Rollout collection
+dominates this configuration. RSL's individual phase timers do not explicitly
+synchronize CUDA boundaries, so they do not attribute the remaining cost to
+particular physics kernels. Increasing the environment count also changes the
+PPO rollout batch ``96 * num_envs`` and minibatch ``24 * num_envs``; these runs
+do not compare convergence at an unchanged optimization batch size.
+
+Capacity probes use one PPO iteration after 16 warmup and 16 inference steps.
+Their rates are excluded from the throughput table; the highest fitting
+candidate must complete the primary five-iteration protocol before it is a
+confirmed training-capacity result. The monitor samples whole-GPU memory,
+process-tree RSS, host memory, and other compute processes once per second.
+It reserves 8 GiB of host RAM and stops only the test's own process group on a
+host-memory guard or timeout. Other GPU computation makes a run ineligible for
+timing comparisons. Interrupted or contaminated attempts remain in the records
+and establish neither a capacity failure nor a usable throughput result.
+Memory peaks are sampled and can miss shorter allocations.
+
+The L40 completes the full five-iteration protocol at 21,504 environments,
+advancing 10,063,872 particles. The next tested count, 22,528, fails. This gives
+a tested 1,024-environment bracket for these settings rather than an exact
+hardware maximum.
+
+On the RTX PRO 6000, 16,384 environments is the largest completed primary run
+in this report. A larger attempt was interrupted when another workspace
+started using the GPU; it establishes no capacity failure. The local capacity
+ceiling remains unresolved while the remaining tests wait for an idle GPU.
+
+A 22,528-environment one-iteration probe passes after its shorter inference
+prefix. The full-protocol run at that count completes one PPO iteration
+(2,162,688 transitions), then fails with Warp CUDA out-of-memory during the
+next rollout's graph launch. Its sampled whole-GPU peak is 48,475 MiB. Neither
+the shorter probe nor the first completed update establishes five-iteration
+training capacity; the allocation history across collection and optimization
+phases matters.
+
+The L40's 24,576-environment probe completes construction, warmup, inference,
+and the first PPO rollout before failing in the critic network's ELU forward
+pass. PyTorch requests a further 288 MiB with only 190 MiB free. With four
+minibatches, each minibatch contains 589,824 samples; one 128-wide float32
+activation alone occupies 288 MiB. This failure bounds the complete fixed-PPO
+configuration. Changing the minibatch schedule would change both memory use
+and the optimization protocol and requires a separate comparison.
+
+The reset sampler remains adaptive. Outcomes from the preceding inference
+window are not outcomes of the PPO training interval, and final finite states
+after automatic resets do not establish continuous containment or long-horizon
+policy quality. The earlier coupled reaction-force limitation also remains.
+A particle-only batch that exceeds full MPM capacity must save its policy and
+optimizer and resume with fewer environments for the MPM stage; the observation
+and action interfaces remain compatible.
+
+To reproduce a primary point from the Isaac Lab feature branch, pass the local
+file printed by the published-checkpoint resolver to the benchmark. Unlike the
+normal playback entry point, this standalone script accepts a checkpoint file
+path rather than the ``pretrained`` keyword:
+
+.. code-block:: console
+
+   OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+     uv run python scripts/benchmarks/benchmark_franka_pour_fidelity.py \
+       --mode particles2 --num_envs 8192 \
+       --checkpoint /path/to/published-checkpoint.pt \
+       --warmup_steps 16 --steps 96 --train_iterations 5 \
+       --seed 42 --cpu_threads 1 --device cuda:0 \
+       --output logs/mpm_fidelity/particles2-8192-7450.json

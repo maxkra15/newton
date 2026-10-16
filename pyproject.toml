@@ -342,6 +342,7 @@ showcontent = true
 files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf", "*.js"]
 
 [tool.typos.default.extend-words]
+GAE = "GAE"
 arange = "arange"
 precess = "precess"
 ba = "ba"
