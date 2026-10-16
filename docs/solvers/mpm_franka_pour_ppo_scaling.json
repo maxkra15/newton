@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-10-16T14:14:14.727542+00:00",
+  "generated_utc": "2026-10-16T21:01:04.013101+00:00",
   "root": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale",
   "collector_sha256": "ed416bc6dc677f42d8799fc1281a8b043337274e2645d4f8bc6f3ad8d688df2a",
   "study_protocol": {
@@ -1776,6 +1776,686 @@
       "category": "failed_or_not_completed"
     },
     {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry1#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry1/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "fd4694ff724b964565fa32041095cb97a3e79dfdf8edc18761bce95bef3b1cf2",
+      "status": "failed",
+      "num_envs": 32768,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "32768",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "16",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "1",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry1/ppo-scale-particles2-32768-train1.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T14:39:26.519056+00:00",
+      "ended_utc": "2026-10-16T14:42:56.635278+00:00",
+      "total_process_wall_seconds": 210.11600779098808,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [],
+        "learning_iteration_labels": [],
+        "learning_seconds_per_iteration_rounded_console": [],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 0
+      },
+      "timing_comparison_eligible": false,
+      "timing_ineligibility_reasons": [
+        "foreign_gpu_compute_observed",
+        "case_not_completed"
+      ],
+      "exit_code": 143,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [
+        {
+          "processes": [
+            {
+              "pid": 42680,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:51.617969+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 42766,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:55.622677+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 42766,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 632.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:56.624465+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 42766,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 632.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:57.619654+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 42766,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 632.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:58.611790+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 42766,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 760.0
+            }
+          ],
+          "utc": "2026-10-16T14:41:59.636130+00:00"
+        }
+      ],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 16,
+      "requested_ppo_iterations": 1,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 35640.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 46.28968048095703,
+      "minimum_host_available_gib_sampled_1hz": 62.33076477050781,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "category": "failed_or_not_completed"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "7c89b746aa3ac7727a99c081d21a0d4ace29dbba6a9d4db7a458f60914d262a5",
+      "status": "completed",
+      "num_envs": 32768,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "32768",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "16",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "1",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-particles2-32768-train1.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T17:22:12.966857+00:00",
+      "ended_utc": "2026-10-16T17:35:14.182644+00:00",
+      "total_process_wall_seconds": 781.2155659109994,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [
+          229.481
+        ],
+        "learning_iteration_labels": [
+          7450
+        ],
+        "learning_seconds_per_iteration_rounded_console": [
+          2.234
+        ],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 231.715
+      },
+      "timing_comparison_eligible": true,
+      "timing_ineligibility_reasons": [],
+      "exit_code": 0,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 16,
+      "requested_ppo_iterations": 1,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 73015.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 48.58893585205078,
+      "minimum_host_available_gib_sampled_1hz": 60.59798812866211,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "raw_report": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-particles2-32768-train1.json",
+      "raw_sha256": "a545cd21eb88296e20bc159f1bb06dd74830cefc6e389e91731516986c444005",
+      "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+      "source_hashes": {
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106"
+      },
+      "versions": {
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0"
+      },
+      "training": {
+        "iterations": 1,
+        "start_policy_step": 32,
+        "end_policy_step": 128,
+        "start_fidelity": "particles",
+        "end_fidelity": "particles",
+        "environment_steps": 3145728,
+        "wall_seconds": 231.79392123999423,
+        "environment_steps_per_second": 13571.227334917829,
+        "includes_optimizer_logging_and_checkpoint_save": true
+      },
+      "ppo_environment_steps_per_second": 13571.227334917829,
+      "vector_policy_batches_per_second": 0.4141609904454904,
+      "preceding_inference_timing": {
+        "policy_steps": 16,
+        "wall_seconds": 35.20834707602626,
+        "environment_steps_per_second": 14891.014306007944,
+        "policy_batches_per_second": 0.4544376924440901
+      },
+      "runtime_provenance": {
+        "file": "local-rtx-pro-6000/checkpoint7450/runtime-provenance.json",
+        "sha256": "f552b21c82a0da2d0bce2229cfb54c5c47c34348984d72d25d7fcbfe818e33c4",
+        "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+        "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+        "benchmark_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "record": {
+          "isaaclab_root": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow",
+          "isaaclab_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+          "isaaclab_working_tree_clean": true,
+          "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+          "interpreter": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked/bin/python3",
+          "versions": {
+            "torch": "2.11.0+cu130",
+            "warp-lang": "1.18.0",
+            "numpy": "2.5.1",
+            "mujoco": "3.15.0",
+            "mujoco-warp": "3.15.0",
+            "rsl-rl-lib": "5.5.1",
+            "newton": "1.8.0.dev0"
+          },
+          "newton_direct_url": {
+            "url": "https://github.com/maxkra15/newton.git",
+            "vcs_info": {
+              "vcs": "git",
+              "commit_id": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b",
+              "requested_revision": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b"
+            }
+          },
+          "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "gpu_total_memory_mib": 97887,
+          "driver_version": "615.71.09",
+          "assets": {
+            "checkpoint": {
+              "path": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+              "sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+              "bytes": 5234101
+            },
+            "reset_dataset": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+              "sha256": "044a9986669be27bd884f1f7299961d011ed5e3286c007d65773fffe5dd00aa6"
+            },
+            "cups_usd": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/franka_pour_cups.usda",
+              "sha256": "e762038b4e024aacb17fb65e25f3b5d631e95fc93213804f0b034eda0b0b2ac1"
+            }
+          },
+          "source_provenance_verified_by_parent": {
+            "digest_algorithm": "sorted relative .py path + NUL + raw file contents + NUL",
+            "newton_src_py_count": 413,
+            "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+            "isaac_source_py_count": 2369,
+            "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+            "benchmark_driver_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+            "matches_horde": true
+          },
+          "protocol": {
+            "fidelity": "particles",
+            "particle_iterations": 2,
+            "warmup_policy_steps": 16,
+            "rollout_policy_steps": 96,
+            "ppo_iterations": 5,
+            "ppo_steps_per_env": 96,
+            "cpu_threads": 1,
+            "seed": 42,
+            "host_available_reserve_gib": 8,
+            "max_case_wall_seconds": 1800,
+            "adaptive_reset_sampling": true
+          },
+          "gpu_smoke": "Warp initialized and64MiB Torch CUDA allocation filled/synchronized/freed; no simulation started.",
+          "checkpoint_compatibility": "Parent verified strict actual OnPolicyRunner load on CPU, iteration7450, finite84/86/8 outputs and20 finite Adam states without CUDA initialization.",
+          "supersedes_for_new_scaling_runs": "Historical6997 attempt n8192 was interrupted due foreign CUDA and is not timing eligible."
+        }
+      },
+      "source_protocol_mismatches": [],
+      "numerical_protocol_mismatches": [],
+      "source_provenance_available": true,
+      "validation_errors": [],
+      "phases": {
+        "source": "TensorBoard scalar proof",
+        "collection_seconds": [
+          229.48147583007812
+        ],
+        "learning_including_GAE_seconds": [
+          2.233813524246216
+        ],
+        "scalar_iterations": [
+          7450
+        ],
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/capacity-32768-45056-checkpoint-proof.json",
+        "checkpoint_sha256": "bae771fa7a2a47cebfcf07de888beef529912c56c922a5b9bd70d8c668b5764d",
+        "optimizer_step_increment_min": 20.0,
+        "optimizer_step_increment_max": 20.0,
+        "checkpoint_tensors_and_losses_finite": {
+          "actor_tensors_finite": true,
+          "critic_tensors_finite": true,
+          "optimizer_tensors_finite": true,
+          "ppo_losses_finite": true
+        },
+        "complete_phase_arrays": true,
+        "phase_based_environment_steps_per_second": [
+          13575.832690046413
+        ],
+        "collection_only_environment_steps_per_second": [
+          13707.982261406085
+        ],
+        "collection_total_seconds": 229.48147583007812,
+        "learning_total_seconds": 2.233813524246216,
+        "learning_fraction_of_outer_wall": 0.009637066892420252,
+        "outer_minus_phase_seconds": 0.07863188566989265,
+        "interpretation": "Learning includes GAE/returns and optimization. RSL phase wall timers lack explicit CUDA-boundary synchronization and exclude logging/checkpoints. No individual physics-kernel attribution follows."
+      },
+      "category": "capacity_only_7450"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "d11ca26f09d391050310b896791d50ba0a9435ba0e4cd40c7de53de0ef6f7850",
+      "status": "completed",
+      "num_envs": 45056,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "45056",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "16",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "1",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-particles2-45056-train1.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T18:21:21.563716+00:00",
+      "ended_utc": "2026-10-16T18:39:40.849230+00:00",
+      "total_process_wall_seconds": 1099.2853039439942,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [
+          377.656
+        ],
+        "learning_iteration_labels": [
+          7450
+        ],
+        "learning_seconds_per_iteration_rounded_console": [
+          1.72
+        ],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 379.37600000000003
+      },
+      "timing_comparison_eligible": true,
+      "timing_ineligibility_reasons": [],
+      "exit_code": 0,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 16,
+      "requested_ppo_iterations": 1,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 93617.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 64.01530075073242,
+      "minimum_host_available_gib_sampled_1hz": 45.41380310058594,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "raw_report": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-particles2-45056-train1.json",
+      "raw_sha256": "b90e3a1005d3645ce9929f33f969e8698461052b6b3aee718dc10e6e296e5e73",
+      "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+      "source_hashes": {
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106"
+      },
+      "versions": {
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0"
+      },
+      "training": {
+        "iterations": 1,
+        "start_policy_step": 32,
+        "end_policy_step": 128,
+        "start_fidelity": "particles",
+        "end_fidelity": "particles",
+        "environment_steps": 4325376,
+        "wall_seconds": 379.44871332199546,
+        "environment_steps_per_second": 11399.105724017938,
+        "includes_optimizer_logging_and_checkpoint_save": true
+      },
+      "ppo_environment_steps_per_second": 11399.105724017938,
+      "vector_policy_batches_per_second": 0.252998617809347,
+      "preceding_inference_timing": {
+        "policy_steps": 16,
+        "wall_seconds": 58.32607443298912,
+        "environment_steps_per_second": 12359.755169675238,
+        "policy_batches_per_second": 0.2743198501792267
+      },
+      "runtime_provenance": {
+        "file": "local-rtx-pro-6000/checkpoint7450/runtime-provenance.json",
+        "sha256": "f552b21c82a0da2d0bce2229cfb54c5c47c34348984d72d25d7fcbfe818e33c4",
+        "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+        "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+        "benchmark_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "record": {
+          "isaaclab_root": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow",
+          "isaaclab_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+          "isaaclab_working_tree_clean": true,
+          "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+          "interpreter": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked/bin/python3",
+          "versions": {
+            "torch": "2.11.0+cu130",
+            "warp-lang": "1.18.0",
+            "numpy": "2.5.1",
+            "mujoco": "3.15.0",
+            "mujoco-warp": "3.15.0",
+            "rsl-rl-lib": "5.5.1",
+            "newton": "1.8.0.dev0"
+          },
+          "newton_direct_url": {
+            "url": "https://github.com/maxkra15/newton.git",
+            "vcs_info": {
+              "vcs": "git",
+              "commit_id": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b",
+              "requested_revision": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b"
+            }
+          },
+          "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "gpu_total_memory_mib": 97887,
+          "driver_version": "615.71.09",
+          "assets": {
+            "checkpoint": {
+              "path": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+              "sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+              "bytes": 5234101
+            },
+            "reset_dataset": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+              "sha256": "044a9986669be27bd884f1f7299961d011ed5e3286c007d65773fffe5dd00aa6"
+            },
+            "cups_usd": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/franka_pour_cups.usda",
+              "sha256": "e762038b4e024aacb17fb65e25f3b5d631e95fc93213804f0b034eda0b0b2ac1"
+            }
+          },
+          "source_provenance_verified_by_parent": {
+            "digest_algorithm": "sorted relative .py path + NUL + raw file contents + NUL",
+            "newton_src_py_count": 413,
+            "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+            "isaac_source_py_count": 2369,
+            "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+            "benchmark_driver_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+            "matches_horde": true
+          },
+          "protocol": {
+            "fidelity": "particles",
+            "particle_iterations": 2,
+            "warmup_policy_steps": 16,
+            "rollout_policy_steps": 96,
+            "ppo_iterations": 5,
+            "ppo_steps_per_env": 96,
+            "cpu_threads": 1,
+            "seed": 42,
+            "host_available_reserve_gib": 8,
+            "max_case_wall_seconds": 1800,
+            "adaptive_reset_sampling": true
+          },
+          "gpu_smoke": "Warp initialized and64MiB Torch CUDA allocation filled/synchronized/freed; no simulation started.",
+          "checkpoint_compatibility": "Parent verified strict actual OnPolicyRunner load on CPU, iteration7450, finite84/86/8 outputs and20 finite Adam states without CUDA initialization.",
+          "supersedes_for_new_scaling_runs": "Historical6997 attempt n8192 was interrupted due foreign CUDA and is not timing eligible."
+        }
+      },
+      "source_protocol_mismatches": [],
+      "numerical_protocol_mismatches": [],
+      "source_provenance_available": true,
+      "validation_errors": [],
+      "phases": {
+        "source": "TensorBoard scalar proof",
+        "collection_seconds": [
+          377.65625
+        ],
+        "learning_including_GAE_seconds": [
+          1.7203927040100098
+        ],
+        "scalar_iterations": [
+          7450
+        ],
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/capacity-32768-45056-checkpoint-proof.json",
+        "checkpoint_sha256": "2874d48fb7be835d53119eca80b26b063b15e0fa924783cc9e345447667c006c",
+        "optimizer_step_increment_min": 20.0,
+        "optimizer_step_increment_max": 20.0,
+        "checkpoint_tensors_and_losses_finite": {
+          "actor_tensors_finite": true,
+          "critic_tensors_finite": true,
+          "optimizer_tensors_finite": true,
+          "ppo_losses_finite": true
+        },
+        "complete_phase_arrays": true,
+        "phase_based_environment_steps_per_second": [
+          11401.271225267978
+        ],
+        "collection_only_environment_steps_per_second": [
+          11453.2091021928
+        ],
+        "collection_total_seconds": 377.65625,
+        "learning_total_seconds": 1.7203927040100098,
+        "learning_fraction_of_outer_wall": 0.004533926835456432,
+        "outer_minus_phase_seconds": 0.072070617985446,
+        "interpretation": "Learning includes GAE/returns and optimization. RSL phase wall timers lack explicit CUDA-boundary synchronization and exclude logging/checkpoints. No individual physics-kernel attribution follows."
+      },
+      "category": "capacity_only_7450"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n49152-train1#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n49152-train1/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "bdff1693d2ceac96b3562779a8a55f73f5c0da552ace3bee9b37b39b801069ee",
+      "status": "failed",
+      "num_envs": 49152,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "49152",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "16",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "1",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/capacity-n49152-train1/ppo-scale-particles2-49152-train1.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T20:34:31.984269+00:00",
+      "ended_utc": "2026-10-16T20:56:03.301450+00:00",
+      "total_process_wall_seconds": 1291.3169745240011,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [],
+        "learning_iteration_labels": [],
+        "learning_seconds_per_iteration_rounded_console": [],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 0
+      },
+      "timing_comparison_eligible": false,
+      "timing_ineligibility_reasons": [
+        "case_not_completed"
+      ],
+      "exit_code": 1,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 16,
+      "requested_ppo_iterations": 1,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 97064.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 76.4369888305664,
+      "minimum_host_available_gib_sampled_1hz": 34.558475494384766,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "category": "failed_or_not_completed"
+    },
+    {
       "case_id": "local-rtx-pro-6000/checkpoint7450/n16384#0",
       "manifest": "local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-manifest.json",
       "manifest_sha256_at_collection": "bf0c67402d8d1c0123bcdfbe95ff32ac82b4307bb69e69379dcfa2f35da0404e",
@@ -2003,7 +2683,7 @@
           7453,
           7454
         ],
-        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-checkpoint-proof.json",
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-40960-checkpoint-proof.json",
         "checkpoint_sha256": "ecf424a008386527a4aa71265f47d374dfe8d3fb72f5cc3ab21a0d8643573e54",
         "optimizer_step_increment_min": 100.0,
         "optimizer_step_increment_max": 100.0,
@@ -2264,7 +2944,7 @@
           7453,
           7454
         ],
-        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-checkpoint-proof.json",
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-40960-checkpoint-proof.json",
         "checkpoint_sha256": "79fe587d88371ee957703f444b9867eb30ddcb0346e0ad7f271f89ed416b87e3",
         "optimizer_step_increment_min": 100.0,
         "optimizer_step_increment_max": 100.0,
@@ -2293,6 +2973,686 @@
         "learning_total_seconds": 1.3545596599578857,
         "learning_fraction_of_outer_wall": 0.014203383271624709,
         "outer_minus_phase_seconds": 0.13409913578652777,
+        "interpretation": "Learning includes GAE/returns and optimization. RSL phase wall timers lack explicit CUDA-boundary synchronization and exclude logging/checkpoints. No individual physics-kernel attribution follows."
+      },
+      "category": "primary_7450"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/n40960#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "e81f6e7610bff092ccb1a0be1146f5c9df93ab6f71519d3663efd7aeb99656d7",
+      "status": "completed",
+      "num_envs": 40960,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "40960",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "96",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "5",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T17:37:05.988315+00:00",
+      "ended_utc": "2026-10-16T18:20:20.534280+00:00",
+      "total_process_wall_seconds": 2594.5457471480186,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [
+          328.358,
+          336.329,
+          338.063,
+          338.461,
+          337.778
+        ],
+        "learning_iteration_labels": [
+          7450,
+          7451,
+          7452,
+          7453,
+          7454
+        ],
+        "learning_seconds_per_iteration_rounded_console": [
+          3.816,
+          1.31,
+          1.31,
+          1.31,
+          1.31
+        ],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 1688.045
+      },
+      "timing_comparison_eligible": true,
+      "timing_ineligibility_reasons": [],
+      "exit_code": 0,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 96,
+      "requested_ppo_iterations": 5,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 90841.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 58.568782806396484,
+      "minimum_host_available_gib_sampled_1hz": 50.82328414916992,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "raw_report": "local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5.json",
+      "raw_sha256": "90bc15bc733016b31aef80ac1cce87384e4cc60fb4f67a9eaa6d82af8db5f85b",
+      "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+      "source_hashes": {
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106"
+      },
+      "versions": {
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0"
+      },
+      "training": {
+        "iterations": 5,
+        "start_policy_step": 112,
+        "end_policy_step": 592,
+        "start_fidelity": "particles",
+        "end_fidelity": "particles",
+        "environment_steps": 19660800,
+        "wall_seconds": 1688.1919056749903,
+        "environment_steps_per_second": 11646.069344313682,
+        "includes_optimizer_logging_and_checkpoint_save": true
+      },
+      "ppo_environment_steps_per_second": 11646.069344313682,
+      "vector_policy_batches_per_second": 0.28432786485140826,
+      "preceding_inference_timing": {
+        "policy_steps": 96,
+        "wall_seconds": 312.0689203449874,
+        "environment_steps_per_second": 12600.293536610621,
+        "policy_batches_per_second": 0.3076243539211578
+      },
+      "runtime_provenance": {
+        "file": "local-rtx-pro-6000/checkpoint7450/runtime-provenance.json",
+        "sha256": "f552b21c82a0da2d0bce2229cfb54c5c47c34348984d72d25d7fcbfe818e33c4",
+        "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+        "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+        "benchmark_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "record": {
+          "isaaclab_root": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow",
+          "isaaclab_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+          "isaaclab_working_tree_clean": true,
+          "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+          "interpreter": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked/bin/python3",
+          "versions": {
+            "torch": "2.11.0+cu130",
+            "warp-lang": "1.18.0",
+            "numpy": "2.5.1",
+            "mujoco": "3.15.0",
+            "mujoco-warp": "3.15.0",
+            "rsl-rl-lib": "5.5.1",
+            "newton": "1.8.0.dev0"
+          },
+          "newton_direct_url": {
+            "url": "https://github.com/maxkra15/newton.git",
+            "vcs_info": {
+              "vcs": "git",
+              "commit_id": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b",
+              "requested_revision": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b"
+            }
+          },
+          "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "gpu_total_memory_mib": 97887,
+          "driver_version": "615.71.09",
+          "assets": {
+            "checkpoint": {
+              "path": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+              "sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+              "bytes": 5234101
+            },
+            "reset_dataset": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+              "sha256": "044a9986669be27bd884f1f7299961d011ed5e3286c007d65773fffe5dd00aa6"
+            },
+            "cups_usd": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/franka_pour_cups.usda",
+              "sha256": "e762038b4e024aacb17fb65e25f3b5d631e95fc93213804f0b034eda0b0b2ac1"
+            }
+          },
+          "source_provenance_verified_by_parent": {
+            "digest_algorithm": "sorted relative .py path + NUL + raw file contents + NUL",
+            "newton_src_py_count": 413,
+            "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+            "isaac_source_py_count": 2369,
+            "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+            "benchmark_driver_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+            "matches_horde": true
+          },
+          "protocol": {
+            "fidelity": "particles",
+            "particle_iterations": 2,
+            "warmup_policy_steps": 16,
+            "rollout_policy_steps": 96,
+            "ppo_iterations": 5,
+            "ppo_steps_per_env": 96,
+            "cpu_threads": 1,
+            "seed": 42,
+            "host_available_reserve_gib": 8,
+            "max_case_wall_seconds": 1800,
+            "adaptive_reset_sampling": true
+          },
+          "gpu_smoke": "Warp initialized and64MiB Torch CUDA allocation filled/synchronized/freed; no simulation started.",
+          "checkpoint_compatibility": "Parent verified strict actual OnPolicyRunner load on CPU, iteration7450, finite84/86/8 outputs and20 finite Adam states without CUDA initialization.",
+          "supersedes_for_new_scaling_runs": "Historical6997 attempt n8192 was interrupted due foreign CUDA and is not timing eligible."
+        }
+      },
+      "source_protocol_mismatches": [],
+      "numerical_protocol_mismatches": [],
+      "source_provenance_available": true,
+      "validation_errors": [],
+      "phases": {
+        "source": "TensorBoard scalar proof",
+        "collection_seconds": [
+          328.35845947265625,
+          336.3294677734375,
+          338.0626220703125,
+          338.4608459472656,
+          337.77789306640625
+        ],
+        "learning_including_GAE_seconds": [
+          3.816035032272339,
+          1.3095042705535889,
+          1.309809684753418,
+          1.310274600982666,
+          1.3096537590026855
+        ],
+        "scalar_iterations": [
+          7450,
+          7451,
+          7452,
+          7453,
+          7454
+        ],
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-40960-checkpoint-proof.json",
+        "checkpoint_sha256": "3f294e49b27be28993dcc89ae0e9e055fa94f581a5ec43b71164a9cd1ab120cc",
+        "optimizer_step_increment_min": 100.0,
+        "optimizer_step_increment_max": 100.0,
+        "checkpoint_tensors_and_losses_finite": {
+          "actor_tensors_finite": true,
+          "critic_tensors_finite": true,
+          "optimizer_tensors_finite": true,
+          "ppo_losses_finite": true
+        },
+        "complete_phase_arrays": true,
+        "phase_based_environment_steps_per_second": [
+          11837.633728804116,
+          11646.048962285306,
+          11586.562820276293,
+          11572.967101074219,
+          11596.297289043794
+        ],
+        "collection_only_environment_steps_per_second": [
+          11975.20540909788,
+          11691.393043944729,
+          11631.454479999162,
+          11617.769225255248,
+          11641.259184558143
+        ],
+        "collection_total_seconds": 1678.9892883300781,
+        "learning_total_seconds": 9.055277347564697,
+        "learning_fraction_of_outer_wall": 0.0053638909872299875,
+        "outer_minus_phase_seconds": 0.1473399973474443,
+        "interpretation": "Learning includes GAE/returns and optimization. RSL phase wall timers lack explicit CUDA-boundary synchronization and exclude logging/checkpoints. No individual physics-kernel attribution follows."
+      },
+      "category": "primary_7450"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/n45056#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/n45056/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "f1cfa9c6255a681337388f0c25fdc367a65b8b0c24a619835952ba9b0ef64db9",
+      "status": "failed",
+      "num_envs": 45056,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "45056",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "96",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "5",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n45056/ppo-scale-particles2-45056-train5.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T18:40:52.756970+00:00",
+      "ended_utc": "2026-10-16T19:09:01.140725+00:00",
+      "total_process_wall_seconds": 1688.383543406002,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [
+          387.092
+        ],
+        "learning_iteration_labels": [
+          7450
+        ],
+        "learning_seconds_per_iteration_rounded_console": [
+          1.573
+        ],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 388.66499999999996
+      },
+      "timing_comparison_eligible": false,
+      "timing_ineligibility_reasons": [
+        "foreign_gpu_compute_observed",
+        "case_not_completed"
+      ],
+      "exit_code": 143,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 14.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:52.140335+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:53.130233+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:54.123625+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:55.126367+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:56.130067+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 584.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:57.132694+00:00"
+        },
+        {
+          "processes": [
+            {
+              "pid": 274693,
+              "process_name": "/home/maximiliank/.paseo/worktrees/2lbuts6w/kind-bullfrog/.venv/bin/python3",
+              "used_gpu_memory_mib": 648.0
+            }
+          ],
+          "utc": "2026-10-16T19:07:58.132332+00:00"
+        }
+      ],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 96,
+      "requested_ppo_iterations": 5,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 97119.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 63.712764739990234,
+      "minimum_host_available_gib_sampled_1hz": 45.46404266357422,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "category": "failed_or_not_completed"
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/n45056-retry1#0",
+      "manifest": "local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-manifest.json",
+      "manifest_sha256_at_collection": "2bec6992019fd6eb4a44fdb8c3902d4727dad6a399b5090f9227b4424ab3fe80",
+      "status": "completed",
+      "num_envs": 45056,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
+      "gpu_driver": "615.71.09",
+      "gpu_total_memory_mib": "97887",
+      "gpu_power_limit_w": "600.00",
+      "checkpoint_iteration": 7450,
+      "mode": "particles2",
+      "command": [
+        "/home/maximiliank/.local/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-u",
+        "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/scripts/benchmarks/benchmark_franka_pour_fidelity.py",
+        "--mode",
+        "particles2",
+        "--num_envs",
+        "45056",
+        "--checkpoint",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "--reset_dataset",
+        "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+        "--steps",
+        "96",
+        "--warmup_steps",
+        "16",
+        "--train_iterations",
+        "5",
+        "--seed",
+        "42",
+        "--cpu_threads",
+        "1",
+        "--device",
+        "cuda:0",
+        "--output",
+        "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-particles2-45056-train5.json"
+      ],
+      "environment_overrides": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "UV_PROJECT_ENVIRONMENT": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked",
+        "WANDB_MODE": "offline"
+      },
+      "started_utc": "2026-10-16T19:43:01.086095+00:00",
+      "ended_utc": "2026-10-16T20:33:56.718849+00:00",
+      "total_process_wall_seconds": 3055.631986720022,
+      "rsl_console_phase_times": {
+        "collection_seconds_per_iteration_rounded_console": [
+          389.547,
+          397.335,
+          398.877,
+          398.663,
+          398.998
+        ],
+        "learning_iteration_labels": [
+          7450,
+          7451,
+          7452,
+          7453,
+          7454
+        ],
+        "learning_seconds_per_iteration_rounded_console": [
+          2.413,
+          1.441,
+          1.442,
+          1.444,
+          1.444
+        ],
+        "note": "RSL learning includes returns/GAE and optimization; phase wall timers lack explicit CUDA boundary synchronization. Logging/checkpoints are outside RSL phases but inside benchmark training.wall_seconds. Full-precision phases are in TensorBoard Perf/collection_time and Perf/learning_time.",
+        "rsl_phase_sum_seconds_rounded_console": 1991.604
+      },
+      "timing_comparison_eligible": true,
+      "timing_ineligibility_reasons": [],
+      "exit_code": 0,
+      "stop_reason": null,
+      "monitor_error": null,
+      "foreign_compute_observations": [],
+      "monitor_sha256": "e19db98475ac307fa8628e7f569274f4c38e41b54577e2ade5f0ba936c4f42c1",
+      "benchmark_manifest_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+      "warmup_policy_steps": 16,
+      "preceding_inference_policy_steps": 96,
+      "requested_ppo_iterations": 5,
+      "peak_whole_gpu_used_memory_mib_sampled_1hz": 96466.0,
+      "peak_owned_tree_rss_gib_sampled_1hz": 62.889122009277344,
+      "minimum_host_available_gib_sampled_1hz": 46.23971176147461,
+      "ppo_quality_derived_from_preceding_inference": false,
+      "raw_report": "local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-particles2-45056-train5.json",
+      "raw_sha256": "703be3d32119ee429798d9c37b79427680295a1b6936d2adbb40259b2cd9970b",
+      "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+      "source_hashes": {
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106"
+      },
+      "versions": {
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0"
+      },
+      "training": {
+        "iterations": 5,
+        "start_policy_step": 112,
+        "end_policy_step": 592,
+        "start_fidelity": "particles",
+        "end_fidelity": "particles",
+        "environment_steps": 21626880,
+        "wall_seconds": 1991.7418005530199,
+        "environment_steps_per_second": 10858.274899886701,
+        "includes_optimizer_logging_and_checkpoint_save": true
+      },
+      "ppo_environment_steps_per_second": 10858.274899886701,
+      "vector_policy_batches_per_second": 0.24099509277092288,
+      "preceding_inference_timing": {
+        "policy_steps": 96,
+        "wall_seconds": 370.967296273011,
+        "environment_steps_per_second": 11659.723224811622,
+        "policy_batches_per_second": 0.25878291958477495
+      },
+      "runtime_provenance": {
+        "file": "local-rtx-pro-6000/checkpoint7450/runtime-provenance.json",
+        "sha256": "f552b21c82a0da2d0bce2229cfb54c5c47c34348984d72d25d7fcbfe818e33c4",
+        "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+        "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+        "benchmark_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "record": {
+          "isaaclab_root": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow",
+          "isaaclab_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+          "isaaclab_working_tree_clean": true,
+          "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+          "interpreter": "/home/maximiliank/.paseo/worktrees/1zjbdl3z/mpm-fidelity-workflow/.venv-locked/bin/python3",
+          "versions": {
+            "torch": "2.11.0+cu130",
+            "warp-lang": "1.18.0",
+            "numpy": "2.5.1",
+            "mujoco": "3.15.0",
+            "mujoco-warp": "3.15.0",
+            "rsl-rl-lib": "5.5.1",
+            "newton": "1.8.0.dev0"
+          },
+          "newton_direct_url": {
+            "url": "https://github.com/maxkra15/newton.git",
+            "vcs_info": {
+              "vcs": "git",
+              "commit_id": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b",
+              "requested_revision": "d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b"
+            }
+          },
+          "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "gpu_total_memory_mib": 97887,
+          "driver_version": "615.71.09",
+          "assets": {
+            "checkpoint": {
+              "path": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+              "sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+              "bytes": 5234101
+            },
+            "reset_dataset": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/reset_dataset.pt",
+              "sha256": "044a9986669be27bd884f1f7299961d011ed5e3286c007d65773fffe5dd00aa6"
+            },
+            "cups_usd": {
+              "path": "/tmp/https/omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Contrib/MPM/Pour/franka_pour_cups.usda",
+              "sha256": "e762038b4e024aacb17fb65e25f3b5d631e95fc93213804f0b034eda0b0b2ac1"
+            }
+          },
+          "source_provenance_verified_by_parent": {
+            "digest_algorithm": "sorted relative .py path + NUL + raw file contents + NUL",
+            "newton_src_py_count": 413,
+            "newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+            "isaac_source_py_count": 2369,
+            "isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+            "benchmark_driver_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+            "matches_horde": true
+          },
+          "protocol": {
+            "fidelity": "particles",
+            "particle_iterations": 2,
+            "warmup_policy_steps": 16,
+            "rollout_policy_steps": 96,
+            "ppo_iterations": 5,
+            "ppo_steps_per_env": 96,
+            "cpu_threads": 1,
+            "seed": 42,
+            "host_available_reserve_gib": 8,
+            "max_case_wall_seconds": 1800,
+            "adaptive_reset_sampling": true
+          },
+          "gpu_smoke": "Warp initialized and64MiB Torch CUDA allocation filled/synchronized/freed; no simulation started.",
+          "checkpoint_compatibility": "Parent verified strict actual OnPolicyRunner load on CPU, iteration7450, finite84/86/8 outputs and20 finite Adam states without CUDA initialization.",
+          "supersedes_for_new_scaling_runs": "Historical6997 attempt n8192 was interrupted due foreign CUDA and is not timing eligible."
+        }
+      },
+      "source_protocol_mismatches": [],
+      "numerical_protocol_mismatches": [],
+      "source_provenance_available": true,
+      "validation_errors": [],
+      "phases": {
+        "source": "TensorBoard scalar proof",
+        "collection_seconds": [
+          389.546875,
+          397.3348388671875,
+          398.87725830078125,
+          398.6633605957031,
+          398.9977722167969
+        ],
+        "learning_including_GAE_seconds": [
+          2.412956953048706,
+          1.4413864612579346,
+          1.4420242309570312,
+          1.4438021183013916,
+          1.4436697959899902
+        ],
+        "scalar_iterations": [
+          7450,
+          7451,
+          7452,
+          7453,
+          7454
+        ],
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+        "checkpoint_sha256": "5f4c0d06627be7f280b629e1882386df84c0856e2677f70e8add68ff0ceb6186",
+        "optimizer_step_increment_min": 100.0,
+        "optimizer_step_increment_max": 100.0,
+        "checkpoint_tensors_and_losses_finite": {
+          "actor_tensors_finite": true,
+          "critic_tensors_finite": true,
+          "optimizer_tensors_finite": true,
+          "ppo_losses_finite": true
+        },
+        "complete_phase_arrays": true,
+        "phase_based_environment_steps_per_second": [
+          11035.25322594311,
+          10846.624561024108,
+          10804.81552785825,
+          10810.543781971148,
+          10801.519388849574
+        ],
+        "collection_only_environment_steps_per_second": [
+          11103.608519513858,
+          10885.972174833109,
+          10843.87718273566,
+          10849.695325742508,
+          10840.601880979404
+        ],
+        "collection_total_seconds": 1983.4201049804688,
+        "learning_total_seconds": 8.183839559555054,
+        "learning_fraction_of_outer_wall": 0.004108885778911081,
+        "outer_minus_phase_seconds": 0.13785601299605332,
         "interpretation": "Learning includes GAE/returns and optimization. RSL phase wall timers lack explicit CUDA-boundary synchronization and exclude logging/checkpoints. No individual physics-kernel attribution follows."
       },
       "category": "primary_7450"
@@ -2867,7 +4227,7 @@
           7453,
           7454
         ],
-        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-checkpoint-proof.json",
+        "proof_file": "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-40960-checkpoint-proof.json",
         "checkpoint_sha256": "f9d0c88bdfd6f37150e5114eb7c6a3c320dca79e85b4e0afa5922f0023fc7375",
         "optimizer_step_increment_min": 100.0,
         "optimizer_step_increment_max": 100.0,
@@ -4869,6 +6229,424 @@
       }
     },
     {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2#0",
+      "sha256": "a545cd21eb88296e20bc159f1bb06dd74830cefc6e389e91731516986c444005",
+      "record": {
+        "mode": "particles2",
+        "hostname": "8b82279-lcedt",
+        "device": "cuda:0",
+        "cuda_visible_devices": "0",
+        "num_envs": 32768,
+        "particles_per_env": 468,
+        "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "seed": 42,
+        "cpu_threads": 1,
+        "torch_matmul_allow_tf32": true,
+        "env_spacing_m": 2.5,
+        "physics_step_s": 0.008333333333333333,
+        "policy_step_s": 0.03333333333333333,
+        "physics_substeps": 2,
+        "media_entry_substeps": 2,
+        "rigid_entry_substeps": 3,
+        "proxy_mass_scale": 1000.0,
+        "video_enabled": false,
+        "isaaclab_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0",
+        "initial_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": -1,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "collision_geometry": {
+          "rigid_convex_hulls": 360448,
+          "rigid_triangle_meshes": 0,
+          "particle_triangle_meshes": 65536
+        },
+        "initial_particle_count": 15335424,
+        "initial_total_particle_mass_kg": 4515.8388671875,
+        "initial_active_fidelity": "particles",
+        "loaded_learning_iteration": 7450,
+        "observation_dimensions": {
+          "policy": 62,
+          "media": 22,
+          "privileged": 2
+        },
+        "actor_observation_dimension": 84,
+        "critic_observation_dimension": 86,
+        "action_dimension": 8,
+        "setup_wall_seconds": 371.9062954899855,
+        "warmup_wall_seconds": 125.33338777898462,
+        "physics_particle_centroids_first_worlds_m": [
+          [
+            226.61280822753906,
+            -224.76132202148438,
+            0.2822909355163574
+          ],
+          [
+            226.8440399169922,
+            -222.53192138671875,
+            0.26040118932724
+          ],
+          [
+            226.7203369140625,
+            -219.8313446044922,
+            0.27414631843566895
+          ],
+          [
+            226.8416290283203,
+            -217.55624389648438,
+            0.05487643554806709
+          ]
+        ],
+        "env_origins_first_worlds_m": [
+          [
+            226.25,
+            -225.0,
+            0.0
+          ],
+          [
+            226.25,
+            -222.5,
+            0.0
+          ],
+          [
+            226.25,
+            -220.0,
+            0.0
+          ],
+          [
+            226.25,
+            -217.5,
+            0.0
+          ]
+        ],
+        "first_worlds_min_centroid_distance_m": 2.241466999053955,
+        "rollout": {
+          "policy_steps": 16,
+          "wall_seconds": 35.20834707602626,
+          "policy_batches_per_second": 0.4544376924440901,
+          "environment_steps_per_second": 14891.014306007944,
+          "completed_episodes": 9114,
+          "successful_episodes": 7275,
+          "spill_terminations": 1486,
+          "particle_out_of_bounds_terminations": 152,
+          "success_rate": 0.7982225148123766
+        },
+        "training": {
+          "iterations": 1,
+          "start_policy_step": 32,
+          "end_policy_step": 128,
+          "start_fidelity": "particles",
+          "end_fidelity": "particles",
+          "environment_steps": 3145728,
+          "wall_seconds": 231.79392123999423,
+          "environment_steps_per_second": 13571.227334917829,
+          "includes_optimizer_logging_and_checkpoint_save": true
+        },
+        "particles_finite": true,
+        "robot_finite": true,
+        "particle_max_displacement_m": 1.5498273372650146,
+        "joint_max_displacement_rad": 5.797111511230469,
+        "final_current_episode_mean_fractions": {
+          "source": 0.9206455945968628,
+          "target": 0.03237549960613251,
+          "spill": 0.004422505386173725,
+          "retained_in_cups": 0.9530210942029953
+        },
+        "final_active_fidelity": "particles",
+        "media_fidelity_curriculum": {
+          "stage": 0.0,
+          "success_rate": 0.0,
+          "last_transition_policy_step": -1.0
+        },
+        "final_particle_count": 15335424,
+        "final_total_particle_mass_kg": 4515.8388671875,
+        "final_particle_radius_m": {
+          "min": 0.0029059431981295347,
+          "max": 0.0029059431981295347
+        },
+        "final_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": 16777216,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "gpu": {
+          "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "total_memory_bytes": 102045712384,
+          "all_processes_used_memory_bytes": 76560859136,
+          "torch_peak_allocated_bytes": 15386424320
+        }
+      }
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1#0",
+      "sha256": "b90e3a1005d3645ce9929f33f969e8698461052b6b3aee718dc10e6e296e5e73",
+      "record": {
+        "mode": "particles2",
+        "hostname": "8b82279-lcedt",
+        "device": "cuda:0",
+        "cuda_visible_devices": "0",
+        "num_envs": 45056,
+        "particles_per_env": 468,
+        "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "seed": 42,
+        "cpu_threads": 1,
+        "torch_matmul_allow_tf32": true,
+        "env_spacing_m": 2.5,
+        "physics_step_s": 0.008333333333333333,
+        "policy_step_s": 0.03333333333333333,
+        "physics_substeps": 2,
+        "media_entry_substeps": 2,
+        "rigid_entry_substeps": 3,
+        "proxy_mass_scale": 1000.0,
+        "video_enabled": false,
+        "isaaclab_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0",
+        "initial_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": -1,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "collision_geometry": {
+          "rigid_convex_hulls": 495616,
+          "rigid_triangle_meshes": 0,
+          "particle_triangle_meshes": 90112
+        },
+        "initial_particle_count": 21086208,
+        "initial_total_particle_mass_kg": 6209.279296875,
+        "initial_active_fidelity": "particles",
+        "loaded_learning_iteration": 7450,
+        "observation_dimensions": {
+          "policy": 62,
+          "media": 22,
+          "privileged": 2
+        },
+        "actor_observation_dimension": 84,
+        "critic_observation_dimension": 86,
+        "action_dimension": 8,
+        "setup_wall_seconds": 567.1028141060087,
+        "warmup_wall_seconds": 73.58753990402329,
+        "physics_particle_centroids_first_worlds_m": [
+          [
+            265.7388916015625,
+            -263.4169616699219,
+            0.4381656050682068
+          ],
+          [
+            265.5137023925781,
+            -261.59637451171875,
+            0.07976703345775604
+          ],
+          [
+            265.4557800292969,
+            -258.66357421875,
+            0.2582437992095947
+          ],
+          [
+            265.45770263671875,
+            -256.1863708496094,
+            0.28019487857818604
+          ]
+        ],
+        "env_origins_first_worlds_m": [
+          [
+            265.0,
+            -263.75,
+            0.0
+          ],
+          [
+            265.0,
+            -261.25,
+            0.0
+          ],
+          [
+            265.0,
+            -258.75,
+            0.0
+          ],
+          [
+            265.0,
+            -256.25,
+            0.0
+          ]
+        ],
+        "first_worlds_min_centroid_distance_m": 1.8691434860229492,
+        "rollout": {
+          "policy_steps": 16,
+          "wall_seconds": 58.32607443298912,
+          "policy_batches_per_second": 0.2743198501792267,
+          "environment_steps_per_second": 12359.755169675238,
+          "completed_episodes": 12856,
+          "successful_episodes": 10073,
+          "spill_terminations": 2322,
+          "particle_out_of_bounds_terminations": 163,
+          "success_rate": 0.7835252022401992
+        },
+        "training": {
+          "iterations": 1,
+          "start_policy_step": 32,
+          "end_policy_step": 128,
+          "start_fidelity": "particles",
+          "end_fidelity": "particles",
+          "environment_steps": 4325376,
+          "wall_seconds": 379.44871332199546,
+          "environment_steps_per_second": 11399.105724017938,
+          "includes_optimizer_logging_and_checkpoint_save": true
+        },
+        "particles_finite": true,
+        "robot_finite": true,
+        "particle_max_displacement_m": 1.6795234680175781,
+        "joint_max_displacement_rad": 5.795709609985352,
+        "final_current_episode_mean_fractions": {
+          "source": 0.9195098280906677,
+          "target": 0.032878413796424866,
+          "spill": 0.0043104481883347034,
+          "retained_in_cups": 0.9523882418870926
+        },
+        "final_active_fidelity": "particles",
+        "media_fidelity_curriculum": {
+          "stage": 0.0,
+          "success_rate": 0.0,
+          "last_transition_policy_step": -1.0
+        },
+        "final_particle_count": 21086208,
+        "final_total_particle_mass_kg": 6209.279296875,
+        "final_particle_radius_m": {
+          "min": 0.0029059431981295347,
+          "max": 0.0029059431981295347
+        },
+        "final_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": 23068672,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "gpu": {
+          "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "total_memory_bytes": 102045712384,
+          "all_processes_used_memory_bytes": 98164342784,
+          "torch_peak_allocated_bytes": 21135074304
+        }
+      }
+    },
+    {
       "case_id": "local-rtx-pro-6000/checkpoint7450/n16384#0",
       "sha256": "8a13bb45a81ec38cf1b5c172376ccda1deb1be67eee336d16a2c54baae511fa8",
       "record": {
@@ -5287,6 +7065,424 @@
       }
     },
     {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/n40960#0",
+      "sha256": "90bc15bc733016b31aef80ac1cce87384e4cc60fb4f67a9eaa6d82af8db5f85b",
+      "record": {
+        "mode": "particles2",
+        "hostname": "8b82279-lcedt",
+        "device": "cuda:0",
+        "cuda_visible_devices": "0",
+        "num_envs": 40960,
+        "particles_per_env": 468,
+        "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "seed": 42,
+        "cpu_threads": 1,
+        "torch_matmul_allow_tf32": true,
+        "env_spacing_m": 2.5,
+        "physics_step_s": 0.008333333333333333,
+        "policy_step_s": 0.03333333333333333,
+        "physics_substeps": 2,
+        "media_entry_substeps": 2,
+        "rigid_entry_substeps": 3,
+        "proxy_mass_scale": 1000.0,
+        "video_enabled": false,
+        "isaaclab_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0",
+        "initial_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": -1,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "collision_geometry": {
+          "rigid_convex_hulls": 450560,
+          "rigid_triangle_meshes": 0,
+          "particle_triangle_meshes": 81920
+        },
+        "initial_particle_count": 19169280,
+        "initial_total_particle_mass_kg": 5644.798828125,
+        "initial_active_fidelity": "particles",
+        "loaded_learning_iteration": 7450,
+        "observation_dimensions": {
+          "policy": 62,
+          "media": 22,
+          "privileged": 2
+        },
+        "actor_observation_dimension": 84,
+        "critic_observation_dimension": 86,
+        "action_dimension": 8,
+        "setup_wall_seconds": 505.55492262900225,
+        "warmup_wall_seconds": 68.38717156701023,
+        "physics_particle_centroids_first_worlds_m": [
+          [
+            252.8950958251953,
+            -251.15545654296875,
+            0.06739334762096405
+          ],
+          [
+            253.21075439453125,
+            -248.77342224121094,
+            0.2476864457130432
+          ],
+          [
+            253.18695068359375,
+            -246.31051635742188,
+            0.058184608817100525
+          ],
+          [
+            253.11843872070312,
+            -243.52664184570312,
+            0.04844345524907112
+          ]
+        ],
+        "env_origins_first_worlds_m": [
+          [
+            252.5,
+            -251.25,
+            0.0
+          ],
+          [
+            252.5,
+            -248.75,
+            0.0
+          ],
+          [
+            252.5,
+            -246.25,
+            0.0
+          ],
+          [
+            252.5,
+            -243.75,
+            0.0
+          ]
+        ],
+        "first_worlds_min_centroid_distance_m": 2.4096126556396484,
+        "rollout": {
+          "policy_steps": 96,
+          "wall_seconds": 312.0689203449874,
+          "policy_batches_per_second": 0.3076243539211578,
+          "environment_steps_per_second": 12600.293536610621,
+          "completed_episodes": 97520,
+          "successful_episodes": 61184,
+          "spill_terminations": 30875,
+          "particle_out_of_bounds_terminations": 2931,
+          "success_rate": 0.6273995077932731
+        },
+        "training": {
+          "iterations": 5,
+          "start_policy_step": 112,
+          "end_policy_step": 592,
+          "start_fidelity": "particles",
+          "end_fidelity": "particles",
+          "environment_steps": 19660800,
+          "wall_seconds": 1688.1919056749903,
+          "environment_steps_per_second": 11646.069344313682,
+          "includes_optimizer_logging_and_checkpoint_save": true
+        },
+        "particles_finite": true,
+        "robot_finite": true,
+        "particle_max_displacement_m": 1.6168904304504395,
+        "joint_max_displacement_rad": 5.795529842376709,
+        "final_current_episode_mean_fractions": {
+          "source": 0.9216437339782715,
+          "target": 0.03359171748161316,
+          "spill": 0.004144235048443079,
+          "retained_in_cups": 0.9552354514598846
+        },
+        "final_active_fidelity": "particles",
+        "media_fidelity_curriculum": {
+          "stage": 0.0,
+          "success_rate": 0.0,
+          "last_transition_policy_step": -1.0
+        },
+        "final_particle_count": 19169280,
+        "final_total_particle_mass_kg": 5644.798828125,
+        "final_particle_radius_m": {
+          "min": 0.0029059431981295347,
+          "max": 0.0029059431981295347
+        },
+        "final_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": 20971520,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "gpu": {
+          "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "total_memory_bytes": 102045712384,
+          "all_processes_used_memory_bytes": 95252774912,
+          "torch_peak_allocated_bytes": 19219698688
+        }
+      }
+    },
+    {
+      "case_id": "local-rtx-pro-6000/checkpoint7450/n45056-retry1#0",
+      "sha256": "703be3d32119ee429798d9c37b79427680295a1b6936d2adbb40259b2cd9970b",
+      "record": {
+        "mode": "particles2",
+        "hostname": "8b82279-lcedt",
+        "device": "cuda:0",
+        "cuda_visible_devices": "0",
+        "num_envs": 45056,
+        "particles_per_env": 468,
+        "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "seed": 42,
+        "cpu_threads": 1,
+        "torch_matmul_allow_tf32": true,
+        "env_spacing_m": 2.5,
+        "physics_step_s": 0.008333333333333333,
+        "policy_step_s": 0.03333333333333333,
+        "physics_substeps": 2,
+        "media_entry_substeps": 2,
+        "rigid_entry_substeps": 3,
+        "proxy_mass_scale": 1000.0,
+        "video_enabled": false,
+        "isaaclab_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+        "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+        "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+        "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04",
+        "checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "warp_version": "1.18.0",
+        "torch_version": "2.11.0+cu130",
+        "rsl_rl_version": "5.5.1",
+        "mujoco_warp_version": "3.15.0",
+        "initial_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": -1,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "collision_geometry": {
+          "rigid_convex_hulls": 495616,
+          "rigid_triangle_meshes": 0,
+          "particle_triangle_meshes": 90112
+        },
+        "initial_particle_count": 21086208,
+        "initial_total_particle_mass_kg": 6209.279296875,
+        "initial_active_fidelity": "particles",
+        "loaded_learning_iteration": 7450,
+        "observation_dimensions": {
+          "policy": 62,
+          "media": 22,
+          "privileged": 2
+        },
+        "actor_observation_dimension": 84,
+        "critic_observation_dimension": 86,
+        "action_dimension": 8,
+        "setup_wall_seconds": 567.8839674960182,
+        "warmup_wall_seconds": 104.71962777199224,
+        "physics_particle_centroids_first_worlds_m": [
+          [
+            265.7387390136719,
+            -263.4169006347656,
+            0.4376457631587982
+          ],
+          [
+            265.51385498046875,
+            -261.59564208984375,
+            0.07851790636777878
+          ],
+          [
+            265.45361328125,
+            -258.66400146484375,
+            0.25726059079170227
+          ],
+          [
+            265.45794677734375,
+            -256.18603515625,
+            0.2802797853946686
+          ]
+        ],
+        "env_origins_first_worlds_m": [
+          [
+            265.0,
+            -263.75,
+            0.0
+          ],
+          [
+            265.0,
+            -261.25,
+            0.0
+          ],
+          [
+            265.0,
+            -258.75,
+            0.0
+          ],
+          [
+            265.0,
+            -256.25,
+            0.0
+          ]
+        ],
+        "first_worlds_min_centroid_distance_m": 1.8699005842208862,
+        "rollout": {
+          "policy_steps": 96,
+          "wall_seconds": 370.967296273011,
+          "policy_batches_per_second": 0.25878291958477495,
+          "environment_steps_per_second": 11659.723224811622,
+          "completed_episodes": 106818,
+          "successful_episodes": 67007,
+          "spill_terminations": 33475,
+          "particle_out_of_bounds_terminations": 3280,
+          "success_rate": 0.6273006422138591
+        },
+        "training": {
+          "iterations": 5,
+          "start_policy_step": 112,
+          "end_policy_step": 592,
+          "start_fidelity": "particles",
+          "end_fidelity": "particles",
+          "environment_steps": 21626880,
+          "wall_seconds": 1991.7418005530199,
+          "environment_steps_per_second": 10858.274899886701,
+          "includes_optimizer_logging_and_checkpoint_save": true
+        },
+        "particles_finite": true,
+        "robot_finite": true,
+        "particle_max_displacement_m": 1.6104722023010254,
+        "joint_max_displacement_rad": 5.796413898468018,
+        "final_current_episode_mean_fractions": {
+          "source": 0.9228228330612183,
+          "target": 0.03195003420114517,
+          "spill": 0.004152809269726276,
+          "retained_in_cups": 0.9547728672623634
+        },
+        "final_active_fidelity": "particles",
+        "media_fidelity_curriculum": {
+          "stage": 0.0,
+          "success_rate": 0.0,
+          "last_transition_policy_step": -1.0
+        },
+        "final_particle_count": 21086208,
+        "final_total_particle_mass_kg": 6209.279296875,
+        "final_particle_radius_m": {
+          "min": 0.0029059431981295347,
+          "max": 0.0029059431981295347
+        },
+        "final_media_solver": {
+          "class_type": "isaaclab_newton.physics.mpm_manager:NewtonMPMManager",
+          "solver_type": "implicit_mpm",
+          "fidelity": "particles",
+          "particle_iterations": 2,
+          "particle_cohesion": null,
+          "particle_friction": null,
+          "max_iterations": 24,
+          "tolerance": 0.0001,
+          "solver": "jacobi",
+          "warmstart_mode": "auto",
+          "warmstart_contact_impulses": false,
+          "collider_velocity_mode": "forward",
+          "voxel_size": 0.015,
+          "grid_type": "sparse",
+          "grid_padding": 0,
+          "max_active_cell_count": 23068672,
+          "max_leaf_node_count": -1,
+          "max_lower_node_count": -1,
+          "max_upper_node_count": -1,
+          "separate_worlds": true,
+          "transfer_scheme": "apic",
+          "integration_scheme": "pic",
+          "critical_fraction": 0.0,
+          "air_drag": 1.0,
+          "collider_normal_from_sdf_gradient": false,
+          "collider_basis": "pic27",
+          "strain_basis": "P0",
+          "velocity_basis": "Q1",
+          "project_outside_colliders": false
+        },
+        "gpu": {
+          "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+          "total_memory_bytes": 102045712384,
+          "all_processes_used_memory_bytes": 101151539200,
+          "torch_peak_allocated_bytes": 21135926272
+        }
+      }
+    },
+    {
       "case_id": "local-rtx-pro-6000/checkpoint7450/n8192-retry1#0",
       "sha256": "4c4e12b2f30954e9ff3225d89c8bc39a98425daac84bab2342846464e3d9bbfb",
       "record": {
@@ -5506,19 +7702,19 @@
     "Largest completed and best measured throughput are separate. No maximum-capacity conclusion is inferred."
   ],
   "category_counts": {
-    "capacity_only_7450": 1,
-    "failed_or_not_completed": 3,
+    "capacity_only_7450": 3,
+    "failed_or_not_completed": 6,
     "historical_checkpoint": 1,
     "interrupted": 3,
-    "primary_7450": 6
+    "primary_7450": 8
   },
   "per_gpu_summary": [
     {
       "gpu_uuid": "GPU-49edf387-6e15-36c0-dca1-749d6d1414e0",
       "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
-      "primary_completed_cases": 3,
-      "largest_completed_primary_num_envs": 16384,
-      "largest_completed_one_iteration_capacity_probe_num_envs": null,
+      "primary_completed_cases": 5,
+      "largest_completed_primary_num_envs": 45056,
+      "largest_completed_one_iteration_capacity_probe_num_envs": 45056,
       "highest_measured_primary_throughput": {
         "case_id": "local-rtx-pro-6000/checkpoint7450/n4096#0",
         "num_envs": 4096,
@@ -5540,7 +7736,7 @@
       "capacity_limit_established": false
     }
   ],
-  "collected_artifact_sha256": "dc41aa490d42bc4f68a2266b089d617533b6a1d2c831fc20f799db6781ad99c7",
+  "collected_artifact_sha256": "7c4f8b7b3ace35219f97e2d5c86e5a5bd854a3ef7eaa1433cdd35c2e6733e04b",
   "publication_script_sha256": "2c67ade79cc93dfa5f1d02b5d9d855b7c1017da334db0f9226ee73fb2ffa56fe",
   "official_7450_mode_comparison": {
     "summary_sha256": "991ff69bfa03697f02cf6d52c274cfa53bd5ba32276825afca427adb44df33b9",
@@ -6662,6 +8858,6 @@
   },
   "verification_artifact": {
     "file": "mpm_franka_pour_ppo_verification.json",
-    "sha256": "274de224737961fc766cdc64949d82a53f71c8729116b91583084a43a52907de"
+    "sha256": "beb3ab2ad1d3814b0b71f821ead7522cda0c9fb102f85239b1cf31c44f192b1b"
   }
 }

@@ -1811,8 +1811,8 @@ GPU, rather than only solver allocations.
 The 8,192-environment particle run advances 3,833,856 particles and ends with
 finite, moving states. MPM fails at that count during initial sparse-grid
 allocation: CUDA error 2, ``out of memory``, followed by ``Failed to create
-volume``. This establishes a tested capacity contrast; 8,192 is the largest
-environment count tested, not its established limit.
+volume``. This establishes a tested capacity contrast; 8,192 was the largest
+environment count in those short inference probes, not its established limit.
 
 Completion alone does not establish a usable training batch. At 4,096 worlds,
 MPM records 11,987 workspace-guard terminations among 15,154 completed episodes
@@ -1944,6 +1944,16 @@ Adam verification described below.
      - 16,653
      - 472.251
      - 37,402
+   * - RTX PRO 6000
+     - 40,960
+     - 11,646
+     - 1,688.192
+     - 90,841
+   * - RTX PRO 6000
+     - 45,056
+     - 10,858
+     - 1,991.742
+     - 96,466
 
 .. figure:: mpm_franka_pour_ppo_scaling.png
    :alt: Official checkpoint 7450 PPO throughput and sampled whole-GPU memory across environment counts on an L40 and RTX PRO 6000.
@@ -1962,7 +1972,8 @@ At the matched 8,192-environment batch, the RTX system delivers 1.82x the
 training throughput. Both runs collect exactly 3,932,160 training transitions.
 At 4,096 environments, the RTX system delivers 1.70x the L40 throughput. The
 L40's largest confirmed batch has 43.6% lower aggregate throughput than its
-4,096-environment batch.
+4,096-environment batch. The RTX system's largest confirmed batch is 47.3%
+slower than its own 4,096-environment batch.
 
 These are aggregate environment transitions: 19,155 transitions/s at 8,192
 environments corresponds to 2.34 vector policy steps/s. The fastest local batch
@@ -2000,16 +2011,26 @@ advancing 10,063,872 particles. The next tested count, 22,528, fails. This gives
 a tested 1,024-environment bracket for these settings rather than an exact
 hardware maximum.
 
-On the RTX PRO 6000, 16,384 environments is the largest completed primary run
-in this report. A larger attempt was interrupted when another workspace
-started using the GPU; it establishes no capacity failure. The local capacity
-ceiling remains unresolved while the remaining tests wait for an idle GPU.
+The RTX PRO 6000 completes the full protocol at 45,056 environments, advancing
+21,086,208 particles. The next tested count, 49,152, completes its first PPO
+rollout but exhausts CUDA memory in ``loss.backward()`` during optimization.
+PyTorch requests another 288 MiB with 254.75 MiB free, and the sampled whole-GPU
+peak reaches 97,064 MiB. No complete PPO iteration is logged; the internal
+minibatch index was not instrumented.
+
+This gives a tested practical bracket of 4,096 environments. The successful
+lower point uses the full five-iteration protocol, while the failing upper
+point uses the shorter one-iteration capacity protocol. These are measured
+bounds for the complete scene and fixed PPO configuration, not an exact
+particle-solver or hardware maximum. No host-memory guard, timeout, or foreign
+GPU computation occurs in this upper failure. Earlier interrupted attempts
+remain excluded from capacity and throughput conclusions.
 
 A 22,528-environment one-iteration probe passes after its shorter inference
 prefix. The full-protocol run at that count completes one PPO iteration
 (2,162,688 transitions), then fails with Warp CUDA out-of-memory during the
 next rollout's graph launch. Its sampled whole-GPU peak is 48,475 MiB. Neither
-the shorter probe nor the first completed update establishes five-iteration
+the shorter probe nor the first completed PPO iteration establishes five-iteration
 training capacity; the allocation history across collection and optimization
 phases matters.
 

@@ -1,6 +1,6 @@
 {
   "study_protocol_sha256": "e5123190aea4c1aa8b48a15682b65e02cce42baf14bf95ed2c6b0cd96685017e",
-  "collected_artifact_sha256": "dc41aa490d42bc4f68a2266b089d617533b6a1d2c831fc20f799db6781ad99c7",
+  "collected_artifact_sha256": "7c4f8b7b3ace35219f97e2d5c86e5a5bd854a3ef7eaa1433cdd35c2e6733e04b",
   "primary_checkpoint_proofs": {
     "horde/checkpoint-verification-7450-max.json": {
       "sha256": "e61870a4ddeeef413552bff969426acbd21a42cb98af6a22728d9a9b5d3a66bb",
@@ -1412,8 +1412,8 @@
         ]
       }
     },
-    "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-checkpoint-proof.json": {
-      "sha256": "7ca9cfeda112dc66f93e0e62bfadd2d5f84e743e470690ffd2dcb926e6b7fada",
+    "local-rtx-pro-6000/checkpoint7450/primary-4096-8192-16384-40960-checkpoint-proof.json": {
+      "sha256": "5fe53f84a2f14aec8a042725885f514419681aed8fe0006654436b2e8c9f2cac",
       "record": {
         "pretrained_checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
         "pretrained_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
@@ -1876,7 +1876,33 @@
                 }
               ]
             },
-            "critic_max_abs_parameter_change_from_reference": 0.024524107575416565
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.012029498815536499,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.024524107575416565,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.024524107575416565,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
           },
           {
             "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n8192-retry1/ppo-scale-particles2-8192-train5/model_7454.pt",
@@ -2335,7 +2361,33 @@
                 }
               ]
             },
-            "critic_max_abs_parameter_change_from_reference": 0.02213592827320099
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.009191572666168213,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.02213592827320099,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.02213592827320099,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
           },
           {
             "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-particles2-16384-train5/model_7454.pt",
@@ -2794,7 +2846,2954 @@
                 }
               ]
             },
-            "critic_max_abs_parameter_change_from_reference": 0.020821988582611084
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.009351350367069244,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.020821988582611084,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.020821988582611084,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          },
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5/model_7454.pt",
+            "sha256": "3f294e49b27be28993dcc89ae0e9e055fa94f581a5ec43b71164a9cd1ab120cc",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.006870850920677185,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009933726862072945
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.009756725281476974
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00923207588493824
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.009250640869140625
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.009080760180950165
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03675028681755066
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03499399870634079
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03389180824160576
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.033841706812381744
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.03346049040555954
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.3643893003463745
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3597602844238281
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.3581044673919678
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.3506452441215515
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.3379758298397064
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0339202880859375
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.034680940210819244
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03396962583065033
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.03324432298541069
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.031745657324790955
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.5696258544921875
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5772156119346619
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.580700695514679
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5878382921218872
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.6022751331329346
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00031509401742368937
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0012926737545058131
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0013437907909974456
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.737517833709717
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.345071315765381
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.941302537918091
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.6335227489471436
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.4263863563537598
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.003892831038683653
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.006224886979907751
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00767163373529911
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0026872914750128984
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.00553260138258338
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -2.0208656787872314
+                },
+                {
+                  "iteration": 7451,
+                  "value": -2.0245468616485596
+                },
+                {
+                  "iteration": 7452,
+                  "value": -2.006516218185425
+                },
+                {
+                  "iteration": 7453,
+                  "value": -1.9984827041625977
+                },
+                {
+                  "iteration": 7454,
+                  "value": -2.009054660797119
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 11837.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 11646.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 11586.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 11572.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 11596.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 328.35845947265625
+                },
+                {
+                  "iteration": 7451,
+                  "value": 336.3294677734375
+                },
+                {
+                  "iteration": 7452,
+                  "value": 338.0626220703125
+                },
+                {
+                  "iteration": 7453,
+                  "value": 338.4608459472656
+                },
+                {
+                  "iteration": 7454,
+                  "value": 337.77789306640625
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 3.816035032272339
+                },
+                {
+                  "iteration": 7451,
+                  "value": 1.3095042705535889
+                },
+                {
+                  "iteration": 7452,
+                  "value": 1.309809684753418
+                },
+                {
+                  "iteration": 7453,
+                  "value": 1.310274600982666
+                },
+                {
+                  "iteration": 7454,
+                  "value": 1.3096537590026855
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.4792520999908447
+                },
+                {
+                  "iteration": 7451,
+                  "value": 2.4192023277282715
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.6592750549316406
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.539219617843628
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.5993027687072754
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 43.31999969482422
+                },
+                {
+                  "iteration": 7451,
+                  "value": 47.65999984741211
+                },
+                {
+                  "iteration": 7452,
+                  "value": 43.400001525878906
+                },
+                {
+                  "iteration": 7453,
+                  "value": 46.970001220703125
+                },
+                {
+                  "iteration": 7454,
+                  "value": 41.459999084472656
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 332,
+                  "value": 2.4792520999908447
+                },
+                {
+                  "iteration": 669,
+                  "value": 2.4192023277282715
+                },
+                {
+                  "iteration": 1009,
+                  "value": 2.6592750549316406
+                },
+                {
+                  "iteration": 1348,
+                  "value": 2.539219617843628
+                },
+                {
+                  "iteration": 1688,
+                  "value": 2.5993027687072754
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 332,
+                  "value": 43.31999969482422
+                },
+                {
+                  "iteration": 669,
+                  "value": 47.65999984741211
+                },
+                {
+                  "iteration": 1009,
+                  "value": 43.400001525878906
+                },
+                {
+                  "iteration": 1348,
+                  "value": 46.970001220703125
+                },
+                {
+                  "iteration": 1688,
+                  "value": 41.459999084472656
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.006870850920677185,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.02679555118083954,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.02679555118083954,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          }
+        ],
+        "cpu_only_cuda_initialized": false
+      }
+    },
+    "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json": {
+      "sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+      "record": {
+        "pretrained_checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/model_7450.pt",
+        "pretrained_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "pretrained_iteration_label": 7450,
+        "continued_checkpoints": [
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n4096/ppo-scale-particles2-4096-train5/model_7454.pt",
+            "sha256": "79fe587d88371ee957703f444b9867eb30ddcb0346e0ad7f271f89ed416b87e3",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.012029498815536499,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.012186686508357525
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.009646098129451275
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0112457275390625
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0111211147159338
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.00871785543859005
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0380045585334301
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03465016931295395
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03357696533203125
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.03850046917796135
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.03528594970703125
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.32572683691978455
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3569386899471283
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.36170706152915955
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.36339569091796875
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.3511912226676941
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0381673201918602
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03747813031077385
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03160858154296875
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0319417342543602
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0315195731818676
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.6023916006088257
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5774917602539062
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.5775019526481628
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5707219839096069
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.587127685546875
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 7.883708167355508e-05
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.00092315673828125
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0020039877854287624
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.6458239555358887
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.3750147819519043
+                },
+                {
+                  "iteration": 7452,
+                  "value": 3.0130136013031006
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.763381004333496
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.571676731109619
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009484338574111462
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.017673488706350327
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.006445080041885376
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.011177180334925652
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.013425067067146301
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -1.9502497911453247
+                },
+                {
+                  "iteration": 7451,
+                  "value": -1.9701756238937378
+                },
+                {
+                  "iteration": 7452,
+                  "value": -1.9855103492736816
+                },
+                {
+                  "iteration": 7453,
+                  "value": -1.9741071462631226
+                },
+                {
+                  "iteration": 7454,
+                  "value": -1.996934413909912
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 20190.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 20812.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 20777.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 20717.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 20737.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 18.64376449584961
+                },
+                {
+                  "iteration": 7451,
+                  "value": 18.76223373413086
+                },
+                {
+                  "iteration": 7452,
+                  "value": 18.794567108154297
+                },
+                {
+                  "iteration": 7453,
+                  "value": 18.84902000427246
+                },
+                {
+                  "iteration": 7454,
+                  "value": 18.83055877685547
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 0.8315567970275879
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.13060235977172852
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.1308586597442627
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.1307997703552246
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.13074207305908203
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.359316110610962
+                },
+                {
+                  "iteration": 7451,
+                  "value": 1.9392263889312744
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.1192476749420166
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.839233875274658
+                },
+                {
+                  "iteration": 7454,
+                  "value": 3.1392929553985596
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 39.779998779296875
+                },
+                {
+                  "iteration": 7451,
+                  "value": 44.81999969482422
+                },
+                {
+                  "iteration": 7452,
+                  "value": 44.9900016784668
+                },
+                {
+                  "iteration": 7453,
+                  "value": 44.939998626708984
+                },
+                {
+                  "iteration": 7454,
+                  "value": 42.02000045776367
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 19,
+                  "value": 2.359316110610962
+                },
+                {
+                  "iteration": 38,
+                  "value": 1.9392263889312744
+                },
+                {
+                  "iteration": 57,
+                  "value": 2.1192476749420166
+                },
+                {
+                  "iteration": 76,
+                  "value": 2.839233875274658
+                },
+                {
+                  "iteration": 95,
+                  "value": 3.1392929553985596
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 19,
+                  "value": 39.779998779296875
+                },
+                {
+                  "iteration": 38,
+                  "value": 44.81999969482422
+                },
+                {
+                  "iteration": 57,
+                  "value": 44.9900016784668
+                },
+                {
+                  "iteration": 76,
+                  "value": 44.939998626708984
+                },
+                {
+                  "iteration": 95,
+                  "value": 42.02000045776367
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.012029498815536499,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.024524107575416565,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.024524107575416565,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          },
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n8192-retry1/ppo-scale-particles2-8192-train5/model_7454.pt",
+            "sha256": "f9d0c88bdfd6f37150e5114eb7c6a3c320dca79e85b4e0afa5922f0023fc7375",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.009191572666168213,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009630839340388775
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.00947443675249815
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.009394328109920025
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.008392333984375
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0076840720139443874
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0408681258559227
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.033847808837890625
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0331166610121727
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0332234725356102
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.031462352722883224
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.3274739682674408
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3509000241756439
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.3590227961540222
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.3461723327636719
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.3407325744628906
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.036546073853969574
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.037876129150390625
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03502146527171135
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0322418212890625
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.032563529908657074
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.5999361872673035
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5842844843864441
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.5792135000228882
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5942955017089844
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.6015726923942566
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0006039937725290656
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0013326009502634406
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0011914571514353156
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.5659735202789307
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.38871693611145
+                },
+                {
+                  "iteration": 7452,
+                  "value": 3.119117259979248
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.7284302711486816
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.5104939937591553
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.010094581171870232
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0087154945358634
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0047301556915044785
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.007369129452854395
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.010039426386356354
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -2.0086617469787598
+                },
+                {
+                  "iteration": 7451,
+                  "value": -2.0236973762512207
+                },
+                {
+                  "iteration": 7452,
+                  "value": -2.0060110092163086
+                },
+                {
+                  "iteration": 7453,
+                  "value": -2.0290169715881348
+                },
+                {
+                  "iteration": 7454,
+                  "value": -2.0195820331573486
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 18931.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 19285.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 19243.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 19212.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 19174.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 40.68415451049805
+                },
+                {
+                  "iteration": 7451,
+                  "value": 40.51654815673828
+                },
+                {
+                  "iteration": 7452,
+                  "value": 40.60665512084961
+                },
+                {
+                  "iteration": 7453,
+                  "value": 40.67234420776367
+                },
+                {
+                  "iteration": 7454,
+                  "value": 40.75079345703125
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 0.8558692932128906
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.26113080978393555
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.26085519790649414
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.26106786727905273
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.2641298770904541
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.419238805770874
+                },
+                {
+                  "iteration": 7451,
+                  "value": 1.9992555379867554
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.839280605316162
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.419245958328247
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.969243049621582
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 42.68000030517578
+                },
+                {
+                  "iteration": 7451,
+                  "value": 44.47999954223633
+                },
+                {
+                  "iteration": 7452,
+                  "value": 42.93000030517578
+                },
+                {
+                  "iteration": 7453,
+                  "value": 44.619998931884766
+                },
+                {
+                  "iteration": 7454,
+                  "value": 46.33000183105469
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 41,
+                  "value": 2.419238805770874
+                },
+                {
+                  "iteration": 82,
+                  "value": 1.9992555379867554
+                },
+                {
+                  "iteration": 123,
+                  "value": 2.839280605316162
+                },
+                {
+                  "iteration": 164,
+                  "value": 2.419245958328247
+                },
+                {
+                  "iteration": 205,
+                  "value": 2.969243049621582
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 41,
+                  "value": 42.68000030517578
+                },
+                {
+                  "iteration": 82,
+                  "value": 44.47999954223633
+                },
+                {
+                  "iteration": 123,
+                  "value": 42.93000030517578
+                },
+                {
+                  "iteration": 164,
+                  "value": 44.619998931884766
+                },
+                {
+                  "iteration": 205,
+                  "value": 46.33000183105469
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.009191572666168213,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.02213592827320099,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.02213592827320099,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          },
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-particles2-16384-train5/model_7454.pt",
+            "sha256": "ecf424a008386527a4aa71265f47d374dfe8d3fb72f5cc3ab21a0d8643573e54",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.009351350367069244,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009609222412109375
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.010567347519099712
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.009764989838004112
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.010323842987418175
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.008790969848632812
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03934669494628906
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03789520263671875
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.035563789308071136
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.034961067140102386
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0348307304084301
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.362201064825058
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3573188781738281
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.3562590479850769
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.3551451563835144
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.34814709424972534
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03236071392893791
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03379567712545395
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03356870263814926
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0346425399184227
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.032861076295375824
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.5696233510971069
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5772374868392944
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.5805257558822632
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5800253748893738
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.5909284353256226
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0003306071157567203
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0014750163536518812
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0011730194091796875
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.830868721008301
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.3142178058624268
+                },
+                {
+                  "iteration": 7452,
+                  "value": 3.024488687515259
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.82894229888916
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.50001859664917
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.00839054025709629
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.018670473247766495
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.005533937830477953
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.005184043198823929
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.001986706629395485
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -2.022909164428711
+                },
+                {
+                  "iteration": 7451,
+                  "value": -2.015162706375122
+                },
+                {
+                  "iteration": 7452,
+                  "value": -2.0180366039276123
+                },
+                {
+                  "iteration": 7453,
+                  "value": -2.0165257453918457
+                },
+                {
+                  "iteration": 7454,
+                  "value": -2.0239310264587402
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 16589.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 16735.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 16623.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 16661.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 16677.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 91.44677734375
+                },
+                {
+                  "iteration": 7451,
+                  "value": 93.45903015136719
+                },
+                {
+                  "iteration": 7452,
+                  "value": 94.09053802490234
+                },
+                {
+                  "iteration": 7453,
+                  "value": 93.87897491455078
+                },
+                {
+                  "iteration": 7454,
+                  "value": 93.7826156616211
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 3.362168788909912
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5258646011352539
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.5269420146942139
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5249464511871338
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.5251688957214355
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.539276123046875
+                },
+                {
+                  "iteration": 7451,
+                  "value": 2.839219093322754
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.369173049926758
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.71921706199646
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.2992775440216064
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 42.88999938964844
+                },
+                {
+                  "iteration": 7451,
+                  "value": 47.27000045776367
+                },
+                {
+                  "iteration": 7452,
+                  "value": 48.869998931884766
+                },
+                {
+                  "iteration": 7453,
+                  "value": 46.220001220703125
+                },
+                {
+                  "iteration": 7454,
+                  "value": 43.0099983215332
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 94,
+                  "value": 2.539276123046875
+                },
+                {
+                  "iteration": 188,
+                  "value": 2.839219093322754
+                },
+                {
+                  "iteration": 283,
+                  "value": 2.369173049926758
+                },
+                {
+                  "iteration": 377,
+                  "value": 2.71921706199646
+                },
+                {
+                  "iteration": 472,
+                  "value": 2.2992775440216064
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 94,
+                  "value": 42.88999938964844
+                },
+                {
+                  "iteration": 188,
+                  "value": 47.27000045776367
+                },
+                {
+                  "iteration": 283,
+                  "value": 48.869998931884766
+                },
+                {
+                  "iteration": 377,
+                  "value": 46.220001220703125
+                },
+                {
+                  "iteration": 472,
+                  "value": 43.0099983215332
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.009351350367069244,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.020821988582611084,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.020821988582611084,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          },
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5/model_7454.pt",
+            "sha256": "3f294e49b27be28993dcc89ae0e9e055fa94f581a5ec43b71164a9cd1ab120cc",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.006870850920677185,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009933726862072945
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.009756725281476974
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00923207588493824
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.009250640869140625
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.009080760180950165
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03675028681755066
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03499399870634079
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03389180824160576
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.033841706812381744
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.03346049040555954
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.3643893003463745
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3597602844238281
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.3581044673919678
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.3506452441215515
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.3379758298397064
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0339202880859375
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.034680940210819244
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03396962583065033
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.03324432298541069
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.031745657324790955
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.5696258544921875
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5772156119346619
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.580700695514679
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5878382921218872
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.6022751331329346
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00031509401742368937
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0012926737545058131
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0013437907909974456
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.737517833709717
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.345071315765381
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.941302537918091
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.6335227489471436
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.4263863563537598
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.003892831038683653
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.006224886979907751
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.00767163373529911
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0026872914750128984
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.00553260138258338
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -2.0208656787872314
+                },
+                {
+                  "iteration": 7451,
+                  "value": -2.0245468616485596
+                },
+                {
+                  "iteration": 7452,
+                  "value": -2.006516218185425
+                },
+                {
+                  "iteration": 7453,
+                  "value": -1.9984827041625977
+                },
+                {
+                  "iteration": 7454,
+                  "value": -2.009054660797119
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 11837.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 11646.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 11586.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 11572.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 11596.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 328.35845947265625
+                },
+                {
+                  "iteration": 7451,
+                  "value": 336.3294677734375
+                },
+                {
+                  "iteration": 7452,
+                  "value": 338.0626220703125
+                },
+                {
+                  "iteration": 7453,
+                  "value": 338.4608459472656
+                },
+                {
+                  "iteration": 7454,
+                  "value": 337.77789306640625
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 3.816035032272339
+                },
+                {
+                  "iteration": 7451,
+                  "value": 1.3095042705535889
+                },
+                {
+                  "iteration": 7452,
+                  "value": 1.309809684753418
+                },
+                {
+                  "iteration": 7453,
+                  "value": 1.310274600982666
+                },
+                {
+                  "iteration": 7454,
+                  "value": 1.3096537590026855
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.4792520999908447
+                },
+                {
+                  "iteration": 7451,
+                  "value": 2.4192023277282715
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.6592750549316406
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.539219617843628
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.5993027687072754
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 43.31999969482422
+                },
+                {
+                  "iteration": 7451,
+                  "value": 47.65999984741211
+                },
+                {
+                  "iteration": 7452,
+                  "value": 43.400001525878906
+                },
+                {
+                  "iteration": 7453,
+                  "value": 46.970001220703125
+                },
+                {
+                  "iteration": 7454,
+                  "value": 41.459999084472656
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 332,
+                  "value": 2.4792520999908447
+                },
+                {
+                  "iteration": 669,
+                  "value": 2.4192023277282715
+                },
+                {
+                  "iteration": 1009,
+                  "value": 2.6592750549316406
+                },
+                {
+                  "iteration": 1348,
+                  "value": 2.539219617843628
+                },
+                {
+                  "iteration": 1688,
+                  "value": 2.5993027687072754
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 332,
+                  "value": 43.31999969482422
+                },
+                {
+                  "iteration": 669,
+                  "value": 47.65999984741211
+                },
+                {
+                  "iteration": 1009,
+                  "value": 43.400001525878906
+                },
+                {
+                  "iteration": 1348,
+                  "value": 46.970001220703125
+                },
+                {
+                  "iteration": 1688,
+                  "value": 41.459999084472656
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.006870850920677185,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.02679555118083954,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.02679555118083954,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
+          },
+          {
+            "checkpoint": "/home/maximiliank/Work/mpm-fidelity-results/2026-10-16/ppo-scale/local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-particles2-45056-train5/model_7454.pt",
+            "sha256": "5f4c0d06627be7f280b629e1882386df84c0856e2677f70e8add68ff0ceb6186",
+            "saved_iteration_label": 7454,
+            "actor_max_abs_parameter_change_from_reference": 0.005079157650470734,
+            "actor_tensors_finite": true,
+            "critic_tensors_finite": true,
+            "optimizer_tensors_finite": true,
+            "optimizer_state_count": 20,
+            "optimizer_step_increment_min": 100.0,
+            "optimizer_step_increment_max": 100.0,
+            "requested_ppo_iterations": 5,
+            "optimizer_updates_per_ppo_iteration": 20,
+            "ppo_losses_finite": true,
+            "ppo_loss_records_per_tag": 5,
+            "tensorboard_scalars": {
+              "Episode_Termination/failure": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/extreme_rigid_state": [
+                {
+                  "iteration": 7450,
+                  "value": 0.009282199665904045
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.009423920884728432
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.009785739704966545
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.009502526372671127
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.009260698221623898
+                }
+              ],
+              "Episode_Termination/source_receiver_overlap": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03778354078531265
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03519809991121292
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.03390364348888397
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.03347131237387657
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.03311411663889885
+                }
+              ],
+              "Episode_Termination/lost_grasp": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/spill": [
+                {
+                  "iteration": 7450,
+                  "value": 0.36610138416290283
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.3642672896385193
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.3598855137825012
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.3503517508506775
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.34334081411361694
+                }
+              ],
+              "Episode_Termination/particle_out_of_bounds": [
+                {
+                  "iteration": 7450,
+                  "value": 0.03369464725255966
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.03395728021860123
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.034532491117715836
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.034598611295223236
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.034290432929992676
+                }
+              ],
+              "Episode_Termination/success": [
+                {
+                  "iteration": 7450,
+                  "value": 0.5671428442001343
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.5727814435958862
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.5780186653137207
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.5877372026443481
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.5949723720550537
+                }
+              ],
+              "Episode_Termination/learning_progress_context": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0
+                }
+              ],
+              "Episode_Termination/time_out": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0003132675774395466
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0011268386151641607
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0017101404955610633
+                }
+              ],
+              "Loss/value": [
+                {
+                  "iteration": 7450,
+                  "value": 3.7437007427215576
+                },
+                {
+                  "iteration": 7451,
+                  "value": 3.372096300125122
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.9465816020965576
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.8143789768218994
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.505141019821167
+                }
+              ],
+              "Loss/surrogate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.004141434095799923
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.009204192087054253
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.01590557023882866
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.002006352413445711
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.00547453761100769
+                }
+              ],
+              "Loss/entropy": [
+                {
+                  "iteration": 7450,
+                  "value": -2.0282068252563477
+                },
+                {
+                  "iteration": 7451,
+                  "value": -2.0036253929138184
+                },
+                {
+                  "iteration": 7452,
+                  "value": -2.0106866359710693
+                },
+                {
+                  "iteration": 7453,
+                  "value": -2.0128254890441895
+                },
+                {
+                  "iteration": 7454,
+                  "value": -2.0145413875579834
+                }
+              ],
+              "Loss/learning_rate": [
+                {
+                  "iteration": 7450,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7451,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7452,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7453,
+                  "value": 0.0001500000071246177
+                },
+                {
+                  "iteration": 7454,
+                  "value": 0.0001500000071246177
+                }
+              ],
+              "Perf/total_fps": [
+                {
+                  "iteration": 7450,
+                  "value": 11035.0
+                },
+                {
+                  "iteration": 7451,
+                  "value": 10846.0
+                },
+                {
+                  "iteration": 7452,
+                  "value": 10804.0
+                },
+                {
+                  "iteration": 7453,
+                  "value": 10810.0
+                },
+                {
+                  "iteration": 7454,
+                  "value": 10801.0
+                }
+              ],
+              "Perf/collection_time": [
+                {
+                  "iteration": 7450,
+                  "value": 389.546875
+                },
+                {
+                  "iteration": 7451,
+                  "value": 397.3348388671875
+                },
+                {
+                  "iteration": 7452,
+                  "value": 398.87725830078125
+                },
+                {
+                  "iteration": 7453,
+                  "value": 398.6633605957031
+                },
+                {
+                  "iteration": 7454,
+                  "value": 398.9977722167969
+                }
+              ],
+              "Perf/learning_time": [
+                {
+                  "iteration": 7450,
+                  "value": 2.412956953048706
+                },
+                {
+                  "iteration": 7451,
+                  "value": 1.4413864612579346
+                },
+                {
+                  "iteration": 7452,
+                  "value": 1.4420242309570312
+                },
+                {
+                  "iteration": 7453,
+                  "value": 1.4438021183013916
+                },
+                {
+                  "iteration": 7454,
+                  "value": 1.4436697959899902
+                }
+              ],
+              "Train/mean_reward": [
+                {
+                  "iteration": 7450,
+                  "value": 2.299215316772461
+                },
+                {
+                  "iteration": 7451,
+                  "value": 2.779265880584717
+                },
+                {
+                  "iteration": 7452,
+                  "value": 2.7792623043060303
+                },
+                {
+                  "iteration": 7453,
+                  "value": 2.4192254543304443
+                },
+                {
+                  "iteration": 7454,
+                  "value": 2.6593000888824463
+                }
+              ],
+              "Train/mean_episode_length": [
+                {
+                  "iteration": 7450,
+                  "value": 46.33000183105469
+                },
+                {
+                  "iteration": 7451,
+                  "value": 43.45000076293945
+                },
+                {
+                  "iteration": 7452,
+                  "value": 45.380001068115234
+                },
+                {
+                  "iteration": 7453,
+                  "value": 46.36000061035156
+                },
+                {
+                  "iteration": 7454,
+                  "value": 40.779998779296875
+                }
+              ],
+              "Train/mean_reward/time": [
+                {
+                  "iteration": 391,
+                  "value": 2.299215316772461
+                },
+                {
+                  "iteration": 790,
+                  "value": 2.779265880584717
+                },
+                {
+                  "iteration": 1191,
+                  "value": 2.7792623043060303
+                },
+                {
+                  "iteration": 1591,
+                  "value": 2.4192254543304443
+                },
+                {
+                  "iteration": 1991,
+                  "value": 2.6593000888824463
+                }
+              ],
+              "Train/mean_episode_length/time": [
+                {
+                  "iteration": 391,
+                  "value": 46.33000183105469
+                },
+                {
+                  "iteration": 790,
+                  "value": 43.45000076293945
+                },
+                {
+                  "iteration": 1191,
+                  "value": 45.380001068115234
+                },
+                {
+                  "iteration": 1591,
+                  "value": 46.36000061035156
+                },
+                {
+                  "iteration": 1991,
+                  "value": 40.779998779296875
+                }
+              ]
+            },
+            "actor_network_weight_bias_max_abs_change_from_reference": 0.005079157650470734,
+            "actor_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ],
+            "critic_max_abs_parameter_change_from_reference": 0.02449357509613037,
+            "critic_network_weight_bias_max_abs_change_from_reference": 0.02449357509613037,
+            "critic_network_weight_bias_keys": [
+              "mlp.0.weight",
+              "mlp.0.bias",
+              "mlp.2.weight",
+              "mlp.2.bias",
+              "mlp.4.weight",
+              "mlp.4.bias",
+              "mlp.6.weight",
+              "mlp.6.bias",
+              "mlp.8.weight",
+              "mlp.8.bias"
+            ]
           }
         ],
         "cpu_only_cuda_initialized": false
@@ -4539,6 +7538,732 @@
           "RSL learning phase includesGAE and its timers lack explicitCUDA boundary synchronization.",
           "No task-quality/convergence or trajectory-equivalence conclusion from final finiteness/finite losses; preceding inference counters are not training quality.",
           "Whole-device memory is sampled1Hz and includes desktop; RSS can double-count shared pages."
+        ]
+      }
+    },
+    "independent-local-max-7450-audit.json": {
+      "sha256": "40bab1af17bbc610019cbc8f3e69b0faf1581ed241aecb2350fcc7260af04ab1",
+      "record": {
+        "assessment": "PASS: final local primary runs, capacity-only probes, upper GPU-memory failure and interruption exclusions independently checked using stdlib and existing CPU proofs.",
+        "checked_utc": "2026-10-16T21:00:50.699772+00:00",
+        "audit_imported_Torch_or_initialized_CUDA": false,
+        "audit_script_sha256": "156e879601620deccd48e4410215a9fdf908fcdb08a32a54b1fe1d163904ddc0",
+        "timing_and_proof_release": {
+          "all_owned_GPU_timings_and_CPU_proofs_finished": true,
+          "source": "Owner explicit release and local-capacity-final-summary.json",
+          "owner_reports_only_preserved_desktop_remaining": true,
+          "post_suite_compute_query": "7917, /usr/libexec/gnome-remote-desktop-daemon, 733\n",
+          "independent_live_GPU_query_performed": false
+        },
+        "reference_iteration": 7450,
+        "reference_checkpoint_sha256": "52cbab93a55a8d153844ba93ad496c69838e1bf1082b4c4f4fc4bba43e3a3643",
+        "actor_critic_action_dimensions": [
+          84,
+          86,
+          8
+        ],
+        "primary_protocol": {
+          "warmup_steps": 16,
+          "inference_steps": 96,
+          "ppo_iterations": 5,
+          "steps_per_env_per_ppo_iteration": 96,
+          "adam_updates_per_ppo_iteration": 20,
+          "seed": 42,
+          "cpu_threads": 1,
+          "adaptive_reset_sampler": true
+        },
+        "capacity_probe_protocol": {
+          "warmup_steps": 16,
+          "inference_steps": 16,
+          "ppo_iterations": 1,
+          "steps_per_env_per_ppo_iteration": 96,
+          "adam_updates_per_ppo_iteration": 20,
+          "primary_throughput_comparable": false
+        },
+        "source_provenance": {
+          "file": "local-rtx-pro-6000/checkpoint7450/runtime-provenance.json",
+          "sha256": "f552b21c82a0da2d0bce2229cfb54c5c47c34348984d72d25d7fcbfe818e33c4",
+          "runtime_newton_src_sha256": "a2e9ed0b079d6e028a8c051aa847ce7053f647a83c9226c86d286100d9b967db",
+          "runtime_isaac_source_sha256": "ee78e326de5aca2d97d99e31117a60cc26e5fb4689c0d38ad39f87fa65d3f6d7",
+          "note": "Numerical Python fingerprints are unchanged; recorded Git heads can differ after authorized docs-only pushes between cases."
+        },
+        "owner_summary": {
+          "file": "local-rtx-pro-6000/checkpoint7450/local-capacity-final-summary.json",
+          "sha256": "2c09660292cbfc14fe21fd3377d5752807905d52d089655564064fa82172ba3f"
+        },
+        "primary_checkpoint_proof_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+        "capacity_checkpoint_proof_sha256": "47a3b73c2b3e18e9a22287d2441d209c492e44f7ef994e366aba86be67a4798f",
+        "CPU_proofs_report_CUDA_initialized": false,
+        "primary_cases": [
+          {
+            "num_envs": 4096,
+            "role": "primary_full5",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/n4096/ppo-scale-particles2-4096-train5.json",
+            "raw_sha256": "439a1417868e8cad7198269a43d9a146937d9920203373e1dcec15e31dd94c9b",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/n4096/ppo-scale-manifest.json",
+            "manifest_sha256": "1412aa726d520ba09692e65899838f988110c9adbb9c158b8fb63e7fa3949dab",
+            "log_sha256": "bd6593053f872265c134669ed2dd6ad502aa3e4a6bea33f7b072f9573a638588",
+            "training": {
+              "iterations": 5,
+              "start_policy_step": 112,
+              "end_policy_step": 592,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 1966080,
+              "wall_seconds": 95.36880291500711,
+              "environment_steps_per_second": 20615.546592864073,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 5.033092429898455,
+            "particle_count": 1916928,
+            "total_particle_mass_kg": 564.479736328125,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "012a30f5657220a488920ba09d398154696a9155c00c4538faa10e2f709d3fcf",
+            "monitor_samples": 161,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 11108.0,
+            "sampled_peak_owned_tree_RSS_GiB": 6.833362579345703,
+            "sampled_min_host_available_GiB": 102.68996810913086,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+              "file_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/n4096/ppo-scale-particles2-4096-train5/model_7454.pt",
+              "saved_checkpoint_sha256": "79fe587d88371ee957703f444b9867eb30ddcb0346e0ad7f271f89ed416b87e3",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.012029498815536499,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.024524107575416565,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 100,
+              "Adam_step_increment_max": 100,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 5
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                18.64376449584961,
+                18.76223373413086,
+                18.794567108154297,
+                18.84902000427246,
+                18.83055877685547
+              ],
+              "learning_including_GAE_seconds": [
+                0.8315567970275879,
+                0.13060235977172852,
+                0.1308586597442627,
+                0.1307997703552246,
+                0.13074207305908203
+              ],
+              "collection_total_seconds": 93.8801441192627,
+              "learning_total_seconds": 1.3545596599578857,
+              "learning_fraction_of_outer_training_wall": 0.014203383271624709,
+              "outer_wall_minus_phases_seconds": 0.13409913578652777,
+              "phase_based_SPS": [
+                20190.47563255415,
+                20812.96836777752,
+                20777.12833636619,
+                20717.583447533736,
+                20737.81767993898
+              ],
+              "first_phase_SPS": 20190.47563255415,
+              "last_phase_SPS": 20737.81767993898
+            }
+          },
+          {
+            "num_envs": 8192,
+            "role": "primary_full5",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/n8192-retry1/ppo-scale-particles2-8192-train5.json",
+            "raw_sha256": "4c4e12b2f30954e9ff3225d89c8bc39a98425daac84bab2342846464e3d9bbfb",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/n8192-retry1/ppo-scale-manifest.json",
+            "manifest_sha256": "3230b8b3dca77bd0eae60a23d12356ce4ce41f2f752a4e1d9f25db2037768fc4",
+            "log_sha256": "c5da1cf48e686d43e5f692f30eb8f3a9605f6bffc0c5e2d5224198c5c514d239",
+            "training": {
+              "iterations": 5,
+              "start_policy_step": 112,
+              "end_policy_step": 592,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 3932160,
+              "wall_seconds": 205.27782362501603,
+              "environment_steps_per_second": 19155.308306380593,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 2.338294470993725,
+            "particle_count": 3833856,
+            "total_particle_mass_kg": 1128.95947265625,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "a024850146bb06bc1740d4500134f6e519eebb76cd0858cc1ab9b2c968da940c",
+            "monitor_samples": 367,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 19884.0,
+            "sampled_peak_owned_tree_RSS_GiB": 13.74868392944336,
+            "sampled_min_host_available_GiB": 95.50663375854492,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+              "file_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/n8192-retry1/ppo-scale-particles2-8192-train5/model_7454.pt",
+              "saved_checkpoint_sha256": "f9d0c88bdfd6f37150e5114eb7c6a3c320dca79e85b4e0afa5922f0023fc7375",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.009191572666168213,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.02213592827320099,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 100,
+              "Adam_step_increment_max": 100,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 5
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                40.68415451049805,
+                40.51654815673828,
+                40.60665512084961,
+                40.67234420776367,
+                40.75079345703125
+              ],
+              "learning_including_GAE_seconds": [
+                0.8558692932128906,
+                0.26113080978393555,
+                0.26085519790649414,
+                0.26106786727905273,
+                0.2641298770904541
+              ],
+              "collection_total_seconds": 203.23049545288086,
+              "learning_total_seconds": 1.9030530452728271,
+              "learning_fraction_of_outer_training_wall": 0.009270621695352546,
+              "outer_wall_minus_phases_seconds": 0.14427512686233968,
+              "phase_based_SPS": [
+                18931.910191388597,
+                19285.845097894056,
+                19243.45265630404,
+                19212.471185110193,
+                19174.28916283602
+              ],
+              "first_phase_SPS": 18931.910191388597,
+              "last_phase_SPS": 19174.28916283602
+            }
+          },
+          {
+            "num_envs": 16384,
+            "role": "primary_full5",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-particles2-16384-train5.json",
+            "raw_sha256": "8a13bb45a81ec38cf1b5c172376ccda1deb1be67eee336d16a2c54baae511fa8",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-manifest.json",
+            "manifest_sha256": "bf0c67402d8d1c0123bcdfbe95ff32ac82b4307bb69e69379dcfa2f35da0404e",
+            "log_sha256": "1c53010c6cdd69cb5b956a9ea4295c14215dc3b88fb92786d0995ffd763a8120",
+            "training": {
+              "iterations": 5,
+              "start_policy_step": 112,
+              "end_policy_step": 592,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 7864320,
+              "wall_seconds": 472.2509072009998,
+              "environment_steps_per_second": 16652.84254637288,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 1.0164088468245167,
+            "particle_count": 7667712,
+            "total_particle_mass_kg": 2257.919189453125,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "28465cc84baa2d2f87007a720d3eb53ae2c86d8932919de8d8feb00bcb4247d7",
+            "monitor_samples": 739,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 37402.0,
+            "sampled_peak_owned_tree_RSS_GiB": 24.902099609375,
+            "sampled_min_host_available_GiB": 85.1292610168457,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "90ab0d447f490cfa0f2c69373eac79c26042e0c2",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+              "file_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/n16384/ppo-scale-particles2-16384-train5/model_7454.pt",
+              "saved_checkpoint_sha256": "ecf424a008386527a4aa71265f47d374dfe8d3fb72f5cc3ab21a0d8643573e54",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.009351350367069244,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.020821988582611084,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 100,
+              "Adam_step_increment_max": 100,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 5
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                91.44677734375,
+                93.45903015136719,
+                94.09053802490234,
+                93.87897491455078,
+                93.7826156616211
+              ],
+              "learning_including_GAE_seconds": [
+                3.362168788909912,
+                0.5258646011352539,
+                0.5269420146942139,
+                0.5249464511871338,
+                0.5251688957214355
+              ],
+              "collection_total_seconds": 466.6579360961914,
+              "learning_total_seconds": 5.465090751647949,
+              "learning_fraction_of_outer_training_wall": 0.011572430393070463,
+              "outer_wall_minus_phases_seconds": 0.12788035316043533,
+              "phase_based_SPS": [
+                16589.82684818788,
+                16735.285006616672,
+                16623.397699259913,
+                16661.00281900833,
+                16677.98694861337
+              ],
+              "first_phase_SPS": 16589.82684818788,
+              "last_phase_SPS": 16677.98694861337
+            }
+          },
+          {
+            "num_envs": 40960,
+            "role": "primary_full5",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5.json",
+            "raw_sha256": "90bc15bc733016b31aef80ac1cce87384e4cc60fb4f67a9eaa6d82af8db5f85b",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-manifest.json",
+            "manifest_sha256": "e81f6e7610bff092ccb1a0be1146f5c9df93ab6f71519d3663efd7aeb99656d7",
+            "log_sha256": "7290dafaf67705933f4003b48cf7f1673ab61e6caac7d23e60d55fb81b6364c9",
+            "training": {
+              "iterations": 5,
+              "start_policy_step": 112,
+              "end_policy_step": 592,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 19660800,
+              "wall_seconds": 1688.1919056749903,
+              "environment_steps_per_second": 11646.069344313682,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 0.28432786485140826,
+            "particle_count": 19169280,
+            "total_particle_mass_kg": 5644.798828125,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "4b451fe57a4be055a4fdc5c3db57a6a33e310b9d03fa7a7dcb7418cae2e7dad3",
+            "monitor_samples": 2595,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 90841.0,
+            "sampled_peak_owned_tree_RSS_GiB": 58.568782806396484,
+            "sampled_min_host_available_GiB": 50.82328414916992,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+              "file_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/n40960/ppo-scale-particles2-40960-train5/model_7454.pt",
+              "saved_checkpoint_sha256": "3f294e49b27be28993dcc89ae0e9e055fa94f581a5ec43b71164a9cd1ab120cc",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.006870850920677185,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.02679555118083954,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 100,
+              "Adam_step_increment_max": 100,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 5
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                328.35845947265625,
+                336.3294677734375,
+                338.0626220703125,
+                338.4608459472656,
+                337.77789306640625
+              ],
+              "learning_including_GAE_seconds": [
+                3.816035032272339,
+                1.3095042705535889,
+                1.309809684753418,
+                1.310274600982666,
+                1.3096537590026855
+              ],
+              "collection_total_seconds": 1678.9892883300781,
+              "learning_total_seconds": 9.055277347564697,
+              "learning_fraction_of_outer_training_wall": 0.0053638909872299875,
+              "outer_wall_minus_phases_seconds": 0.1473399973474443,
+              "phase_based_SPS": [
+                11837.633728804116,
+                11646.048962285306,
+                11586.562820276293,
+                11572.967101074219,
+                11596.297289043794
+              ],
+              "first_phase_SPS": 11837.633728804116,
+              "last_phase_SPS": 11596.297289043794
+            }
+          },
+          {
+            "num_envs": 45056,
+            "role": "primary_full5",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-particles2-45056-train5.json",
+            "raw_sha256": "703be3d32119ee429798d9c37b79427680295a1b6936d2adbb40259b2cd9970b",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-manifest.json",
+            "manifest_sha256": "2bec6992019fd6eb4a44fdb8c3902d4727dad6a399b5090f9227b4424ab3fe80",
+            "log_sha256": "693b1a6ecb24267fc58f5698a87f316f60ebbe8b4867c8677f838f8781c261b2",
+            "training": {
+              "iterations": 5,
+              "start_policy_step": 112,
+              "end_policy_step": 592,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 21626880,
+              "wall_seconds": 1991.7418005530199,
+              "environment_steps_per_second": 10858.274899886701,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 0.24099509277092288,
+            "particle_count": 21086208,
+            "total_particle_mass_kg": 6209.279296875,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "225ce7ad5ed40c3ec5201500e06e8a925913dd86f8a9f74a05c8a666df574116",
+            "monitor_samples": 3056,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 96466.0,
+            "sampled_peak_owned_tree_RSS_GiB": 62.889122009277344,
+            "sampled_min_host_available_GiB": 46.23971176147461,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/primary-final-checkpoint-proof.json",
+              "file_sha256": "ed967afd45cf947f37eda3a06c560dd024ee11109cd928432981e292274f10a9",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/n45056-retry1/ppo-scale-particles2-45056-train5/model_7454.pt",
+              "saved_checkpoint_sha256": "5f4c0d06627be7f280b629e1882386df84c0856e2677f70e8add68ff0ceb6186",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.005079157650470734,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.02449357509613037,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 100,
+              "Adam_step_increment_max": 100,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 5
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                389.546875,
+                397.3348388671875,
+                398.87725830078125,
+                398.6633605957031,
+                398.9977722167969
+              ],
+              "learning_including_GAE_seconds": [
+                2.412956953048706,
+                1.4413864612579346,
+                1.4420242309570312,
+                1.4438021183013916,
+                1.4436697959899902
+              ],
+              "collection_total_seconds": 1983.4201049804688,
+              "learning_total_seconds": 8.183839559555054,
+              "learning_fraction_of_outer_training_wall": 0.004108885778911081,
+              "outer_wall_minus_phases_seconds": 0.13785601299605332,
+              "phase_based_SPS": [
+                11035.25322594311,
+                10846.624561024108,
+                10804.81552785825,
+                10810.543781971148,
+                10801.519388849574
+              ],
+              "first_phase_SPS": 11035.25322594311,
+              "last_phase_SPS": 10801.519388849574
+            }
+          }
+        ],
+        "capacity_only_passes": [
+          {
+            "num_envs": 32768,
+            "role": "capacity_only_one_PPO_iteration",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-particles2-32768-train1.json",
+            "raw_sha256": "a545cd21eb88296e20bc159f1bb06dd74830cefc6e389e91731516986c444005",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-manifest.json",
+            "manifest_sha256": "7c89b746aa3ac7727a99c081d21a0d4ace29dbba6a9d4db7a458f60914d262a5",
+            "log_sha256": "7c6f2b7d911848cc35c25e7cc71a4d45353ca2555e8ac0021392afb8e1f53be1",
+            "training": {
+              "iterations": 1,
+              "start_policy_step": 32,
+              "end_policy_step": 128,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 3145728,
+              "wall_seconds": 231.79392123999423,
+              "environment_steps_per_second": 13571.227334917829,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 0.4141609904454904,
+            "particle_count": 15335424,
+            "total_particle_mass_kg": 4515.8388671875,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "6652ee626ed4c9f634cc05606df5bc8da0a7e9d31906c1b765bd9526ca37e30c",
+            "monitor_samples": 782,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 73015.0,
+            "sampled_peak_owned_tree_RSS_GiB": 48.58893585205078,
+            "sampled_min_host_available_GiB": 60.59798812866211,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/capacity-32768-45056-checkpoint-proof.json",
+              "file_sha256": "47a3b73c2b3e18e9a22287d2441d209c492e44f7ef994e366aba86be67a4798f",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry2/ppo-scale-particles2-32768-train1/model_7450.pt",
+              "saved_checkpoint_sha256": "bae771fa7a2a47cebfcf07de888beef529912c56c922a5b9bd70d8c668b5764d",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.0013087689876556396,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.004233952611684799,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 20,
+              "Adam_step_increment_max": 20,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 1
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                229.48147583007812
+              ],
+              "learning_including_GAE_seconds": [
+                2.233813524246216
+              ],
+              "collection_total_seconds": 229.48147583007812,
+              "learning_total_seconds": 2.233813524246216,
+              "learning_fraction_of_outer_training_wall": 0.009637066892420252,
+              "outer_wall_minus_phases_seconds": 0.07863188566989265,
+              "phase_based_SPS": [
+                13575.832690046413
+              ],
+              "first_phase_SPS": 13575.832690046413,
+              "last_phase_SPS": 13575.832690046413
+            }
+          },
+          {
+            "num_envs": 45056,
+            "role": "capacity_only_one_PPO_iteration",
+            "raw_report": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-particles2-45056-train1.json",
+            "raw_sha256": "b90e3a1005d3645ce9929f33f969e8698461052b6b3aee718dc10e6e296e5e73",
+            "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-manifest.json",
+            "manifest_sha256": "d11ca26f09d391050310b896791d50ba0a9435ba0e4cd40c7de53de0ef6f7850",
+            "log_sha256": "90edbcab65b678dc591b57a160bbb63598428360562b9483669493b3094f63d4",
+            "training": {
+              "iterations": 1,
+              "start_policy_step": 32,
+              "end_policy_step": 128,
+              "start_fidelity": "particles",
+              "end_fidelity": "particles",
+              "environment_steps": 4325376,
+              "wall_seconds": 379.44871332199546,
+              "environment_steps_per_second": 11399.105724017938,
+              "includes_optimizer_logging_and_checkpoint_save": true
+            },
+            "vector_policy_batches_per_second": 0.252998617809347,
+            "particle_count": 21086208,
+            "total_particle_mass_kg": 6209.279296875,
+            "count_and_mass_preserved_within_run": true,
+            "configured_final_uniform_radius_m": 0.0029059431981295347,
+            "final_particle_and_robot_states_finite_and_moving": true,
+            "timing_eligible_under_recorded_criteria": true,
+            "module_loads_or_compiles_after_Timing_marker": 0,
+            "samples_sha256": "84c7ecb7e9760f99b8ff2825723b38c2764a56eb0c34e7c365f6b7ab3c08306c",
+            "monitor_samples": 1100,
+            "foreign_compute_and_GPU_query_failures": 0,
+            "sampled_peak_whole_GPU_MiB": 93617.0,
+            "sampled_peak_owned_tree_RSS_GiB": 64.01530075073242,
+            "sampled_min_host_available_GiB": 45.41380310058594,
+            "source_hashes": {
+              "workflow_sha256": "1bb373c34da3531dc96ac5aa2ab488ba66f7c2e6532ec83c66ce679b7b16e0df",
+              "isaaclab_python_sha256": "552d0a47e50e175465a65f8ea3cecf4fcf14b053589f4a52326fd9c97215c106",
+              "newton_python_sha256": "888235543bfd7ae583252d204a6c49a1aa27822014e3df7557783f5fae9a0f04"
+            },
+            "recorded_isaaclab_Git_commit": "7f93ee495277076b0912c82c5baac917f3fe7f1b",
+            "proof": {
+              "file": "local-rtx-pro-6000/checkpoint7450/capacity-32768-45056-checkpoint-proof.json",
+              "file_sha256": "47a3b73c2b3e18e9a22287d2441d209c492e44f7ef994e366aba86be67a4798f",
+              "saved_checkpoint": "local-rtx-pro-6000/checkpoint7450/capacity-n45056-train1/ppo-scale-particles2-45056-train1/model_7450.pt",
+              "saved_checkpoint_sha256": "2874d48fb7be835d53119eca80b26b063b15e0fa924783cc9e345447667c006c",
+              "checkpoint_byte_hash_verified": true,
+              "actor_network_weight_bias_max_abs_change_from_reference": 0.0021168887615203857,
+              "critic_network_weight_bias_max_abs_change_from_reference": 0.0043344199657440186,
+              "optimizer_states": 20,
+              "Adam_step_increment_min": 20,
+              "Adam_step_increment_max": 20,
+              "finite_actor_critic_optimizer_and_losses": true,
+              "finite_loss_records_per_tag": 1
+            },
+            "phase_analysis": {
+              "precision": "Existing CPU proof TensorBoard stored scalars",
+              "collection_seconds": [
+                377.65625
+              ],
+              "learning_including_GAE_seconds": [
+                1.7203927040100098
+              ],
+              "collection_total_seconds": 377.65625,
+              "learning_total_seconds": 1.7203927040100098,
+              "learning_fraction_of_outer_training_wall": 0.004533926835456432,
+              "outer_wall_minus_phases_seconds": 0.072070617985446,
+              "phase_based_SPS": [
+                11401.271225267978
+              ],
+              "first_phase_SPS": 11401.271225267978,
+              "last_phase_SPS": 11401.271225267978
+            }
+          }
+        ],
+        "upper_probe_failure": {
+          "num_envs": 49152,
+          "role": "capacity_only_one_PPO_iteration_requested_failed",
+          "status": "Genuine GPU allocation failure in the fixed training configuration",
+          "failure_phase": "PPO update loss.backward(); a training rollout completed and update was entered.",
+          "failure_exception": "torch.OutOfMemoryError: requested 288.00 MiB with 254.75 MiB free",
+          "completed_logged_PPO_iterations": 0,
+          "internal_minibatch_index": "Not instrumented; no first-minibatch claim.",
+          "partial_optimizer_updates_before_failure": "Unknown; no completed PPO iteration/checkpoint proof.",
+          "raw_final_report_present": false,
+          "manifest": "local-rtx-pro-6000/checkpoint7450/capacity-n49152-train1/ppo-scale-manifest.json",
+          "manifest_sha256": "bdff1693d2ceac96b3562779a8a55f73f5c0da552ace3bee9b37b39b801069ee",
+          "log": "local-rtx-pro-6000/checkpoint7450/capacity-n49152-train1/ppo-scale-particles2-49152-train1.log",
+          "log_sha256": "e3c4d71c2764444c62c7428774b9c35d1515ab478ecd3317cdb553493bf6f3ab",
+          "samples_sha256": "b1205fb90f991ef005a43bba87f48fe2e75828732b184b1a82771cdd9ae66ac5",
+          "monitor_samples": 1292,
+          "foreign_compute_and_GPU_query_failures": 0,
+          "sampled_peak_whole_GPU_MiB": 97064.0,
+          "sampled_peak_owned_tree_RSS_GiB": 76.4369888305664,
+          "sampled_min_host_available_GiB": 34.558475494384766,
+          "module_loads_or_compiles_after_Timing_marker": 0,
+          "timing_eligible": false,
+          "timing_ineligibility_reasons": [
+            "case_not_completed"
+          ],
+          "process_exit_code": 1,
+          "stop_reason": null,
+          "host_guard_timeout_or_foreign_interruption": false,
+          "process_wall_seconds": 1291.3169745240011
+        },
+        "excluded_interrupted_cases": [
+          {
+            "directory": "local-rtx-pro-6000/checkpoint7450/n8192",
+            "manifest_sha256": "94a1105dcfea8ad2d4c1ccf699b867b7188525fe3752b1c6a5fa7c081237cf5b",
+            "exit_code": 143,
+            "timing_ineligibility_reasons": [
+              "foreign_gpu_compute_observed",
+              "case_not_completed"
+            ],
+            "foreign_compute_observations": 26,
+            "classification": "Incomplete/ineligible attempt; not used for capacity or throughput conclusions."
+          },
+          {
+            "directory": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1",
+            "manifest_sha256": "be62e128eb379aef54cb69da8501ea741cb085474550d2d3c9097a2294333c32",
+            "exit_code": 143,
+            "timing_ineligibility_reasons": [
+              "foreign_gpu_compute_observed",
+              "case_not_completed"
+            ],
+            "foreign_compute_observations": 26,
+            "note_sha256": "0df6bf3621129d544ed4db4e860283e3e561ea5bc7951ef0aa42704783f1b612",
+            "classification": "Foreign-compute interruption; no resource limit or usable primary throughput established."
+          },
+          {
+            "directory": "local-rtx-pro-6000/checkpoint7450/capacity-n32768-train1-retry1",
+            "manifest_sha256": "fd4694ff724b964565fa32041095cb97a3e79dfdf8edc18761bce95bef3b1cf2",
+            "exit_code": 143,
+            "timing_ineligibility_reasons": [
+              "foreign_gpu_compute_observed",
+              "case_not_completed"
+            ],
+            "foreign_compute_observations": 6,
+            "note_sha256": "e42414246504d7327991878af01f62517b533e617a28ae42e0139f21b7da7d17",
+            "classification": "Foreign-compute interruption; no resource limit or usable primary throughput established."
+          },
+          {
+            "directory": "local-rtx-pro-6000/checkpoint7450/n45056",
+            "manifest_sha256": "f1cfa9c6255a681337388f0c25fdc367a65b8b0c24a619835952ba9b0ef64db9",
+            "exit_code": 143,
+            "timing_ineligibility_reasons": [
+              "foreign_gpu_compute_observed",
+              "case_not_completed"
+            ],
+            "foreign_compute_observations": 7,
+            "note_sha256": "5024377afb2da919bc48e128de360713b7203cb7cb582579a7c1cabf9f9e371d",
+            "classification": "Foreign-compute interruption; no resource limit or usable primary throughput established."
+          }
+        ],
+        "conclusions": {
+          "largest_completed_full5_num_envs": 45056,
+          "largest_completed_full5_particle_count": 21086208,
+          "largest_completed_full5_training_transitions": 21626880,
+          "largest_completed_full5_SPS": 10858.274899886701,
+          "largest_completed_full5_wall_seconds": 1991.7418005530199,
+          "largest_completed_full5_sampled_whole_GPU_peak_MiB": 96466.0,
+          "next_tested_capacity_only_num_envs_failed": 49152,
+          "tested_bracket_environment_increment": 4096,
+          "exact_hardware_maximum_established": false,
+          "best_measured_completed_primary_num_envs": 4096,
+          "best_measured_completed_primary_SPS": 20615.546592864073,
+          "largest_batch_SPS_drop_from_best_fraction": 0.4732967738218876
+        },
+        "limits": [
+          "This brackets the whole fixed Franka/MuJoCo/particles/PPO configuration with preserved desktop usage, not a pure particle-kernel maximum.",
+          "Lower endpoint completed 16 warmup/96 inference/5 PPO; upper endpoint failed shorter 16 warmup/16 inference/1 PPO. This is a tested configuration bracket, not proof of monotonic capacity or an exact maximum.",
+          "One run per point; primary rates use actual 480N transitions divided by synchronized outer training wall including logging/checkpoint saving. Capacity-only rates do not belong on the primary throughput curve.",
+          "Five PPO iterations and finite final states/parameters/losses do not establish convergence, equal physics, continuous containment or long-horizon policy quality.",
+          "Training quality is not derived from preceding inference counters; adaptive resets change populations after trajectories diverge.",
+          "RSL phase timers include GAE/optimization but lack explicit CUDA boundary synchronization and cannot attribute physics-kernel cost.",
+          "Memory is sampled at 1 Hz across the whole device including desktop; RSS sums can count shared pages.",
+          "No source, protocol, raw report, manifest, monitor log or checkpoint was changed by this audit."
         ]
       }
     },
