@@ -74,6 +74,12 @@ a full MPM grid during cheap particle pretraining can otherwise consume the
 memory intended for more environments. Existing MPM configuration defaults
 retain full MPM behavior, and contact caching is opt-in.
 
+A transition within one run still needs enough GPU memory for the full MPM
+batch. Lazy allocation does not make that later allocation cheaper. For a larger
+particle-only pretraining batch, save the policy and optimizer, then resume with
+fewer MPM environments if needed; the per-environment observation and action
+layouts remain compatible.
+
 Fidelity, particle approximation settings, and contact-cache policy are
 experimental runtime configuration. They are intentionally not authored through
 ``NewtonMPMSceneAPI``: they describe a training/integration choice rather than
@@ -845,8 +851,15 @@ residuals and history evolution.
 Development split: Newton and Isaac Lab
 -----------------------------------------
 
-The recommended split keeps numerical operations in Newton and training
-schedules in Isaac Lab. Inspection of Isaac Lab's ``develop`` branch at
+The split keeps numerical operations in Newton and training schedules in
+Isaac Lab. The implemented `Isaac Lab fidelity workflow
+<https://github.com/maxkra15/IsaacLab/tree/maxkra15/mpm-fidelity-workflow>`_
+uses ``develop`` at ``9b6d2d822aa2879c1ef593bcca6118b04429d0cb`` as its base.
+It exposes native fidelity, live voxel/radius changes, and terminal-success
+curricula through the existing MPM manager, including coupled solver entries.
+Its README includes checkpoint, training, video, and curriculum commands.
+
+The earlier inspection of Isaac Lab's ``develop`` branch at
 ``e1988b935352d14fdcaddff996c8cd7ae6990a03`` (2026-10-01) found existing
 integration points:
 
@@ -862,34 +875,36 @@ integration points:
   can schedule task parameters. Changing a configuration field alone does not
   rebuild a live solver or update a recorded CUDA graph.
 
-.. list-table:: Ownership and implementation order
+.. list-table:: Ownership and integration status
    :header-rows: 1
    :widths: 26 27 47
 
    * - Work item
      - Owner
-     - Next concrete change
+     - Status and remaining work
    * - Swept rigid collision projection
      - Newton solver; Isaac Lab stepping adapter
-     - Propose the tested Newton API independently. Add previous-position and
-       previous-pose scratch buffers to the Isaac Lab manager before using it.
+     - Newton supports swept post-projection. Fast particle fidelity uses it
+       internally. The Isaac Lab full-MPM projection option remains endpoint
+       projection; a swept adapter needs previous-position and pose buffers.
    * - Runtime voxel size
      - Newton solver; Isaac Lab curriculum
-     - Propose ``set_voxel_size`` independently. Add an Isaac Lab manager method
-       that updates the live solver, its config, and graph capture together.
+     - Implemented in both layers: transactional ``set_voxel_size``, live
+       configuration updates, and deferred graph recapture. Propose the Newton
+       numerical operation independently of the task curriculum.
    * - Exact small iteration budgets
      - Newton solver
      - Submit the loop fix and regression tests separately from experimental
        predictors or material changes.
    * - Particle/MPM fidelity switching
      - Newton numerical fidelity; Isaac Lab task/manager
-     - Select the experimental numerical model through ``Config.fidelity``.
-       Keep policy curricula, observation contracts, and task calibration in
-       Isaac Lab.
+     - Implemented through ``Config.fidelity`` and a manager operation. Isaac
+       Lab owns policy curricula, observation contracts, and task calibration.
    * - Runtime particle radius
      - Newton model properties; Isaac Lab curriculum
-     - Preserve the existing model update/notification path. Let the task choose
-       when to change radius and whether the density change is intentional.
+     - Implemented through the model notification path and a manager operation.
+       The task chooses when to change radius and whether the density change
+       is intentional; particle count and mass stay fixed.
    * - Automatic particle splitting/merging
      - Future Newton solver/model feature
      - Design mass, momentum, constitutive-history transfer, and stable particle
@@ -906,11 +921,11 @@ then use endpoint collider poses for projection. It must also account for
 prescribed kinematic motion and for a solver owned by a coupled manager.
 
 Runtime resolution and fidelity changes must happen at a physics boundary,
-outside capture. Isaac Lab's `NewtonManager <https://github.com/isaac-sim/IsaacLab/blob/e1988b935352d14fdcaddff996c8cd7ae6990a03/source/isaaclab_newton/isaaclab_newton/physics/newton_manager.py>`_
-has graph invalidation and deferred recapture machinery. A manager-level
-voxel-size operation should call Newton's transactional resize, update its
-configuration only on success, and schedule capture before the next replay.
-It should preserve the asset's position/velocity buffers and invalidate any
+outside capture. Isaac Lab's ``NewtonManager`` has graph invalidation and
+deferred recapture machinery. The workflow's manager-level voxel-size operation
+calls Newton's transactional resize, updates its configuration only on success,
+and schedules capture before the next replay. It preserves the asset's
+position/velocity buffers. Downstream additions must invalidate any
 consumer caching grid-field pointers. Newton's voxel size is currently one
 setting for the whole solver, including separate worlds; a curriculum should
 therefore change it for the batch together.
@@ -1523,3 +1538,274 @@ they do not establish physical volume conservation. Eager and captured
 120-frame primary runs have bit-identical final positions and velocities in
 all 32 compared arrays. GPU regressions additionally cover cache identity,
 actual S2 topology remapping, lifecycle invalidation, and graph replay.
+
+Franka Pour checkpoint scaling
+------------------------------
+
+The Isaac Lab ``develop`` integration exercises the native fidelity setting in
+the existing coupled Franka Pour task: MuJoCo advances the arm and cups, while
+the MPM entry advances 468 particles per environment. Both material modes retain
+84 actor observations, 86 critic observations, eight actions, particle ordering,
+mass, reward terms, and the checkpoint interface. The saved policy and optimizer
+load at learning iteration 6997.
+
+The following measurements use an L40, driver 595.58.03, Warp 1.18.0, seed 42,
+and one sequential run per point. Sixteen policy steps warm up each process;
+96 timed steps cover 3.2 simulated seconds. The timer includes inference,
+physics, observations, rewards, resets, and curriculum work, and excludes startup,
+compilation, rendering, and PPO optimization. The
+:download:`Franka Pour experiment records <mpm_franka_pour_experiments.json>`
+include source fingerprints, checkpoint hash, commands, outcome counts, and
+sampled peak GPU memory. This experiment is separate from the cache study
+above, which uses a different Warp version and contact discretization.
+
+.. list-table:: End-to-end rollout transitions per second and terminal successes
+   :header-rows: 1
+   :widths: 10 18 18 12 21 21
+
+   * - Environments
+     - MPM [env/s]
+     - Particles [env/s]
+     - Speedup
+     - MPM successes
+     - Particle successes
+   * - 16
+     - 156
+     - 431
+     - 2.77x
+     - 31/40
+     - 24/44
+   * - 64
+     - 502
+     - 1,229
+     - 2.45x
+     - 91/132
+     - 62/163
+   * - 256
+     - 1,309
+     - 3,477
+     - 2.66x
+     - 324/548
+     - 274/632
+   * - 512
+     - 1,813
+     - 5,873
+     - 3.24x
+     - 649/1,222
+     - 563/1,253
+
+.. figure:: mpm_franka_pour_rollout.png
+   :alt: Franka Pour rollout throughput, peak GPU memory, and short-window terminal success for MPM and particle fidelity.
+   :width: 100%
+
+   Single-run measurements, not confidence intervals. Success labels include
+   the number of completed episodes; episode populations differ between modes.
+
+The reset sampler remains adaptive and starts fresh in each process. More worlds
+and different termination outcomes change the later replay rows. These task
+scores therefore describe the resulting short rollouts rather than a paired,
+fixed-trajectory numerical error. ``separate_worlds`` also does not recenter the
+physical scenes: changing their offsets changes their alignment with the MPM
+grid. Assigning a cause to an out-of-bounds event requires its first-failure
+state and contact-occupancy diagnostics.
+
+At 512 environments, sampled peak whole-GPU memory is 7,269 MiB for MPM and
+2,417 MiB for particles. Both runs end with finite, moving robot and particle states.
+The particle approximation spills more: 603 spill terminations versus 257 for
+MPM. Out-of-bounds terminations are 15 versus 269, respectively. These are task
+outcome counters, not a diagnosis of individual wall crossings. Final cup
+fractions after automatic resets are also not a substitute for episode outcomes.
+
+The baseline retains the task's existing ``pic27`` contacts and a maximum of
+24 Jacobi sweeps with tolerance ``1e-4``;
+it does not enable the new S2 cache. Both modes use a bounded Isaac Lab adapter
+fix that preserves rigid-only convex meshes instead of converting the Franka's
+hulls into triangle meshes. This shared integration correction is separate from
+the measured difference between material solvers.
+
+The observed speedup therefore comes with a changed training distribution.
+The fast stage initially uses pair friction 0.5, whereas the target MPM material
+uses internal friction 0.7; these parameters are not constitutive equivalents.
+Finite particle radius also adds approximately 2.9 mm of center clearance at
+the cup walls and changes initial packing. Validate iteration count, friction,
+transfer trajectories, spill, and terminal success before choosing a fast stage.
+The common policy interface establishes a route to pretraining and fine-tuning;
+this short rollout does not establish that the resulting trained policies have
+equal quality. The coupled-substep reaction-force limitation described above
+also remains present in both modes.
+
+Separate checkpoint-continuation runs perform five PPO iterations of 96 policy
+steps per environment. They use Newton ``d183ffaa`` and Warp 1.18.0, rendering
+disabled, and a single run per point. Training timers include rollout collection,
+optimization, logging, and final checkpoint saving; startup and the preceding
+warmup and inference-only rollout are excluded. The training policy counter
+advances from 112 to 592 in every run.
+
+.. list-table:: PPO continuation, including optimizer and checkpoint work
+   :header-rows: 1
+   :widths: 15 22 22 16 25
+
+   * - Environments
+     - MPM [env/s]
+     - Particles [env/s]
+     - Speedup
+     - Transitions per run
+   * - 128
+     - 820
+     - 1,983
+     - 2.42x
+     - 61,440
+   * - 512
+     - 1,794
+     - 5,134
+     - 2.86x
+     - 245,760
+
+Both modes continue from checkpoint 6997 and save ``model_7001.pt``. CPU
+checkpoint inspection verifies changed actor weights and exactly 100 additional
+Adam updates in every run: five PPO iterations, five epochs, four minibatches.
+The original checkpoint remains unchanged. These
+short training runs establish that PPO can optimize through either backend;
+they do not establish convergence, material equivalence, or that fast-stage
+pretraining improves final MPM policy quality. The rollout table above measures
+the original pretrained policy, before these updates.
+
+An isolated 64-environment S2 comparison uses the same checkpoint, seed, and
+96-step inference window. These MPM counts are upper Gauss-Seidel budgets at
+tolerance ``1e-4``; the cache flag is independent of the stress predictor.
+
+.. list-table:: S2 contact history in the actual pouring task
+   :header-rows: 1
+   :widths: 40 20 20 20
+
+   * - Setting
+     - Rollout [env/s]
+     - Successes
+     - Spill terminations
+   * - Cold contacts, budget 20
+     - 355
+     - 91/140
+     - 42
+   * - Cached contacts, budget 5
+     - 410
+     - 82/132
+     - 41
+   * - Cold contacts, budget 5
+     - 401
+     - 60/192
+     - 119
+
+Cached budget 5 has 15.4% higher throughput than cold budget 20 in this run,
+with a short-window success fraction of 62.1% versus 65.0%. At equal budget 5,
+the main observed benefit is success and spill behavior, rather than a reliable
+change in per-step cost. The task populations still adapt independently; this
+single-seed comparison does not establish material equivalence or a universal
+iteration recommendation.
+
+A separate particle calibration group keeps radius, margins, cohesion, timestep,
+and material inputs fixed while varying pair friction and iteration count:
+
+.. list-table:: Particle calibration at 64 environments
+   :header-rows: 1
+   :widths: 20 20 30 30
+
+   * - Iterations
+     - Pair friction
+     - Rollout [env/s]
+     - Successes
+   * - 2
+     - 0.5
+     - 1,325
+     - 61/161
+   * - 2
+     - 0.7
+     - 1,412
+     - 69/160
+   * - 4
+     - 0.5
+     - 1,220
+     - 63/158
+   * - 4
+     - 0.7
+     - 1,181
+     - 71/162
+
+These short cohorts illustrate parameter sensitivity rather than an established
+best setting. Four iterations do not close the gap to the pretrained MPM policy.
+Compare results within this measurement group; the repeated two-iteration
+baseline also differs in timing from the earlier scaling run.
+
+The 16-environment adaptive PPO test starts with particle fidelity, pair friction
+0.7, S2 contact caching enabled for the eventual MPM stage, and a minimum cohort
+of 64 completed episodes. A natural success threshold of 0.5 does not trigger in
+five PPO iterations; its final cohort success is 31.25%, so remaining in particle
+mode is the expected behavior.
+
+A separate, explicitly forced threshold-zero mechanism test transitions at policy
+step 265. PPO starts at step 20, with complete particle-stage updates at steps
+116 and 212, a mixed rollout ending at 308, and complete MPM-stage updates at
+404 and 500. The same optimizer advances through all five iterations. The
+transition sets voxel size from 15 to 12 mm and radius from 2.905943 to
+2.847824 mm. All 7,488 particles and total mass approximately 2.205 kg are retained;
+final robot and particle states are finite. A fixed-mass radius reduction of 2%
+raises effective MPM density by approximately 6.25%.
+
+This test proves the configuration and training handoff mechanism, not natural
+curriculum readiness or a policy-quality improvement. Starting particle fidelity
+has no FEM grid, so this particular transition allocates its first grid at the
+new spacing.
+
+A separate five-iteration PPO probe starts in full MPM with cached S2 contacts
+and an already-active 15 mm grid. Its threshold-zero stage rebuilds that grid
+at 12 mm at policy step 355, inside the training interval from 20 to 500.
+Particle radius stays at 2.905943 mm; count, mass, observation dimensions, and
+finite final states are preserved. A preceding three-iteration probe ends at
+step 308 without reaching the required terminal cohort, and is retained in
+the records. These are mechanism tests, with overlapping capacity work and no
+comparative timing claim. The core resize regressions additionally check
+preservation of particle material history.
+
+Capacity probes extend the batch size with eight warmup and 48 measured policy
+steps. These runs can overlap work on the other GPU, so their rates are excluded
+from throughput comparisons. Sampled peak memory includes the entire selected
+GPU, rather than only solver allocations.
+
+.. list-table:: Tested capacity on one L40; peak memory in MiB
+   :header-rows: 1
+   :widths: 15 27 27 31
+
+   * - Environments
+     - MPM peak
+     - Particle peak
+     - Completion
+   * - 1,024
+     - 12,771
+     - 3,275
+     - Both complete
+   * - 2,048
+     - 24,277
+     - 5,021
+     - Both complete
+   * - 4,096
+     - 47,089
+     - 8,507
+     - Both complete
+   * - 8,192
+     - 48,467 before failure
+     - 15,375
+     - MPM out of memory; particles complete
+
+The 8,192-environment particle run advances 3,833,856 particles and ends with
+finite, moving states. MPM fails at that count during initial sparse-grid
+allocation: CUDA error 2, ``out of memory``, followed by ``Failed to create
+volume``. This establishes a tested capacity contrast; 8,192 is the largest
+environment count tested, not its established limit.
+
+Completion alone does not establish a usable training batch. At 4,096 worlds,
+MPM records 11,987 workspace-guard terminations among 15,154 completed episodes
+and 17.5% success. At 8,192 worlds, particles record 64 workspace-guard and
+4,268 spill terminations among 9,687 completed episodes, with 49.3% success.
+The guard detects workspace exits, including non-finite values; it is not a
+wall-tunneling detector. Adaptive reset populations and grid alignment remain
+confounds. A within-run particle-to-MPM schedule must fit the eventual MPM
+memory budget; otherwise resume the policy checkpoint with fewer environments.
