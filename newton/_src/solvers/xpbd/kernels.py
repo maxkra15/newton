@@ -311,7 +311,8 @@ def solve_particle_particle_contacts(
                 vn = wp.dot(n, vrel)
                 vt = vrel - n * vn
 
-                lambda_f = wp.max(k_mu * lambda_n, -wp.length(vt) * dt)
+                # Cohesive gaps attract normally without adding tangential friction.
+                lambda_f = wp.max(k_mu * wp.min(lambda_n, 0.0), -wp.length(vt) * dt)
                 delta_f = wp.normalize(vt) * lambda_f
                 delta += (delta_f - delta_n) / denom
 

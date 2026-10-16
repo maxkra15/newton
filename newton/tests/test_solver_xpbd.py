@@ -490,6 +490,22 @@ def test_particle_particle_friction_with_relative_motion(test, device):
         msg="With mu>0, particle-particle friction should reduce tangential slip over one step vs mu=0 baseline",
     )
 
+    # Separated cohesive particles attract normally without adding tangential energy.
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_particle((0.0, 0.0, 0.0), (0.0, 0.01, 0.0), mass=1.0, radius=0.01)
+    builder.add_particle((0.021, 0.0002, 0.0), (0.0, -0.01, 0.0), mass=1.0, radius=0.01)
+    model = builder.finalize(device=device)
+    model.particle_mu = 0.5
+    model.particle_cohesion = 0.002
+    solver = newton.solvers.SolverXPBD(model=model, iterations=1)
+    state0, state1 = model.state(), model.state()
+    solver.step(state0, state1, None, None, 0.01)
+    velocities = state1.particle_qd.numpy()
+    np.testing.assert_allclose(velocities[:, 1], [0.01, -0.01], atol=1.0e-6)
+    positions = state1.particle_q.numpy()
+    test.assertGreater(float(positions[0, 0]), 0.0)
+    test.assertLess(float(positions[1, 0]), 0.021)
+
 
 def test_xpbd_particle_particle_contact_nan_guard(test, device):
     builder = newton.ModelBuilder(up_axis="Y")
