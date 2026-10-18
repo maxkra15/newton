@@ -890,6 +890,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """
         particle_iterations: int = dataclass_field(default=2, kw_only=True)
         """Positive number of local contact iterations in particle fidelity."""
+        particle_relaxation: float = dataclass_field(default=0.9, kw_only=True)
+        """Particle-pair contact relaxation in ``(0, 1]``.
+
+        Smaller values can stabilize dense confined piles at the cost of
+        greater overlap and weaker pressure support at a fixed iteration count.
+        """
         particle_friction: float | None = dataclass_field(default=None, kw_only=True)
         """Particle-pair friction coefficient. ``None`` uses ``model.particle_mu``.
         This does not change the rigid collider's material friction.
@@ -1509,11 +1515,18 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             raise ValueError("Config.particle_iterations must be a positive integer.") from error
         if particle_iterations < 1:
             raise ValueError("Config.particle_iterations must be a positive integer.")
+        if not math.isfinite(config.particle_relaxation) or not 0.0 < config.particle_relaxation <= 1.0:
+            raise ValueError("Config.particle_relaxation must be finite and in (0, 1].")
         for name in ("particle_friction", "particle_cohesion"):
             value = getattr(config, name)
             if value is not None and (not math.isfinite(value) or value < 0.0):
                 raise ValueError(f"Config.{name} must be finite and nonnegative, or None.")
-        self._particle_config = particle_iterations, config.particle_friction, config.particle_cohesion
+        self._particle_config = (
+            particle_iterations,
+            config.particle_relaxation,
+            config.particle_friction,
+            config.particle_cohesion,
+        )
         self._particle_solver = None
         self._particle_collider_end_poses = None
 
@@ -1644,8 +1657,10 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self._validate_particle_colliders(self._mpm_model)
         if self._particle_solver is not None:
             return
-        iterations, friction, cohesion = self._particle_config
-        self._particle_solver = _ParticleSolver(self.model, iterations=iterations, friction=friction, cohesion=cohesion)
+        iterations, relaxation, friction, cohesion = self._particle_config
+        self._particle_solver = _ParticleSolver(
+            self.model, iterations=iterations, relaxation=relaxation, friction=friction, cohesion=cohesion
+        )
         if self.model.body_count:
             self._particle_collider_end_poses = wp.empty_like(self.model.body_q)
 

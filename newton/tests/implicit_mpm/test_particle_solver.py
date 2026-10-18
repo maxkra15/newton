@@ -62,6 +62,116 @@ def test_particle_integration_state_ownership(test, device):
         np.testing.assert_allclose(state_in_place.particle_qd.numpy(), state_out.particle_qd.numpy(), atol=1.0e-6)
 
 
+def test_particle_contact_relaxation(test, device):
+    """Scale pair corrections without changing the historical default relaxation."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0), (0.09, 0.0, 0.0)],
+        vel=[(0.0, 0.0, 0.0)] * 2,
+        mass=[1.0] * 2,
+        radius=[0.05] * 2,
+    )
+    model = builder.finalize(device=device)
+    for value in (0.0, -0.1, 1.01, float("nan"), float("inf"), -float("inf")):
+        with test.subTest(invalid_relaxation=value), test.assertRaisesRegex(ValueError, "particle_relaxation"):
+            SolverImplicitMPM(model, SolverImplicitMPM.Config(particle_relaxation=value), verbose=False)
+    for value in (0.5, 0.9, 1.0):
+        with test.subTest(relaxation=value):
+            solver = SolverImplicitMPM(
+                model,
+                SolverImplicitMPM.Config(
+                    fidelity="particles", particle_iterations=1, particle_relaxation=value, particle_friction=0.0
+                ),
+                verbose=False,
+            )
+            state = model.state()
+            solver.step(state, state, None, None, 0.01)
+            # Each equally weighted particle receives half of the 1 cm overlap.
+            expected_delta = 0.005 * value
+            np.testing.assert_allclose(
+                state.particle_q.numpy()[:, 0], (-expected_delta, 0.09 + expected_delta), atol=1.0e-7
+            )
+            np.testing.assert_allclose(
+                state.particle_qd.numpy()[:, 0], (-expected_delta / 0.01, expected_delta / 0.01), atol=1.0e-6
+            )
+
+
+def test_particle_confined_stack_relaxation(test, device):
+    """Keep a dense stack bounded when under-relaxing summed local contacts."""
+    radius = 0.00075
+    spacing = 2.0 * radius
+    margin = 0.0005
+    width, layers = 4, 30
+    inner_halfwidth = width * spacing / 2.0 + margin
+    wall_thickness = 0.003
+    wall_height = layers * spacing * 1.5
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, margin=margin)
+    builder.add_shape_box(
+        -1,
+        xform=wp.transform(wp.vec3(0.0, 0.0, -wall_thickness / 2.0), wp.quat_identity()),
+        hx=0.2,
+        hy=0.2,
+        hz=wall_thickness / 2.0,
+        cfg=shape_cfg,
+    )
+    for axis in (0, 1):
+        for sign in (-1, 1):
+            center = [0.0, 0.0, wall_height / 2.0]
+            center[axis] = sign * (inner_halfwidth + wall_thickness / 2.0)
+            halfextent = [inner_halfwidth + wall_thickness] * 2 + [wall_height / 2.0]
+            halfextent[axis] = wall_thickness / 2.0
+            builder.add_shape_box(
+                -1,
+                xform=wp.transform(wp.vec3(*center), wp.quat_identity()),
+                hx=halfextent[0],
+                hy=halfextent[1],
+                hz=halfextent[2],
+                cfg=shape_cfg,
+            )
+    points = np.stack(
+        np.meshgrid(np.arange(width), np.arange(width), np.arange(layers), indexing="ij"), axis=-1
+    ).reshape(-1, 3)
+    points = (points.astype(np.float32) + 0.5) * spacing
+    points[:, :2] -= width * spacing / 2.0
+    points[:, 2] += margin + 0.2 * spacing
+    points += np.random.default_rng(7).uniform(-0.2, 0.2, points.shape).astype(np.float32) * spacing
+    builder.add_particles(
+        pos=points.tolist(),
+        vel=np.zeros_like(points).tolist(),
+        mass=[3.375e-6] * len(points),
+        radius=[radius] * len(points),
+    )
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(
+        model,
+        SolverImplicitMPM.Config(
+            fidelity="particles",
+            voxel_size=0.003,
+            particle_iterations=2,
+            particle_relaxation=0.5,
+            particle_friction=0.0,
+            particle_cohesion=0.0,
+        ),
+        verbose=False,
+    )
+    state = model.state()
+    peak_speed = 0.0
+    for step in range(120):
+        solver.step(state, state, None, None, 0.00125)
+        if step % 8 == 0 or step == 119:
+            peak_speed = max(peak_speed, float(np.linalg.norm(state.particle_qd.numpy(), axis=1).max()))
+    q = state.particle_q.numpy()
+    test.assertTrue(np.isfinite(q).all())
+    test.assertTrue(np.isfinite(state.particle_qd.numpy()).all())
+    test.assertLess(peak_speed, 1.25)
+    test.assertGreaterEqual(float(q[:, 2].min()), 0.0)
+    test.assertLess(float(q[:, 2].max()), wall_height)
+    test.assertLess(float(np.abs(q[:, :2]).max()), inner_halfwidth + wall_thickness + radius)
+
+
 def test_particle_mesh_reactions(test, device):
     """Isolate mesh contacts by world and conserve momentum in proxy wrench harvesting."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -186,6 +296,59 @@ def test_particle_contact_corrections_swept(test, device):
     test.assertGreaterEqual(float(state.particle_q.numpy()[:, 0].min()), 0.05899)
 
 
+def test_particle_thin_wall_clearance(test, device):
+    """Keep resting particles outside either face of a thin closed wall."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_shape_box(
+        -1,
+        hx=0.00025,
+        hy=1.0,
+        hz=1.0,
+        cfg=newton.ModelBuilder.ShapeConfig(mu=0.0, margin=0.0005),
+    )
+    builder.add_particles(
+        pos=[(-0.002, 0.01, 0.02), (0.002, 0.01, 0.02)],
+        vel=[(0.0, 0.0, 0.0)] * 2,
+        mass=[1.0] * 2,
+        radius=[0.00075] * 2,
+    )
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(
+        model,
+        SolverImplicitMPM.Config(fidelity="particles", voxel_size=0.003, particle_iterations=2),
+        verbose=False,
+    )
+    state = model.state()
+    initial_q = state.particle_q.numpy().copy()
+    solver.step(state, state, None, None, 0.00125)
+    np.testing.assert_allclose(state.particle_q.numpy(), initial_q, atol=1.0e-7, rtol=0.0)
+    np.testing.assert_array_equal(state.particle_qd.numpy(), np.zeros((2, 3), dtype=np.float32))
+
+
+def test_particle_surface_contact_normal(test, device):
+    """Project a particle resting exactly on a plane along its surface normal."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    mesh = newton.Mesh(
+        vertices=[(-0.1, -0.1, 0.0), (0.1, -0.1, 0.0), (0.1, 0.1, 0.0), (-0.1, 0.1, 0.0)],
+        indices=[0, 1, 2, 0, 2, 3],
+    )
+    builder.add_shape_mesh(-1, mesh=mesh, cfg=newton.ModelBuilder.ShapeConfig(mu=0.0, margin=0.0))
+    builder.add_particle((0.01, 0.02, 0.0), (0.0, 0.0, 0.0), mass=1.0, radius=0.00075)
+    model = builder.finalize(device=device)
+    solver = SolverImplicitMPM(
+        model,
+        SolverImplicitMPM.Config(fidelity="particles", voxel_size=0.003, particle_iterations=2),
+        verbose=False,
+    )
+    solver._mpm_model.collider.material_projection_threshold.zero_()
+    state = model.state()
+    solver.step(state, state, None, None, 0.00125)
+    np.testing.assert_allclose(state.particle_q.numpy()[0], (0.01, 0.02, 0.00075), atol=1.0e-7, rtol=0.0)
+    np.testing.assert_array_equal(state.particle_qd.numpy(), np.zeros((1, 3), dtype=np.float32))
+
+
 def test_particle_reaction_masked_reset(test, device):
     """Preserve unselected proxy reactions during masked and captured resets."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -257,9 +420,13 @@ class TestParticleSolver(unittest.TestCase):
 
 for _test in (
     test_particle_integration_state_ownership,
+    test_particle_contact_relaxation,
+    test_particle_confined_stack_relaxation,
     test_particle_mesh_reactions,
     test_particle_swept_moving_mesh,
     test_particle_contact_corrections_swept,
+    test_particle_thin_wall_clearance,
+    test_particle_surface_contact_normal,
     test_particle_reaction_masked_reset,
 ):
     add_function_test(TestParticleSolver, _test.__name__, _test, devices=get_test_devices(), check_output=False)

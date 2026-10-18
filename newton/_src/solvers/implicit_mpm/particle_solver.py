@@ -191,11 +191,13 @@ class _ParticleSolver:
         model: Model,
         *,
         iterations: int,
+        relaxation: float = 0.9,
         friction: float | None = None,
         cohesion: float | None = None,
     ):
         self.model = model
         self.iterations = iterations
+        self.relaxation = relaxation
         self.friction = friction
         self.cohesion = cohesion
         self._previous_positions = wp.empty(model.particle_count, dtype=wp.vec3, device=model.device)
@@ -308,7 +310,7 @@ class _ParticleSolver:
                         cohesion,
                         model.particle_max_radius,
                         dt,
-                        0.9,
+                        self.relaxation,
                     ],
                     outputs=[self._deltas],
                     device=model.device,

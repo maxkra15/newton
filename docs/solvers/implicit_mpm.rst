@@ -52,6 +52,7 @@ training integrations:
    config = SolverImplicitMPM.Config(
        fidelity=SolverImplicitMPM.Fidelity.PARTICLES,
        particle_iterations=2,
+       particle_relaxation=0.9,
        particle_friction=0.5,
        particle_cohesion=0.0,  # attraction range [m]
        grid_type="sparse",
@@ -138,6 +139,88 @@ task measurements such as settling height, slip, and retained mass. The
 full-MPM collision projection treats particle centers as points. Particle
 fidelity additionally enforces finite-radius rigid-mesh contacts at endpoints;
 its swept guard still tests centers rather than complete sphere trajectories.
+
+Particle contact stability
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default two local iterations are a performance choice, rather than a
+convergence guarantee for every packing depth and timestep. In a densely
+filled container, simultaneous pair corrections can add energy faster than
+rigid contacts remove it. Sweeping the particle trajectory prevents some wall
+crossings, but cannot stabilize an unconverged contact solve.
+
+``particle_relaxation`` scales the XPBD pair corrections. Its default is
+``0.9``, matching the original particle implementation; a smaller value can
+reduce contact overshoot without additional iterations. It also weakens the
+contact response at a fixed iteration budget and can increase packing
+compression. Increasing iterations or decreasing the timestep usually gives
+better contact convergence, with additional computational cost. These choices
+need task measurements such as retained mass, settling height, and delivery
+into the target container, rather than finite positions alone.
+
+A Rizon teapot test used 135,314 particles, a 0.75 mm particle radius, 1.5 mm
+initial spacing, zero pair friction/cohesion, and an 800 Hz rigid controller.
+With contact relaxation ``0.9``, one particle step and two iterations produced
+speeds above 5 m/s after 0.075 s, before the pot tilted. The following matched
+one-second runs used identical initial positions and prescribed rigid motion:
+
+.. list-table:: Teapot particle stability at 800 Hz
+   :header-rows: 1
+   :widths: 25 25 25 25
+
+   * - Particle substeps
+     - Iterations per substep
+     - Peak speed [m/s]
+     - Particles at z < 0.88 m
+   * - 1
+     - 2
+     - 8.86
+     - 52,597
+   * - 1
+     - 4
+     - 2.31
+     - 0
+   * - 1
+     - 8
+     - 0.68
+     - 0
+   * - 2
+     - 2
+     - 0.69
+     - 0
+   * - 4
+     - 2
+     - 1.39
+     - 0
+
+These runs used Newton commit ``d183ffaad4d49a74f75a0bdc70e6c31d86d3f58b``
+and Warp 1.18.0. A frozen-pot comparison reproduced the instability with pair
+contacts enabled, while mesh contacts alone retained the particles. During
+the first 80 steps, pair corrections added 0.819 J at relaxation ``0.9``;
+the mesh velocity corrections removed 0.269 J. Reducing relaxation to ``0.5``
+retained all particles for one second at the original timestep, but gave a
+substantially shorter settled particle column. This is a stability and
+packing tradeoff, not a liquid-volume preservation method.
+
+Two particle substeps with two iterations also completed the 18-second
+grasp, lift, tilt, and recovery sequence without the initial blow-up. No
+particles fell below table height before the tilt, and 34,327 ended inside
+the receiving bowl's visual AABB. Three ended below table height; AABB
+occupancy is not an exact cavity-containment or zero-spill measurement.
+
+One substep with two iterations and relaxation ``0.5`` also completed this
+sequence without the initial blow-up, with 49,899 particles in the bowl AABB
+and five below z = 0.88 m at the end. This uses fewer particle updates, but
+its weaker pressure support changes settling and delivery. Two substeps with
+relaxation ``0.9`` provide the better-converged reference for this example;
+``0.5`` remains an optional approximation rather than a new solver default.
+
+When substepping moving colliders, supply the boundary's pose at each
+substep's start and the corresponding velocity. Repeating the same start
+pose with ``dt / substeps`` repeatedly predicts the first portion of the
+motion. The teapot integration interpolates the measured COM trajectory and
+shortest quaternion rotation across the rigid step, while keeping the robot
+controller at 800 Hz.
 
 Performance measurements
 ------------------------

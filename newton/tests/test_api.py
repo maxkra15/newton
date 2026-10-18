@@ -98,6 +98,7 @@ class TestApi(unittest.TestCase):
         self.assertEqual(config.max_iterations, 100)
         self.assertEqual(config.tolerance, 1.0e-5)
         self.assertEqual(config.solver, "jacobi")
+        self.assertEqual(config.particle_relaxation, 0.9)
         parameters = inspect.signature(SolverImplicitMPM.Config).parameters
         positional = tuple(
             name for name, parameter in parameters.items() if parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
@@ -131,6 +132,7 @@ class TestApi(unittest.TestCase):
         for name in (
             "fidelity",
             "particle_iterations",
+            "particle_relaxation",
             "particle_friction",
             "particle_cohesion",
             "warmstart_contact_impulses",
@@ -143,12 +145,14 @@ class TestApi(unittest.TestCase):
             "jacobi",
             fidelity=SolverImplicitMPM.Fidelity.PARTICLES,
             particle_iterations=5,
+            particle_relaxation=0.5,
             particle_friction=0.3,
             particle_cohesion=0.01,
             warmstart_contact_impulses=True,
         )
         self.assertEqual(approximation.fidelity, SolverImplicitMPM.Fidelity.PARTICLES)
         self.assertEqual(approximation.particle_iterations, 5)
+        self.assertEqual(approximation.particle_relaxation, 0.5)
         self.assertEqual(approximation.particle_friction, 0.3)
         self.assertEqual(approximation.particle_cohesion, 0.01)
         self.assertTrue(approximation.warmstart_contact_impulses)

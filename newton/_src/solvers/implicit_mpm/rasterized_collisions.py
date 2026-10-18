@@ -24,14 +24,6 @@ _COLLIDER_ACTIVATION_DISTANCE = wp.constant(0.5)
 _INFINITY = wp.constant(1.0e12)
 """Threshold over which values are considered infinite"""
 
-_CLOSEST_POINT_NORMAL_EPSILON = wp.constant(1.0e-3)
-"""Epsilon for closest point normal calculation"""
-
-_SDF_SIGN_FROM_AVERAGE_NORMAL = True
-"""If true, determine the sign of the sdf from the average normal of the faces around the closest point.
-Otherwise, use Warp's default sign determination strategy (raycasts).
-"""
-
 _SMALL_ANGLE_EPS = wp.constant(1.0e-4)
 """Small angle threshold to use more robust and faster path for angular velocity calculations"""
 
@@ -96,85 +88,6 @@ class Collider:
 
 
 @wp.func
-def _sq_dist_point_seg_at_origin(q: wp.vec3, seg: wp.vec3, seg_len_sq: float):
-    """Squared distance from ``q`` to the segment ``[0, seg]``."""
-    s = wp.clamp(wp.dot(q, seg) / seg_len_sq, 0.0, 1.0)
-    return wp.length_sq(q - s * seg)
-
-
-@wp.func
-def _sq_dist_point_tri_at_origin(q: wp.vec3, e1: wp.vec3, e2: wp.vec3):
-    """Squared distance from ``q`` to the triangle with vertices ``(0, e1, e2)``.
-
-    ``wp.vec3``-specialized inline of warp's ``project_on_tri_at_origin``
-    (from ``warp._src.fem.geometry.closest_point``). The original returns
-    the barycentric coordinates as well; those are unused here so the
-    inlined version returns just the squared distance.
-    """
-    e1e1 = wp.dot(e1, e1)
-    e1e2 = wp.dot(e1, e2)
-    e2e2 = wp.dot(e2, e2)
-
-    det = e1e1 * e2e2 - e1e2 * e1e2
-
-    # Interior projection when the triangle is non-degenerate and the
-    # projected point lies inside the triangle.
-    if det > e1e1 * e2e2 * 1.0e-6:
-        e1p = wp.dot(e1, q)
-        e2p = wp.dot(e2, q)
-
-        s = (e2e2 * e1p - e1e2 * e2p) / det
-        t = (e1e1 * e2p - e1e2 * e1p) / det
-
-        if s >= 0.0 and t >= 0.0 and s + t <= 1.0:
-            return wp.length_sq(q - s * e1 - t * e2)
-
-    # Otherwise (exterior projection or degenerate triangle) take the
-    # minimum squared distance across the three edges.
-    d1 = _sq_dist_point_seg_at_origin(q, e1, e1e1)
-    d2 = _sq_dist_point_seg_at_origin(q, e2, e2e2)
-    d12 = _sq_dist_point_seg_at_origin(q - e1, e2 - e1, wp.length_sq(e2 - e1))
-    return wp.min(wp.min(d1, d2), d12)
-
-
-@wp.func
-def get_average_face_normal(
-    mesh_id: wp.uint64,
-    point: wp.vec3,
-):
-    """Computes the average face normal at a point on a mesh.
-    (average of face normals within an epsilon-distance of the point)
-
-    Args:
-        mesh_id: The mesh to query.
-        point: The point to query.
-
-    Returns:
-        The average face normal at the point.
-    """
-
-    face_normal = wp.vec3(0.0)
-
-    vidx = wp.mesh_get(mesh_id).indices
-    points = wp.mesh_get(mesh_id).points
-    eps_sq = _CLOSEST_POINT_NORMAL_EPSILON * _CLOSEST_POINT_NORMAL_EPSILON
-
-    epsilon = wp.vec3(_CLOSEST_POINT_NORMAL_EPSILON)
-    aabb_query = wp.mesh_query_aabb(mesh_id, point - epsilon, point + epsilon)
-    face_index = wp.int32(0)
-    while wp.mesh_query_aabb_next(aabb_query, face_index):
-        V0 = points[vidx[face_index * 3 + 0]]
-        V1 = points[vidx[face_index * 3 + 1]]
-        V2 = points[vidx[face_index * 3 + 2]]
-
-        sq_dist = _sq_dist_point_tri_at_origin(point - V0, V1 - V0, V2 - V0)
-        if sq_dist < eps_sq:
-            face_normal += wp.mesh_eval_face_normal(mesh_id, face_index)
-
-    return wp.normalize(face_normal)
-
-
-@wp.func
 def _query_collider_sdf(
     x: wp.vec3,
     collider: Collider,
@@ -194,10 +107,10 @@ def _query_collider_sdf(
 
     max_dist = collider.query_max_dist + thickness
 
-    if wp.static(_SDF_SIGN_FROM_AVERAGE_NORMAL):
-        query = wp.mesh_query_point_no_sign(mesh, x_local, max_dist)
-    else:
-        query = wp.mesh_query_point(mesh, x_local, max_dist)
+    # Use closest-feature pseudo normals; a fixed spatial average can include
+    # opposing faces across a thin wall and reverse its signed distance. Keep
+    # the relative edge tolerance near float precision for coarse thin walls.
+    query = wp.mesh_query_point_sign_normal(mesh, x_local, max_dist, epsilon=1.0e-6)
 
     query_result = query.result
     sdf = float(_INFINITY)
@@ -209,24 +122,24 @@ def _query_collider_sdf(
     if query_result:
         cp = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
 
-        if wp.static(_SDF_SIGN_FROM_AVERAGE_NORMAL):
-            face_normal = get_average_face_normal(mesh, cp)
-            sign = wp.where(wp.dot(face_normal, x_local - cp) > 0.0, 1.0, -1.0)
-        else:
-            face_normal = wp.mesh_eval_face_normal(mesh, query.face)
-            sign = query.sign
-
         mesh_material_id = collider.face_material_index[collider.collider_face_offset[stable_collider_id] + query.face]
         thickness = collider.material_thickness[mesh_material_id]
 
         offset = x_local - cp
-        d = wp.length(offset) * sign
-        sdf = d - thickness
+        distance = wp.length(offset)
 
-        if wp.abs(d) < _CLOSEST_POINT_NORMAL_EPSILON:
-            sdf_grad = face_normal
+        mesh_data = wp.mesh_get(mesh)
+        v0 = mesh_data.points[mesh_data.indices[3 * query.face]]
+        v1 = mesh_data.points[mesh_data.indices[3 * query.face + 1]]
+        v2 = mesh_data.points[mesh_data.indices[3 * query.face + 2]]
+        coordinate_scale = wp.max(wp.max(wp.abs(v0)), wp.max(wp.max(wp.abs(v1)), wp.max(wp.abs(v2))))
+        # At the surface, barycentric roundoff can leave a tangential offset.
+        if distance <= 1.0e-6 * coordinate_scale:
+            sdf_grad = wp.mesh_eval_face_normal(mesh, query.face)
+            sdf = wp.dot(offset, sdf_grad) - thickness
         else:
-            sdf_grad = wp.normalize(offset) * sign
+            sdf = distance * query.sign - thickness
+            sdf_grad = (offset / distance) * query.sign
 
         sdf_vel = wp.mesh_eval_velocity(mesh, query.face, query.u, query.v)
         closest_point = cp
