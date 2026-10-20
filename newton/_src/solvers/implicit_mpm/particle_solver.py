@@ -220,6 +220,71 @@ class _ParticleSolver:
                 device=self.model.device,
             )
 
+    def _begin_particle_contacts(self) -> None:
+        """Begin a native step; subclasses may reset step-local contact state."""
+
+    def _compute_particle_contact_deltas(self, particle_flags, friction: float, cohesion: float, dt: float) -> None:
+        model = self.model
+        # Corrections can move particles across hash cells. Rebuild
+        # before weighting and solving the same current contact graph.
+        model.particle_grid.build(self._positions, radius=2.0 * model.particle_max_radius + cohesion)
+        wp.launch(
+            compute_particle_contact_weights,
+            dim=model.particle_count,
+            inputs=[
+                model.particle_grid.id,
+                self._positions,
+                self._velocities,
+                model.particle_inv_mass,
+                model.particle_radius,
+                particle_flags,
+                model.particle_world,
+                friction,
+                cohesion,
+                model.particle_max_radius,
+                dt,
+            ],
+            outputs=[self._contact_weight],
+            device=model.device,
+        )
+        self._deltas.zero_()
+        wp.launch(
+            solve_particle_particle_contacts,
+            dim=model.particle_count,
+            inputs=[
+                model.particle_grid.id,
+                self._positions,
+                self._velocities,
+                model.particle_inv_mass,
+                model.particle_radius,
+                particle_flags,
+                model.particle_world,
+                friction,
+                cohesion,
+                model.particle_max_radius,
+                dt,
+                self.relaxation,
+                self._contact_weight,
+            ],
+            outputs=[self._deltas],
+            device=model.device,
+        )
+
+    def _apply_particle_contact_deltas(self, particle_flags, dt: float) -> None:
+        wp.launch(
+            _apply_particle_corrections,
+            dim=self.model.particle_count,
+            inputs=[
+                particle_flags,
+                dt,
+                self.model.particle_max_velocity,
+                self._deltas,
+                self._positions,
+                self._velocities,
+            ],
+            device=self.model.device,
+        )
+
     def step(
         self,
         state_in: State,
@@ -292,67 +357,13 @@ class _ParticleSolver:
                 ],
                 device=model.device,
             )
+        self._begin_particle_contacts()
         for _ in range(self.iterations):
             if model.particle_count > 1 and model.particle_grid is not None and model.particle_max_radius > 0.0:
-                # Corrections can move particles across hash cells. Rebuild
-                # before weighting and solving the same current contact graph.
-                model.particle_grid.build(self._positions, radius=2.0 * model.particle_max_radius + cohesion)
-                wp.launch(
-                    compute_particle_contact_weights,
-                    dim=model.particle_count,
-                    inputs=[
-                        model.particle_grid.id,
-                        self._positions,
-                        self._velocities,
-                        model.particle_inv_mass,
-                        model.particle_radius,
-                        particle_flags,
-                        model.particle_world,
-                        friction,
-                        cohesion,
-                        model.particle_max_radius,
-                        dt,
-                    ],
-                    outputs=[self._contact_weight],
-                    device=model.device,
-                )
-                self._deltas.zero_()
-                wp.launch(
-                    solve_particle_particle_contacts,
-                    dim=model.particle_count,
-                    inputs=[
-                        model.particle_grid.id,
-                        self._positions,
-                        self._velocities,
-                        model.particle_inv_mass,
-                        model.particle_radius,
-                        particle_flags,
-                        model.particle_world,
-                        friction,
-                        cohesion,
-                        model.particle_max_radius,
-                        dt,
-                        self.relaxation,
-                        self._contact_weight,
-                    ],
-                    outputs=[self._deltas],
-                    device=model.device,
-                )
+                self._compute_particle_contact_deltas(particle_flags, friction, cohesion, dt)
                 if has_colliders:
                     wp.copy(self._previous_positions, self._positions)
-                wp.launch(
-                    _apply_particle_corrections,
-                    dim=model.particle_count,
-                    inputs=[
-                        particle_flags,
-                        dt,
-                        model.particle_max_velocity,
-                        self._deltas,
-                        self._positions,
-                        self._velocities,
-                    ],
-                    device=model.device,
-                )
+                self._apply_particle_contact_deltas(particle_flags, dt)
                 if has_colliders:
                     # Constraint displacements can cross walls even after a safe ballistic sweep.
                     wp.launch(

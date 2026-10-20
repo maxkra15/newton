@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.implicit_mpm.particle_solver import _ParticleSolver
+from newton._src.solvers.implicit_mpm.particle_solver_xpbd import _XPBDParticleSolver
 from newton.solvers import SolverImplicitMPM
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -593,6 +594,195 @@ def test_particle_reaction_masked_reset(test, device):
         np.testing.assert_array_equal(solver._particle_solver.body_impulse.numpy(), expected)
 
 
+def test_particle_xpbd_compliance(test, device):
+    """Converge a compliant pair to its analytical equilibrium across iteration counts."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0), (0.09, 0.0, 0.0)],
+        vel=[(0.0, 0.0, 0.0)] * 2,
+        mass=[1.0, 4.0],
+        radius=[0.05] * 2,
+    )
+    model = builder.finalize(device=device)
+    dt, compliance = 0.01, 1.25e-4
+    expected_lambda = 0.01 / (1.25 + compliance / dt**2)
+    expected_q = np.asarray([[-expected_lambda, 0.0, 0.0], [0.09 + 0.25 * expected_lambda, 0.0, 0.0]])
+    for iterations in (1, 2, 4, 8):
+        with test.subTest(iterations=iterations):
+            state = model.state()
+            solver = _XPBDParticleSolver(
+                model, iterations=iterations, compliance=compliance, relaxation=1.0, friction=0.0
+            )
+            solver.step(state, state, dt)
+            np.testing.assert_allclose(state.particle_q.numpy(), expected_q, atol=2.0e-8)
+            np.testing.assert_allclose(solver.normal_lambda.numpy()[0, 0], expected_lambda, atol=1.0e-8)
+            q = state.particle_q.numpy()
+            constraint = float(q[1, 0] - q[0, 0] - 0.1)
+            test.assertAlmostEqual(constraint + compliance / dt**2 * expected_lambda, 0.0, delta=2.0e-8)
+            test.assertEqual(solver.check_contact_capacity()["overflow"], 0)
+    # Under-relaxation must also store exactly the correction that was applied.
+    state = model.state()
+    solver = _XPBDParticleSolver(model, iterations=1, compliance=compliance, relaxation=0.4, friction=0.0)
+    solver.step(state, state, dt)
+    np.testing.assert_allclose(
+        state.particle_q.numpy(),
+        np.asarray([[0.0, 0.0, 0.0], [0.09, 0.0, 0.0]])
+        + 0.4 * (expected_q - np.asarray([[0.0, 0.0, 0.0], [0.09, 0.0, 0.0]])),
+        atol=2.0e-8,
+    )
+    np.testing.assert_allclose(solver.normal_lambda.numpy()[0, 0], 0.4 * expected_lambda, atol=1.0e-8)
+
+
+def test_particle_xpbd_friction_and_dense_contacts(test, device):
+    """Bound accumulated friction and dense contact corrections while conserving momentum."""
+    dt = 0.002
+    points = np.asarray([(x * 0.009, y * 0.009, 0.0) for x in range(4) for y in range(4)], dtype=np.float32)
+    velocities = np.zeros_like(points)
+    velocities[:, 2] = [0.001 * (-1) ** (x + y) for x in range(4) for y in range(4)]
+    points[:, 2] = -velocities[:, 2] * dt
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=points.tolist(), vel=velocities.tolist(), mass=[1.0] * len(points), radius=[0.005] * len(points)
+    )
+    model = builder.finalize(device=device)
+    initial_energy = 0.5 * np.sum(velocities[:, 2] ** 2)
+    for iterations in (2, 4, 8):
+        with test.subTest(iterations=iterations):
+            state = model.state()
+            solver = _XPBDParticleSolver(model, iterations=iterations, compliance=2.0e-6, friction=0.5)
+            solver.step(state, state, dt)
+            q, qd = state.particle_q.numpy(), state.particle_qd.numpy()
+            test.assertTrue(np.isfinite(q).all())
+            test.assertLess(float(np.max(np.linalg.norm(q - points, axis=1))), 0.005)
+            test.assertLessEqual(float(0.5 * np.sum(qd[:, 2] ** 2)), float(initial_energy) + 1.0e-11)
+            np.testing.assert_allclose(np.sum(qd, axis=0), velocities.sum(axis=0), atol=2.0e-7)
+            np.testing.assert_allclose(np.sum(q, axis=0), (points + dt * velocities).sum(axis=0), atol=2.0e-7)
+            normal = solver.normal_lambda.numpy()
+            tangent = solver.tangent_lambda.numpy()
+            test.assertTrue(np.all(np.linalg.norm(tangent, axis=2) <= 0.5 * normal + 1.0e-10))
+            solver.check_contact_capacity()
+
+    # Mixed 3D modes are needed because the planar case separates normal and
+    # tangent motion. Opposite velocity perturbations cancel the overlap-repair
+    # energy to measure their average amplification about the resting case.
+    points = np.asarray(
+        [(x * 0.009, y * 0.009, z * 0.009) for x in range(3) for y in range(3) for z in range(3)], dtype=np.float32
+    )
+    velocities = np.asarray(
+        [
+            (0.001 * (-1) ** (x + y), 0.0007 * (-1) ** (y + z), 0.0005 * (-1) ** (x + z))
+            for x in range(3)
+            for y in range(3)
+            for z in range(3)
+        ],
+        dtype=np.float32,
+    )
+    velocities -= velocities.mean(axis=0)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=points.tolist(), vel=velocities.tolist(), mass=[1.0] * len(points), radius=[0.005] * len(points)
+    )
+    model = builder.finalize(device=device)
+    initial_energy = 0.5 * np.sum(velocities.astype(np.float64) ** 2)
+    for iterations in (2, 4, 8):
+        energies = []
+        for sign in (0.0, 1.0, -1.0):
+            with test.subTest(mixed_iterations=iterations, velocity_sign=sign):
+                state = model.state()
+                state.particle_q.assign(points - sign * dt * velocities)
+                state.particle_qd.assign(sign * velocities)
+                solver = _XPBDParticleSolver(model, iterations=iterations, compliance=2.0e-6, friction=0.5)
+                solver.step(state, state, dt)
+                q, qd = state.particle_q.numpy(), state.particle_qd.numpy().astype(np.float64)
+                test.assertTrue(np.isfinite(q).all() and np.isfinite(qd).all())
+                test.assertLess(float(np.max(np.linalg.norm(q - points, axis=1))), 0.005)
+                np.testing.assert_allclose(qd.sum(axis=0), sign * velocities.sum(axis=0), atol=5.0e-7)
+                np.testing.assert_allclose(q.sum(axis=0), points.sum(axis=0), atol=5.0e-7)
+                energies.append(float(0.5 * np.sum(qd**2)))
+                solver.check_contact_capacity()
+        perturbation_energy = 0.5 * (energies[1] + energies[2]) - energies[0]
+        test.assertLessEqual(perturbation_energy, 1.1 * initial_energy)
+
+
+def test_particle_xpbd_contact_lifecycle(test, device):
+    """Expose capacity overflow and reset pair multipliers once per native step."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0), (0.09, 0.0, 0.0), (-0.09, 0.0, 0.0)],
+        vel=[(0.0, 0.0, 0.0)] * 3,
+        mass=[1.0, 0.0, 0.0],
+        radius=[0.05] * 3,
+    )
+    model = builder.finalize(device=device)
+    state = model.state()
+    solver = _XPBDParticleSolver(model, iterations=2, compliance=1.0e-4, contact_capacity=1, friction=0.0)
+    solver.step(state, state, 0.01)
+    with test.assertRaisesRegex(RuntimeError, "capacity exceeded"):
+        solver.check_contact_capacity()
+    test.assertGreater(int(solver.contact_max_count.numpy()[0]), 1)
+    solver = _XPBDParticleSolver(model, iterations=2, compliance=1.0e-4, friction=0.0)
+    state = model.state()
+    solver.step(state, state, 0.01)
+    test.assertGreater(float(solver.normal_lambda.numpy().sum()), 0.0)
+    np.testing.assert_array_equal(state.particle_q.numpy()[1:], model.particle_q.numpy()[1:])
+    separated = np.asarray([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)], dtype=np.float32)
+    state.particle_q.assign(separated)
+    state.particle_qd.zero_()
+    solver.step(state, state, 0.01)
+    np.testing.assert_array_equal(solver.normal_lambda.numpy(), 0.0)
+    np.testing.assert_array_equal(solver.tangent_lambda.numpy(), 0.0)
+    np.testing.assert_array_equal(state.particle_q.numpy(), separated)
+    solver.check_contact_capacity()
+    model.particle_max_velocity = 0.01
+    state.particle_q.assign(np.asarray([(0.0, 0.0, 0.0), (0.09, 0.0, 0.0), (-1.0, 0.0, 0.0)], dtype=np.float32))
+    solver.step(state, state, 0.01)
+    with test.assertRaisesRegex(RuntimeError, "velocity cap"):
+        solver.check_contact_capacity()
+
+
+def test_particle_xpbd_multiplier_release(test, device):
+    """Apply full cached normal release and rotated tangent multiplier differences."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0), (0.13, 0.0, 0.0)], vel=[(0.0, 0.0, 0.0)] * 2, mass=[1.0, 1.0], radius=[0.05, 0.05]
+    )
+    model = builder.finalize(device=device)
+    solver = _XPBDParticleSolver(model, iterations=1, compliance=0.0, relaxation=1.0, friction=0.5)
+    solver._begin_particle_contacts()
+    solver.contact_ids.assign(np.asarray([[1] + [-1] * 63, [-1] * 64], dtype=np.int32))
+    solver.contact_count.assign(np.asarray([1, 0], dtype=np.int32))
+    normal = np.zeros((2, 64), dtype=np.float32)
+    tangent = np.zeros((2, 64, 3), dtype=np.float32)
+    normal[0, 0] = 0.01
+    tangent[0, 0] = (0.0, 0.004, 0.0)
+    solver.normal_lambda.assign(normal)
+    solver.tangent_lambda.assign(tangent)
+    solver._positions.assign(model.particle_q)
+    solver._velocities.zero_()
+    solver._compute_particle_contact_deltas(model.particle_flags, 0.5, 0.0, 0.01)
+    # This separated pair is absent from discovery but its retained lambda must release.
+    np.testing.assert_allclose(solver._deltas.numpy(), [(0.01, -0.004, 0.0), (-0.01, 0.004, 0.0)], atol=1.0e-8)
+    np.testing.assert_array_equal(solver.normal_lambda.numpy(), 0.0)
+    np.testing.assert_array_equal(solver.tangent_lambda.numpy(), 0.0)
+
+    direction = np.asarray([1.0, 1.0, 0.0], dtype=np.float32) / np.sqrt(2.0)
+    solver._positions.assign(np.asarray([[0.0, 0.0, 0.0], 0.09 * direction], dtype=np.float32))
+    normal[0, 0] = 0.005
+    tangent[0, 0] = (0.0, 0.001, 0.0)
+    solver.normal_lambda.assign(normal)
+    solver.tangent_lambda.assign(tangent)
+    solver._compute_particle_contact_deltas(model.particle_flags, 0.5, 0.0, 0.01)
+    projected = np.asarray([-0.0005, 0.0005, 0.0])
+    expected = -0.005 * direction + projected - tangent[0, 0]
+    np.testing.assert_allclose(solver._deltas.numpy(), [expected, -expected], atol=1.0e-8)
+    np.testing.assert_allclose(solver.tangent_lambda.numpy()[0, 0], projected, atol=1.0e-9)
+
+
 class TestParticleSolver(unittest.TestCase):
     """Verify particle-only solver kernels on available devices."""
 
@@ -600,6 +790,10 @@ class TestParticleSolver(unittest.TestCase):
 for _test in (
     test_particle_integration_state_ownership,
     test_particle_contact_relaxation,
+    test_particle_xpbd_compliance,
+    test_particle_xpbd_friction_and_dense_contacts,
+    test_particle_xpbd_contact_lifecycle,
+    test_particle_xpbd_multiplier_release,
     test_particle_redundant_contacts,
     test_particle_isolated_contact_friction,
     test_particle_unequal_mass_contact_momentum,
