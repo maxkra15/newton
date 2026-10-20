@@ -242,6 +242,90 @@ def solve_particle_shape_contacts(
         wp.atomic_sub(body_delta, body_index, wp.spatial_vector(delta_v, delta_w))
 
 
+@wp.func
+def particle_particle_contact_enabled(
+    i: int,
+    j: int,
+    particle_flags: wp.array[wp.int32],
+    particle_invmass: wp.array[float],
+    particle_world: wp.array[wp.int32],
+):
+    return (
+        i != j
+        and (particle_flags[j] & ParticleFlags.ACTIVE) != 0
+        and (particle_world[i] == particle_world[j] or particle_world[i] < 0 or particle_world[j] < 0)
+        and (
+            (particle_flags[i] & ParticleFlags.PROXY) == 0
+            or ((particle_flags[j] & ParticleFlags.PROXY) == 0 and particle_invmass[j] > 0.0)
+        )
+    )
+
+
+@wp.func
+def particle_contact_eigenvalue_bound(matrix: wp.mat33):
+    # Bound the largest eigenvalue using the mean and variance of all three
+    # eigenvalues, without dependence on the orientation of the contact graph.
+    mean = wp.trace(matrix) / 3.0
+    deviator = matrix - wp.diag(wp.vec3(mean))
+    return mean + wp.sqrt((2.0 / 3.0) * wp.ddot(deviator, deviator))
+
+
+@wp.kernel
+def compute_particle_contact_weights(
+    grid: wp.uint64,
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    particle_invmass: wp.array[float],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
+    k_mu: float,
+    k_cohesion: float,
+    max_radius: float,
+    dt: float,
+    contact_weight: wp.array[wp.vec2],
+):
+    i = wp.hash_grid_point_id(grid, wp.tid())
+    if i == -1:
+        return
+    normal_matrix = wp.mat33(0.0)
+    friction_matrix = wp.mat33(0.0)
+    friction_sum = float(0.0)
+    if (particle_flags[i] & ParticleFlags.ACTIVE) != 0:
+        x = particle_x[i]
+        radius = particle_radius[i]
+        w1 = particle_invmass[i]
+        query = wp.hash_grid_query(grid, x, radius + max_radius + k_cohesion)
+        j = int(0)
+        while wp.hash_grid_query_next(query, j):
+            if particle_particle_contact_enabled(i, j, particle_flags, particle_invmass, particle_world):
+                n = x - particle_x[j]
+                d = wp.length(n)
+                err = d - radius - particle_radius[j]
+                denom = w1 + particle_invmass[j]
+                if d > 0.0 and err <= k_cohesion and denom > 0.0:
+                    n = n / d
+                    normal = wp.outer(n, n)
+                    normal_matrix += (w1 / denom) * normal
+                    if k_mu > 0.0 and err < 0.0:
+                        vrel = particle_v[i] - particle_v[j]
+                        vt = vrel - n * wp.dot(n, vrel)
+                        slip = wp.length(vt) * dt
+                        sigma = float(1.0)
+                        if slip > 0.0:
+                            sigma = wp.min(1.0, -k_mu * err / slip)
+                        friction_weight = (w1 / denom) * sigma
+                        friction_sum += friction_weight
+                        friction_matrix += friction_weight * (wp.diag(wp.vec3(1.0)) - normal)
+
+    normal_weight = wp.max(1.0, particle_contact_eigenvalue_bound(normal_matrix))
+    # Each tangent projector is bounded by the identity, giving a second
+    # bound that preserves isolated-pair friction, including pinned pairs.
+    friction_bound = wp.min(friction_sum, particle_contact_eigenvalue_bound(friction_matrix))
+    # Friction must not exceed the Coulomb budget of the weighted normal repair.
+    contact_weight[i] = wp.vec2(normal_weight, wp.max(normal_weight, friction_bound))
+
+
 @wp.kernel
 def solve_particle_particle_contacts(
     grid: wp.uint64,
@@ -256,6 +340,7 @@ def solve_particle_particle_contacts(
     max_radius: float,
     dt: float,
     relaxation: float,
+    contact_weight: wp.array[wp.vec2],
     # outputs
     deltas: wp.array[wp.vec3],
 ):
@@ -269,8 +354,6 @@ def solve_particle_particle_contacts(
     particle_flag = particle_flags[i]
     if (particle_flag & ParticleFlags.ACTIVE) == 0:
         return
-    is_proxy = particle_flag & ParticleFlags.PROXY
-
     x = particle_x[i]
     v = particle_v[i]
     radius = particle_radius[i]
@@ -283,13 +366,7 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     while wp.hash_grid_query_next(query, index):
-        neighbor_flag = particle_flags[index]
-        if (
-            (neighbor_flag & ParticleFlags.ACTIVE) != 0
-            and (particle_world[i] == particle_world[index] or particle_world[i] < 0 or particle_world[index] < 0)
-            and (is_proxy == 0 or ((neighbor_flag & ParticleFlags.PROXY) == 0 and particle_invmass[index] > 0.0))
-            and index != i
-        ):
+        if particle_particle_contact_enabled(i, index, particle_flags, particle_invmass, particle_world):
             # compute distance to point
             n = x - particle_x[index]
             d = wp.length(n)
@@ -314,7 +391,13 @@ def solve_particle_particle_contacts(
                 # Cohesive gaps attract normally without adding tangential friction.
                 lambda_f = wp.max(k_mu * wp.min(lambda_n, 0.0), -wp.length(vt) * dt)
                 delta_f = wp.normalize(vt) * lambda_f
-                delta += (delta_f - delta_n) / denom
+                if contact_weight:
+                    # Symmetric normal and tangent weights preserve momentum.
+                    normal_weight = wp.max(contact_weight[i][0], contact_weight[index][0])
+                    friction_weight = wp.max(contact_weight[i][1], contact_weight[index][1])
+                    delta += delta_f / (denom * friction_weight) - delta_n / (denom * normal_weight)
+                else:
+                    delta += (delta_f - delta_n) / denom
 
     wp.atomic_add(deltas, i, delta * w1 * relaxation)
 

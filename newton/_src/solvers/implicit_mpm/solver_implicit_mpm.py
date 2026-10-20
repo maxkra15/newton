@@ -893,8 +893,11 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         particle_relaxation: float = dataclass_field(default=0.9, kw_only=True)
         """Particle-pair contact relaxation in ``(0, 1]``.
 
-        Smaller values can stabilize dense confined piles at the cost of
-        greater overlap and weaker pressure support at a fixed iteration count.
+        Pair corrections use symmetric weights based on contact directions
+        and inverse masses to limit dense Jacobi overshoot. Normal and friction
+        corrections are weighted separately. Smaller relaxation further reduces
+        corrections at the cost of greater overlap and weaker pressure support
+        at a fixed iteration count.
         """
         particle_friction: float | None = dataclass_field(default=None, kw_only=True)
         """Particle-pair friction coefficient. ``None`` uses ``model.particle_mu``.

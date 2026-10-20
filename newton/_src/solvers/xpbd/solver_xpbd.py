@@ -720,6 +720,7 @@ class SolverXPBD(TendonStateMixin, SolverBase, CouplingInterface):
                                     model.particle_max_radius,
                                     dt,
                                     self.soft_contact_relaxation,
+                                    None,
                                 ],
                                 outputs=[particle_deltas],
                                 device=model.device,

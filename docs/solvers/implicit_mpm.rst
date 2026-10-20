@@ -144,19 +144,53 @@ Particle contact stability
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The default two local iterations are a performance choice, rather than a
-convergence guarantee for every packing depth and timestep. In a densely
-filled container, simultaneous pair corrections can add energy faster than
-rigid contacts remove it. Sweeping the particle trajectory prevents some wall
-crossings, but cannot stabilize an unconverged contact solve.
+convergence guarantee for every packing depth and timestep. Each iteration
+rebuilds the spatial hash from current positions and weights corrections using
+their directions and inverse masses. For each particle, assemble
+``D_i = sum_j w_i / (w_i + w_j) * outer(n_ij, n_ij)`` over
+active pair contacts, where ``w`` is inverse mass and ``n`` is the contact
+normal. Let ``m = trace(D_i) / 3`` and
+``s_i = max(1, m + sqrt(2/3 * ||D_i - m*I||_F^2))``. This rotation-invariant
+bound estimates the strongest simultaneous normal response. A pair uses
+``(w_i + w_j) * max(s_i, s_j)`` as its correction denominator. Both ends use
+the same denominator, preserving pair linear momentum; isolated pairs retain
+their original response. This avoids scaling every contact by its neighbor
+count, which can compress ordinary piles excessively at low iteration counts.
+Rebuilding neighbors prevents corrections across hash cells from producing
+asymmetric contact discovery.
+
+Friction needs its own weight: a neighborhood that is mild along its contact
+normals can still amplify a sticking tangential velocity mode. In the same
+neighbor pass, assemble tangent projectors ``I - outer(n, n)`` weighted by
+inverse mass and the fraction of tangential motion removed by the Coulomb
+clamp. Bound their strongest response with the same eigenvalue estimate,
+also capped by the sum of those scalar weights. The tangent scale is at least
+the normal scale, so weighting cannot increase the friction-to-normal
+correction ratio above the original Coulomb budget. Normal pressure support
+is not weakened just because tangential contacts need extra damping.
+
+These changes add a local-weight pass and a hash-grid rebuild per iteration.
+They do not construct an MPM grid or assemble its global stress solve. They
+also do not guarantee energy conservation or convergence of arbitrary dense
+packings. Pair position corrections update velocity, while mesh-only overlap
+repair does not. Sweeping particle centers prevents some wall crossings, but
+does not provide continuous sphere collision detection.
 
 ``particle_relaxation`` scales the XPBD pair corrections. Its default is
-``0.9``, matching the original particle implementation; a smaller value can
-reduce contact overshoot without additional iterations. It also weakens the
-contact response at a fixed iteration budget and can increase packing
-compression. Increasing iterations or decreasing the timestep usually gives
+``0.9``; a smaller value further reduces corrections without additional
+iterations. It also weakens the contact response at a fixed iteration budget
+and can increase packing compression. Increasing iterations or decreasing the timestep usually gives
 better contact convergence, with additional computational cost. These choices
 need task measurements such as retained mass, settling height, and delivery
 into the target container, rather than finite positions alone.
+
+Iteration count affects packing, friction convergence, and approximate proxy
+forces. Particle mode has no constitutive stress history or compliant XPBD
+multiplier accumulation, so changing the iteration budget is not an
+iteration-independent material calibration. A policy trained with one budget
+can perform differently with another even when both simulations stay finite.
+The measurements below predate directional weighting and per-iteration
+neighbor rebuilds and document the original implementation.
 
 A Rizon teapot test used 135,314 particles, a 0.75 mm particle radius, 1.5 mm
 initial spacing, zero pair friction/cohesion, and an 800 Hz rigid controller.

@@ -96,6 +96,185 @@ def test_particle_contact_relaxation(test, device):
                 state.particle_qd.numpy()[:, 0], (-expected_delta / 0.01, expected_delta / 0.01), atol=1.0e-6
             )
 
+    direction = np.asarray((3.0, 1.0, 2.0)) / np.sqrt(14.0)
+    for masses in ((1.0, 4.0), (1.0, 0.0)):
+        with test.subTest(oblique_masses=masses):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            SolverImplicitMPM.register_custom_attributes(builder)
+            builder.add_particles(
+                pos=[(0.0, 0.0, 0.0), tuple(0.09 * direction)],
+                vel=[(0.0, 0.0, 0.0)] * 2,
+                mass=masses,
+                radius=[0.05] * 2,
+            )
+            model = builder.finalize(device=device)
+            state = model.state()
+            initial_q = state.particle_q.numpy().copy()
+            config = SolverImplicitMPM.Config(fidelity="particles", particle_iterations=1, particle_friction=0.0)
+            solver = SolverImplicitMPM(model, config, verbose=False)
+            solver.step(state, state, None, None, 0.01)
+            # A single contact must retain its inverse-mass split at any orientation,
+            # including a pinned endpoint with a maximally unequal inverse-mass ratio.
+            inverse_mass = np.asarray([1.0 / mass if mass else 0.0 for mass in masses])
+            displacement = (
+                config.particle_relaxation
+                * 0.01
+                * np.asarray((-inverse_mass[0], inverse_mass[1]))[:, None]
+                * direction
+                / inverse_mass.sum()
+            )
+            np.testing.assert_allclose(state.particle_q.numpy(), initial_q + displacement, atol=1.0e-7)
+            np.testing.assert_allclose(state.particle_qd.numpy(), displacement / 0.01, atol=2.0e-6)
+            if all(masses):
+                momentum = np.sum(np.asarray(masses)[:, None] * state.particle_qd.numpy(), axis=0)
+                np.testing.assert_allclose(momentum, 0.0, atol=2.0e-6)
+
+
+def test_particle_redundant_contacts(test, device):
+    """Repair redundant pinned contacts without ejecting the moving particle."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0)] + [(1.8, 0.0, 0.0)] * 8,
+        vel=[(0.0, 0.0, 0.0)] * 9,
+        mass=[1.0] + [0.0] * 8,
+        radius=[1.0] * 9,
+    )
+    model = builder.finalize(device=device)
+    dt = 0.01
+    for iterations in (2, 4, 8):
+        with test.subTest(iterations=iterations):
+            state = model.state()
+            initial_q = state.particle_q.numpy().copy()
+            solver = _ParticleSolver(model, iterations=iterations, friction=0.0, cohesion=0.0)
+            solver.step(state, state, dt)
+            q, qd = state.particle_q.numpy(), state.particle_qd.numpy()
+            # These eight constraints describe the same 0.2 m overlap repair.
+            test.assertGreaterEqual(float(q[0, 0]), -0.200001)
+            test.assertLessEqual(float(q[0, 0]), -0.19)
+            test.assertLessEqual(float(np.linalg.norm(qd[0])), 0.2 / dt + 1.0e-3)
+            np.testing.assert_array_equal(q[1:], initial_q[1:])
+            np.testing.assert_array_equal(qd[1:], 0.0)
+
+
+def test_particle_isolated_contact_friction(test, device):
+    """Preserve isolated oblique friction for free and pinned particle pairs."""
+    normal = np.asarray((3.0, 1.0, 2.0)) / np.sqrt(14.0)
+    tangent = np.asarray((-1.0, 3.0, 0.0)) / np.sqrt(10.0)
+    dt = 0.01
+    velocity = 0.1 * tangent
+    for masses in ((1.0, 4.0), (1.0, 0.0)):
+        with test.subTest(masses=masses):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            SolverImplicitMPM.register_custom_attributes(builder)
+            builder.add_particles(
+                pos=[tuple(-dt * velocity), tuple(0.09 * normal)],
+                vel=[tuple(velocity), (0.0, 0.0, 0.0)],
+                mass=masses,
+                radius=[0.05] * 2,
+            )
+            model = builder.finalize(device=device)
+            state = model.state()
+            initial_momentum = np.sum(np.asarray(masses)[:, None] * state.particle_qd.numpy(), axis=0)
+            config = SolverImplicitMPM.Config(fidelity="particles", particle_iterations=1, particle_friction=0.5)
+            solver = SolverImplicitMPM(model, config, verbose=False)
+            solver.step(state, state, None, None, dt)
+            qd = state.particle_qd.numpy()
+            # Prediction makes the 1 cm contact overlap normal to the relative
+            # velocity; its friction budget is sufficient for sticking.
+            expected_relative_velocity = (
+                -config.particle_relaxation * normal + (1.0 - config.particle_relaxation) * velocity
+            )
+            np.testing.assert_allclose(qd[0] - qd[1], expected_relative_velocity, atol=3.0e-6)
+            if all(masses):
+                np.testing.assert_allclose(
+                    np.sum(np.asarray(masses)[:, None] * qd, axis=0), initial_momentum, atol=2.0e-6
+                )
+            else:
+                np.testing.assert_array_equal(qd[1], 0.0)
+
+
+def test_particle_unequal_mass_contact_momentum(test, device):
+    """Conserve free-particle momentum when contact degrees and masses differ."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(0.0, 0.0, 0.0), (1.2, 0.1, 0.0), (2.9, 0.3, 0.0)],
+        vel=[(0.0, 0.0, 0.0)] * 3,
+        mass=[1.0, 2.0, 4.0],
+        radius=[1.0] * 3,
+    )
+    model = builder.finalize(device=device)
+    state = model.state()
+    mass = model.particle_mass.numpy().astype(np.float64)[:, None]
+    initial_mass_position = np.sum(mass * state.particle_q.numpy(), axis=0)
+    initial_momentum = np.sum(mass * state.particle_qd.numpy(), axis=0)
+    # The middle particle contacts both ends, which do not contact each other.
+    solver = _ParticleSolver(model, iterations=1, friction=0.0, cohesion=0.0)
+    solver.step(state, state, 0.01)
+    np.testing.assert_allclose(np.sum(mass * state.particle_q.numpy(), axis=0), initial_mass_position, atol=1.0e-6)
+    np.testing.assert_allclose(np.sum(mass * state.particle_qd.numpy(), axis=0), initial_momentum, atol=2.0e-5)
+
+
+def test_particle_contact_neighbor_updates(test, device):
+    """Conserve momentum when contact corrections move particles between grid cells."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=[(x, 0.0, 0.0) for x in (0.0, 0.001, 0.002, 0.004)],
+        vel=[(0.0, 0.0, 0.0)] * 4,
+        mass=[0.001] * 4,
+        radius=[0.005] * 4,
+    )
+    model = builder.finalize(device=device)
+    mass = model.particle_mass.numpy().astype(np.float64)[:, None]
+    for iterations in (2, 4, 8):
+        with test.subTest(iterations=iterations):
+            state = model.state()
+            initial_com = np.sum(mass * state.particle_q.numpy(), axis=0) / mass.sum()
+            solver = _ParticleSolver(model, iterations=iterations, friction=0.0, cohesion=0.0)
+            # The initial overlaps deliberately require corrections spanning hash cells.
+            solver.step(state, state, 0.002)
+            com = np.sum(mass * state.particle_q.numpy(), axis=0) / mass.sum()
+            momentum = np.sum(mass * state.particle_qd.numpy(), axis=0)
+            np.testing.assert_allclose(com, initial_com, atol=1.0e-7)
+            np.testing.assert_allclose(momentum, 0.0, atol=1.0e-8)
+
+
+def test_particle_friction_dissipates_transverse_energy(test, device):
+    """Dissipate tangential kinetic energy in a planar sticking-contact graph."""
+    dt = 0.002
+    points = np.asarray([(x * 0.009, y * 0.009, 0.0) for x in range(4) for y in range(4)], dtype=np.float32)
+    velocities = np.zeros_like(points)
+    velocities[:, 2] = [0.001 * (-1) ** (x + y) for x in range(4) for y in range(4)]
+    # Ballistic prediction puts every contact normal in the xy plane, so normal
+    # overlap repair cannot contribute to the measured transverse kinetic energy.
+    points[:, 2] = -velocities[:, 2] * dt
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    SolverImplicitMPM.register_custom_attributes(builder)
+    builder.add_particles(
+        pos=points.tolist(),
+        vel=velocities.tolist(),
+        mass=[1.0] * len(points),
+        radius=[0.005] * len(points),
+    )
+    model = builder.finalize(device=device)
+    mass = model.particle_mass.numpy().astype(np.float64)
+    for friction in (0.0, 0.5):
+        with test.subTest(friction=friction):
+            state = model.state()
+            initial_velocity = state.particle_qd.numpy().copy()
+            initial_energy = 0.5 * np.sum(mass * initial_velocity[:, 2] ** 2)
+            initial_momentum = np.sum(mass[:, None] * initial_velocity, axis=0)
+            solver = _ParticleSolver(model, iterations=1, friction=friction, cohesion=0.0)
+            solver.step(state, state, dt)
+            velocity = state.particle_qd.numpy()
+            energy = 0.5 * np.sum(mass * velocity[:, 2] ** 2)
+            test.assertLessEqual(float(energy), float(initial_energy) * (1.0 + 1.0e-5) + 1.0e-12)
+            np.testing.assert_allclose(np.sum(mass[:, None] * velocity, axis=0), initial_momentum, atol=1.0e-6)
+            if friction == 0.0:
+                np.testing.assert_allclose(velocity[:, 2], initial_velocity[:, 2], atol=1.0e-8)
+
 
 def test_particle_confined_stack_relaxation(test, device):
     """Keep a dense stack bounded when under-relaxing summed local contacts."""
@@ -421,6 +600,11 @@ class TestParticleSolver(unittest.TestCase):
 for _test in (
     test_particle_integration_state_ownership,
     test_particle_contact_relaxation,
+    test_particle_redundant_contacts,
+    test_particle_isolated_contact_friction,
+    test_particle_unequal_mass_contact_momentum,
+    test_particle_contact_neighbor_updates,
+    test_particle_friction_dissipates_transverse_energy,
     test_particle_confined_stack_relaxation,
     test_particle_mesh_reactions,
     test_particle_swept_moving_mesh,

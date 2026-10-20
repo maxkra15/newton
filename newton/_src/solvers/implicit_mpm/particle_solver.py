@@ -12,7 +12,7 @@ import warp as wp
 from ...geometry import ParticleFlags
 from ...sim import BodyFlags, Model, State
 from ..solver import integrate_particles
-from ..xpbd.kernels import solve_particle_particle_contacts
+from ..xpbd.kernels import compute_particle_contact_weights, solve_particle_particle_contacts
 from .contact_solver_kernels import solve_coulomb_isotropic
 from .rasterized_collisions import _ALL_COLLIDER_WORLDS, Collider, _swept_collider_contact, collision_sdf
 
@@ -181,7 +181,8 @@ class _ParticleSolver:
 
     Rigid collider motion is prescribed. Velocity corrections produce equal
     and opposite body impulses for lagged proxy coupling; they do not integrate
-    rigid bodies. Positional overlap repair contributes no artificial impulse.
+    rigid bodies. Mesh overlap repair alone contributes no impulse;
+    particle-pair corrections update velocities to approximate pressure support.
     The sweep guards particle centers and is not finite-radius continuous
     collision detection. Finite-radius contacts are enforced at endpoints.
     """
@@ -204,6 +205,7 @@ class _ParticleSolver:
         self._positions = wp.empty_like(self._previous_positions)
         self._velocities = wp.empty_like(self._previous_positions)
         self._deltas = wp.empty_like(self._previous_positions)
+        self._contact_weight = wp.empty(model.particle_count, dtype=wp.vec2, device=model.device)
         self.body_impulse = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
 
     def reset(self, world_mask: wp.array[wp.bool] | None = None) -> None:
@@ -290,10 +292,30 @@ class _ParticleSolver:
                 ],
                 device=model.device,
             )
-        if model.particle_count > 1 and model.particle_grid is not None and model.particle_max_radius > 0.0:
-            model.particle_grid.build(self._positions, radius=2.0 * model.particle_max_radius + cohesion)
         for _ in range(self.iterations):
             if model.particle_count > 1 and model.particle_grid is not None and model.particle_max_radius > 0.0:
+                # Corrections can move particles across hash cells. Rebuild
+                # before weighting and solving the same current contact graph.
+                model.particle_grid.build(self._positions, radius=2.0 * model.particle_max_radius + cohesion)
+                wp.launch(
+                    compute_particle_contact_weights,
+                    dim=model.particle_count,
+                    inputs=[
+                        model.particle_grid.id,
+                        self._positions,
+                        self._velocities,
+                        model.particle_inv_mass,
+                        model.particle_radius,
+                        particle_flags,
+                        model.particle_world,
+                        friction,
+                        cohesion,
+                        model.particle_max_radius,
+                        dt,
+                    ],
+                    outputs=[self._contact_weight],
+                    device=model.device,
+                )
                 self._deltas.zero_()
                 wp.launch(
                     solve_particle_particle_contacts,
@@ -311,6 +333,7 @@ class _ParticleSolver:
                         model.particle_max_radius,
                         dt,
                         self.relaxation,
+                        self._contact_weight,
                     ],
                     outputs=[self._deltas],
                     device=model.device,
