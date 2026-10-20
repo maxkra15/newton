@@ -19,6 +19,23 @@ from .particle_solver import _ParticleSolver
 
 
 @wp.kernel(enable_backward=False)
+def _clear_contacts(
+    contact_ids: wp.array2d[int],
+    contact_count: wp.array[int],
+    normal_lambda: wp.array2d[float],
+    tangent_lambda: wp.array2d[wp.vec3],
+):
+    i = wp.tid()
+    # Unused multipliers start at zero and have never been read or written.
+    # Clearing only previously occupied slots makes capacity a storage cost.
+    for slot in range(wp.min(contact_count[i], contact_ids.shape[1])):
+        contact_ids[i, slot] = -1
+        normal_lambda[i, slot] = 0.0
+        tangent_lambda[i, slot] = wp.vec3(0.0)
+    contact_count[i] = 0
+
+
+@wp.kernel(enable_backward=False)
 def _discover_contacts(
     grid: wp.uint64,
     positions: wp.array[wp.vec3],
@@ -211,6 +228,7 @@ class _XPBDParticleSolver(_ParticleSolver):
         self.contact_capacity = contact_capacity
         shape = (model.particle_count, contact_capacity)
         self.contact_ids = wp.empty(shape, dtype=int, device=model.device)
+        self.contact_ids.fill_(-1)
         self.contact_count = wp.zeros(model.particle_count, dtype=int, device=model.device)
         self.normal_lambda = wp.zeros(shape, dtype=float, device=model.device)
         self.tangent_lambda = wp.zeros(shape, dtype=wp.vec3, device=model.device)
@@ -221,10 +239,12 @@ class _XPBDParticleSolver(_ParticleSolver):
         self._tangent_degree = wp.empty(model.particle_count, dtype=float, device=model.device)
 
     def _begin_particle_contacts(self) -> None:
-        self.contact_ids.fill_(-1)
-        self.contact_count.zero_()
-        self.normal_lambda.zero_()
-        self.tangent_lambda.zero_()
+        wp.launch(
+            _clear_contacts,
+            dim=self.model.particle_count,
+            inputs=[self.contact_ids, self.contact_count, self.normal_lambda, self.tangent_lambda],
+            device=self.model.device,
+        )
 
     def check_contact_capacity(self) -> dict[str, int]:
         """Validate cumulative diagnostics outside a captured loop; never clear them."""
