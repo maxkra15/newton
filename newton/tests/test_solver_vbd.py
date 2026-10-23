@@ -6012,7 +6012,7 @@ def _bending_plasticity_validation(test, device):
 def _bending_plasticity_coupled_reset(test, device):
     """Gather and reset plastic material history through the native proxy coupler."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-    builder.replicate(_plastic_hinge_builder(), world_count=2, spacing=(2.0, 0.0, 0.0))
+    builder.replicate(_plastic_hinge_builder(), copy_count=2, spacing=(2.0, 0.0, 0.0))
     builder.add_builder(_plastic_hinge_builder(), xform=wp.transform((4.0, 0.0, 0.0), wp.quat_identity()))
     builder.color()
     model = builder.finalize(device=device)
@@ -6074,7 +6074,7 @@ def _bending_plasticity_coupled_reset(test, device):
 def _bending_plasticity_reset_worlds(test, device):
     """Reset selected worlds' creases with particle positions and preserve other worlds."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-    builder.replicate(_plastic_hinge_builder(), world_count=2, spacing=(2.0, 0.0, 0.0))
+    builder.replicate(_plastic_hinge_builder(), copy_count=2, spacing=(2.0, 0.0, 0.0))
     builder.add_builder(_plastic_hinge_builder(), xform=wp.transform((4.0, 0.0, 0.0), wp.quat_identity()))
     builder.color()
     model = builder.finalize(device=device)
