@@ -21,6 +21,7 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.geometry.unified import CollisionPipelineUnifiedKamino
 from newton._src.solvers.kamino._src.utils import logger as msg
+from newton.exceptions import NewtonWarning
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.test_kamino_geometry_primitive import check_contacts
 from newton.tests.utils import basics, testing
@@ -571,7 +572,7 @@ class TestCollisionPipelineUnified(unittest.TestCase):
     def test_09_large_pair_warning_only_on_explicit_setup(self):
         """Warn about large pair workloads only for explicit collision setup."""
         builder = ModelBuilder()
-        builder.replicate(basics.build_sphere_on_plane(z_offset=0.5), world_count=2)
+        builder.replicate(basics.build_sphere_on_plane(z_offset=0.5), copy_count=2)
         model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
         pairs = wp.array([[0, 1], [1, 0], [0, 1], [2, 3]], dtype=wp.vec2i, device=self.default_device)
         model.geoms.collidable_pairs = pairs
@@ -585,7 +586,7 @@ class TestCollisionPipelineUnified(unittest.TestCase):
                 mock.patch.object(model.geoms.wid, "numpy", wraps=model.geoms.wid.numpy) as read_worlds,
                 warnings.catch_warnings(record=True) as caught,
             ):
-                warnings.filterwarnings("always", message="Explicit broad phase tests", category=RuntimeWarning)
+                warnings.filterwarnings("always", message="Explicit broad phase tests", category=NewtonWarning)
                 CollisionPipelineUnifiedKamino(model, broadphase=broadphase)
             self.assertEqual(len(caught), int(broadphase == "explicit"))
             self.assertEqual(read_pairs.call_count, int(broadphase == "explicit"))

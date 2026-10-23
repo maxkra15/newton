@@ -111,9 +111,10 @@ in place, so different states can share it without sharing creases.
 restores selected worlds' original particle positions and clears their plastic
 angles. Velocity-only resets preserve creases. CPU, CUDA, in-place steps, and
 CUDA graph replay are supported. This mode does not implement membrane
-plasticity, hardening, fracture, or automatic differentiation. Edge attributes
-are runtime-only data indexed by generated hinges, rather than USD mesh
-material attributes.
+plasticity, hardening, fracture, or automatic differentiation. Plastic offsets
+are runtime State history. Yield angles are builder-authored material inputs
+indexed by generated hinges; USD schema and importer support is not
+implemented.
 
 Coupling Modes
 ~~~~~~~~~~~~~~
