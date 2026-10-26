@@ -136,6 +136,8 @@ class TestApi(unittest.TestCase):
             "particle_friction",
             "particle_cohesion",
             "warmstart_contact_impulses",
+            "carry_residual_strain",
+            "gs_colored_contacts",
         ):
             with self.subTest(parameter=name):
                 self.assertEqual(parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
@@ -156,6 +158,23 @@ class TestApi(unittest.TestCase):
         self.assertEqual(approximation.particle_friction, 0.3)
         self.assertEqual(approximation.particle_cohesion, 0.01)
         self.assertTrue(approximation.warmstart_contact_impulses)
+        self.assertIsNone(SolverImplicitMPM.Config().warmstart_contact_impulses)
+
+    def test_joint_target_layout_flag_removed(self):
+        """Expose coordinate-shaped position targets without a layout switch."""
+        import newton  # noqa: PLC0415
+
+        self.assertNotIn("use_coord_layout_targets", newton.__all__)
+        self.assertFalse(hasattr(newton, "use_coord_layout_targets"))
+        builder = newton.ModelBuilder()
+        body = builder.add_link()
+        joint = builder.add_joint_free(child=body)
+        builder.add_articulation([joint])
+        model = builder.finalize(device="cpu")
+        self.assertFalse(hasattr(model, "use_coord_layout_targets"))
+        self.assertEqual(model.joint_target_q.shape, (7,))
+        self.assertEqual(model.control().joint_target_q.shape, (7,))
+        self.assertIs(model.joint_target_q_start, model.joint_q_start)
 
     def test_collision_pipeline_flattens_speculative_contact_config(self):
         """Configure speculative contacts without a single-field wrapper."""

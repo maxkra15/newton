@@ -393,8 +393,8 @@ class Example:
         parser.add_argument(
             "--warmstart-contact-impulses",
             action=BooleanOptionalAction,
-            default=False,
-            help="Preserve S2 contact impulses across sparse-grid rebuilds.",
+            default=None,
+            help="Enable/disable native sparse-grid contact history; default preserves the upstream solver behavior.",
         )
         parser.add_argument(
             "--critical-fraction",

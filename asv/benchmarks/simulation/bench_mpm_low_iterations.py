@@ -523,14 +523,23 @@ def main():
                 "warmstart": case.warmstart,
                 "warmstart_contact_impulses": case.warmstart_contact_impulses,
                 "contact_cache_reserved_bytes": sum(
-                    array.capacity for array in example.mpm_solver._last_step_data.contact_cache._arguments()
-                )
-                if case.warmstart_contact_impulses
-                else 0,
+                    array.capacity
+                    for array in (
+                        example.mpm_solver._last_step_data.impulse_keys,
+                        example.mpm_solver._last_step_data.impulse_nodes,
+                        example.mpm_solver._last_step_data.impulse_values,
+                    )
+                    if array is not None
+                ),
                 "contact_cache_final_entries": int(
-                    np.count_nonzero(example.mpm_solver._last_step_data.contact_cache.slots.numpy() >= 0)
+                    np.count_nonzero(
+                        example.mpm_solver._last_step_data.impulse_keys.numpy()[
+                            : example.mpm_solver._last_step_data.impulse_values.shape[0]
+                        ]
+                        != np.iinfo(np.int64).max
+                    )
                 )
-                if case.warmstart_contact_impulses
+                if example.mpm_solver._last_step_data.impulse_values is not None
                 else 0,
                 "validation_passed": validation_error is None,
                 "validation_error": validation_error,

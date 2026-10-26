@@ -953,7 +953,7 @@ Validation and profiling
 
 .. code-block:: console
 
-   uv run --extra dev -m unittest newton.tests.test_implicit_mpm_adaptive
+   uv run --extra dev -m unittest newton.tests.implicit_mpm.test_adaptive
    uv run --extra dev -m unittest newton.tests.test_examples.TestMPMExamples -k mpm_bowl
    uv run --extra dev asv/benchmarks/simulation/bench_mpm_bowl.py
 
@@ -1244,40 +1244,32 @@ checked point-basis capacity to Newton's existing status mechanism, including
 graph replay and per-world tests. The benchmark's subclass is a prototype of
 the check. Larger particle counts need separate cost and memory measurements.
 
-The subsequent ``Config.warmstart_contact_impulses`` option implements S2
-history transfer through a cache independent of the mutable FEM topology.
-It retains the default contact discretization and avoids an XPBD predictor.
-The initial measurements below predate that implementation.
+The subsequent experimental S2 hash cache tested history transfer independently
+of mutable FEM topology. The latest upstream solver now provides native keyed
+grid-contact history, so the branch uses that implementation instead. The
+measurements below describe the earlier implementations and are not performance
+results for the refreshed branch.
 
 S2 contact history across sparse rebuilds
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Set ``warmstart_contact_impulses=True`` with a rebuildable sparse grid and
-``collider_basis="S2"``. Existing stress ``warmstart_mode`` remains independent.
-The option is experimental and disabled by default; unsupported grid/basis
-combinations raise a configuration error rather than silently ignoring it.
+``warmstart_contact_impulses=None`` preserves the upstream default: native keyed
+history is enabled for grid contacts on rebuildable sparse grids. Explicit
+``True`` enables the same path; ``False`` starts those grid contacts cold for
+controlled comparisons. Particle-contact history and stress ``warmstart_mode``
+are independent of this experimental option.
 
-The solver saves contact impulses in a persistent bounded hash table. A key
-contains the FEM environment and integer coordinates on the half-voxel lattice.
-This retains a node's identity even when rebuilt sparse topology gives it a
-different compact index. It does not query the previous FEM topology after
-that topology has been mutated in place.
+The native solver sorts impulses by FEM environment and half-voxel lattice
+coordinates, retaining node identity across sparse rebuilds. The earlier branch
+hash table, collider/normal filters and timestep-ratio scaling have been removed.
+Reset, changed model properties, collider reconfiguration, fidelity transitions
+and voxel resizing invalidate the appropriate history. The existing contact
+preprocessing projects loaded impulses onto the current friction/adhesion cone.
 
-A match additionally requires the same collider and normal cosine at least
-0.95. The guess is scaled by the new/previous timestep ratio; ratios outside
-``[0.25, 4]`` start cold. Existing contact preprocessing projects the guess
-onto the current friction/adhesion cone. Resets, changed model properties,
-collider reconfiguration, fidelity transitions, and voxel resizing invalidate
-the appropriate history. Isolated world IDs prevent overlapping worlds from
-sharing impulses. The global reset-mask entry clears history affected by
-global collider motion.
-
-All cache storage is reserved before graph capture. Every replay records its
-own load, solve, and save operations. Enabling the cache avoids allocating and
-scattering the legacy grid impulse-history field, but adds hash storage and
-load/store kernels. It aims to improve convergence at small iteration budgets;
-it does not guarantee a lower frame cost or identical trajectories under
-underconvergence. Compare error and time together against a converged control.
+Native keyed buffers are allocated before graph capture, including after lazy
+particle-to-MPM initialization and runtime voxel resizing. Every replay records
+its own load, solve and save operations. Compare convergence and total frame
+cost together when choosing a small iteration budget.
 
 Recorded findings and next decisions
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

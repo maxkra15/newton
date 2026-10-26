@@ -19,10 +19,32 @@ __all__ = [
 ]
 
 _COLLIDER_ACTIVATION_DISTANCE = wp.constant(0.5)
-"""Distance below which to activate the collider"""
+"""Grid contact activation distance in voxel units, divided by the basis degree."""
+_PIC_COLLIDER_ACTIVATION_DISTANCE = wp.constant(0.25)
+"""Particle contact activation distance in voxel units."""
 
 _INFINITY = wp.constant(1.0e12)
 """Threshold over which values are considered infinite"""
+
+_CLOSEST_POINT_NORMAL_EPSILON = wp.constant(1.0e-3)
+"""Maximum neighborhood radius for closest point normal calculation"""
+
+_SLIVER_NORMAL_RATIO = wp.constant(1.0e-6)
+"""Faces whose doubled area is below this fraction of their squared longest edge are slivers."""
+
+_NORMAL_RADIUS_EDGE_FRACTION = wp.constant(0.1)
+"""Normal neighborhoods are capped at this fraction of each face's shortest edge."""
+
+_CANCELLED_NORMAL_RATIO = wp.constant(1.0e-4)
+"""Relative length below which an averaged normal is cancelled by opposing faces.
+
+Sharp convex features keep much larger ratios, e.g. about 0.07 for an 8 degree wedge.
+"""
+
+_SDF_SIGN_FROM_AVERAGE_NORMAL = True
+"""If true, determine the sign of the sdf from the average normal of the faces around the closest point.
+Otherwise, use Warp's default sign determination strategy (raycasts).
+"""
 
 _SMALL_ANGLE_EPS = wp.constant(1.0e-4)
 """Small angle threshold to use more robust and faster path for angular velocity calculations"""
@@ -88,6 +110,131 @@ class Collider:
 
 
 @wp.func
+def _triangle_pseudonormal(q: wp.vec3, e1: wp.vec3, e2: wp.vec3, eps_sq: float):
+    """Return the weighted pseudonormal of triangle (0, e1, e2) at its closest point to ``q``.
+
+    Reuse the projection coordinates for vertex/edge classification. Degenerate
+    faces and faces beyond the adaptive neighborhood contribute a zero normal.
+    """
+    e3 = e2 - e1
+    e1_sq = wp.length_sq(e1)
+    e2_sq = wp.length_sq(e2)
+    e3_sq = wp.length_sq(e3)
+    e1e2 = wp.dot(e1, e2)
+    normal = wp.cross(e1, e2)
+    normal_sq = wp.length_sq(normal)
+    edge_scale = wp.max(wp.max(e1_sq, e2_sq), e3_sq)
+    if normal_sq <= (_SLIVER_NORMAL_RATIO * edge_scale) * (_SLIVER_NORMAL_RATIO * edge_scale):
+        return wp.vec3(0.0)
+
+    # Keep vertex neighborhoods disjoint, even on faces smaller than the search radius.
+    eps_sq = wp.min(
+        eps_sq, _NORMAL_RADIUS_EDGE_FRACTION * _NORMAL_RADIUS_EDGE_FRACTION * wp.min(wp.min(e1_sq, e2_sq), e3_sq)
+    )
+
+    e1q = wp.dot(e1, q)
+    e2q = wp.dot(e2, q)
+    d3 = e1q - e1_sq
+    d4 = e2q - e1e2
+    d5 = e1q - e1e2
+    d6 = e2q - e2_sq
+    interior = False
+    s = float(0.0)
+    t = float(0.0)
+    closest = wp.vec3(0.0)
+    if e1q <= 0.0 and e2q <= 0.0:
+        closest = wp.vec3(0.0)
+    elif d3 >= 0.0 and d4 <= d3:
+        closest = e1
+    elif d6 >= 0.0 and d5 <= d6:
+        closest = e2
+    else:
+        # Voronoi tests select one edge projection instead of trying all three.
+        vc = e1q * d4 - d3 * e2q
+        vb = d5 * e2q - e1q * d6
+        va = d3 * d6 - d5 * d4
+        if vc <= 0.0 and e1q >= 0.0 and d3 <= 0.0:
+            closest = (e1q / e1_sq) * e1
+        elif vb <= 0.0 and e2q >= 0.0 and d6 <= 0.0:
+            closest = (e2q / e2_sq) * e2
+        elif va <= 0.0 and d4 - d3 >= 0.0 and d5 - d6 >= 0.0:
+            closest = e1 + ((d4 - d3) / (d4 - d3 + d5 - d6)) * e3
+        else:
+            interior = True
+            denom = 1.0 / (va + vb + vc)
+            s = vb * denom
+            t = vc * denom
+            closest = s * e1 + t * e2
+    if wp.length_sq(q - closest) >= eps_sq:
+        return wp.vec3(0.0)
+
+    normal_length = wp.sqrt(normal_sq)
+    # Divide all weights by pi; only vertex weights need angles.
+    weight = float(2.0)
+    if wp.length_sq(closest) < eps_sq:
+        weight = wp.atan2(normal_length, e1e2) / wp.pi
+    elif wp.length_sq(closest - e1) < eps_sq:
+        weight = wp.atan2(normal_length, e1_sq - e1e2) / wp.pi
+    elif wp.length_sq(closest - e2) < eps_sq:
+        weight = wp.atan2(normal_length, e2_sq - e1e2) / wp.pi
+    else:
+        u = 1.0 - s - t
+        # Barycentric coordinates give edge distances without reprojecting.
+        if (
+            not interior
+            or t * t * normal_sq < eps_sq * e1_sq
+            or s * s * normal_sq < eps_sq * e2_sq
+            or u * u * normal_sq < eps_sq * e3_sq
+        ):
+            weight = 1.0
+    return normal * (weight / normal_length)
+
+
+@wp.func
+def get_average_face_normal(
+    mesh_id: wp.uint64,
+    point: wp.vec3,
+):
+    """Compute an angle-weighted pseudonormal within an adaptive-distance neighborhood.
+
+    Use corner angles at vertices, pi at edges, and 2*pi in face interiors.
+    Face selection and feature classification use the same radius, capped at
+    one tenth of each face's shortest edge and the absolute search radius.
+
+    Args:
+        mesh_id: The mesh to query.
+        point: The point to query.
+
+    Returns:
+        The average face normal at the point, or zero when opposing faces cancel
+        it to roundoff relative to their weights.
+    """
+
+    face_normal = wp.vec3(0.0)
+    weight_sq_sum = float(0.0)
+
+    vidx = wp.mesh_get(mesh_id).indices
+    points = wp.mesh_get(mesh_id).points
+    eps_sq = _CLOSEST_POINT_NORMAL_EPSILON * _CLOSEST_POINT_NORMAL_EPSILON
+
+    epsilon = wp.vec3(_CLOSEST_POINT_NORMAL_EPSILON)
+    aabb_query = wp.mesh_query_aabb(mesh_id, point - epsilon, point + epsilon)
+    face_index = wp.int32(0)
+    while wp.mesh_query_aabb_next(aabb_query, face_index):
+        V0 = points[vidx[face_index * 3 + 0]]
+        V1 = points[vidx[face_index * 3 + 1]]
+        V2 = points[vidx[face_index * 3 + 2]]
+
+        weighted_normal = _triangle_pseudonormal(point - V0, V1 - V0, V2 - V0, eps_sq)
+        face_normal += weighted_normal
+        weight_sq_sum += wp.length_sq(weighted_normal)
+
+    if wp.length_sq(face_normal) <= _CANCELLED_NORMAL_RATIO * _CANCELLED_NORMAL_RATIO * weight_sq_sum:
+        return wp.vec3(0.0)
+    return wp.normalize(face_normal)
+
+
+@wp.func
 def _query_collider_sdf(
     x: wp.vec3,
     collider: Collider,
@@ -122,6 +269,16 @@ def _query_collider_sdf(
     if query_result:
         cp = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
 
+        if wp.static(_SDF_SIGN_FROM_AVERAGE_NORMAL):
+            face_normal = get_average_face_normal(mesh, cp)
+            if wp.length_sq(face_normal) == 0.0:
+                # Edge rounding or cancellation can leave the average normal zero.
+                face_normal = wp.mesh_eval_face_normal(mesh, query.face)
+            sign = wp.where(wp.dot(face_normal, x_local - cp) > 0.0, 1.0, -1.0)
+        else:
+            face_normal = wp.mesh_eval_face_normal(mesh, query.face)
+            sign = query.sign
+
         mesh_material_id = collider.face_material_index[collider.collider_face_offset[stable_collider_id] + query.face]
         thickness = collider.material_thickness[mesh_material_id]
 
@@ -135,11 +292,11 @@ def _query_collider_sdf(
         coordinate_scale = wp.max(wp.max(wp.abs(v0)), wp.max(wp.max(wp.abs(v1)), wp.max(wp.abs(v2))))
         # At the surface, barycentric roundoff can leave a tangential offset.
         if distance <= 1.0e-6 * coordinate_scale:
-            sdf_grad = wp.mesh_eval_face_normal(mesh, query.face)
+            sdf_grad = face_normal
             sdf = wp.dot(offset, sdf_grad) - thickness
         else:
-            sdf = distance * query.sign - thickness
-            sdf_grad = (offset / distance) * query.sign
+            sdf = distance * sign - thickness
+            sdf_grad = (offset / distance) * sign
 
         sdf_vel = wp.mesh_eval_velocity(mesh, query.face, query.u, query.v)
         closest_point = cp
@@ -484,6 +641,7 @@ def rasterize_collider_kernel(
     body_q_prev: wp.array[wp.transform],
     voxel_size: float,
     activation_distance: float,
+    speculative: bool,
     dt: float,
     node_positions: wp.array[wp.vec3],
     node_environment_offsets: wp.array[int],
@@ -510,12 +668,13 @@ def rasterize_collider_kernel(
         body_q_prev: Previous rigid body transforms (for finite-difference velocity).
         voxel_size: Grid voxel size [m], used to scale the activation distance.
         activation_distance: Distance (in voxels) below which to activate the collider.
+        speculative: Whether to offset the collider velocity so a positive gap can close within the step.
         dt: Timestep length (used to scale adhesion and finite-difference velocity).
         node_positions: Grid node positions to sample at.
         node_environment_offsets: Packed node offsets by world, or null to query every collider.
         node_volumes: Per-node integration volumes.
         collider_sdf: Output signed distance per node.
-        collider_velocity: Output collider velocity per node.
+        collider_velocity: Output collider velocity per node, with the speculative offset if enabled.
         collider_normals: Output contact normals per node.
         collider_friction: Output friction coefficient per node, or -1 if inactive.
         collider_adhesion: Output scaled adhesion per node.
@@ -550,8 +709,15 @@ def rasterize_collider_kernel(
     collider_normals[i] = sdf_gradient
 
     collider_friction[i] = collider.material_friction[material_id]
-    collider_adhesion[i] = collider.material_adhesion[material_id] * dt * node_volumes[i] / voxel_size
+    # Speculative contacts adhere once touching, so adhesion pulls no material across the gap.
+    adhesion = 0.0
+    if not speculative or sdf <= 0.0:
+        adhesion = collider.material_adhesion[material_id] * dt * node_volumes[i] / voxel_size
+    collider_adhesion[i] = adhesion
 
+    # Allow approach until the end-of-step gap closes; penetrating nodes keep the collider velocity.
+    if speculative and dt > 0.0:
+        sdf_vel -= (wp.max(sdf, 0.0) / dt) * sdf_gradient
     collider_velocity[i] = sdf_vel
 
 
@@ -713,9 +879,21 @@ def collider_gradient_field(s: fem.Sample, domain: fem.Domain, distance: fem.Fie
 def normalize_gradient(
     gradient: wp.array[wp.vec3],
     normal: wp.array[wp.vec3],
+    sdf: wp.array[float],
+    velocity: wp.array[wp.vec3],
+    dt: float,
 ):
     i = wp.tid()
-    normal[i] = wp.normalize(gradient[i])
+    previous_normal = normal[i]
+    corrected_normal = wp.normalize(gradient[i])
+    if wp.length_sq(previous_normal) > 0.0 and dt > 0.0:
+        velocity[i] += (wp.max(sdf[i], 0.0) / dt) * (previous_normal - corrected_normal)
+    normal[i] = corrected_normal
+
+
+def _is_speculative(field: fem.DiscreteField) -> bool:
+    """Point (particle) contacts close positive gaps within the step; grid contacts keep their activation band."""
+    return field.degree == 0
 
 
 def rasterize_collider(
@@ -755,7 +933,7 @@ def rasterize_collider(
         collider_position_field: Output world-space node positions.
         collider_distance_field: Output signed-distance values per node.
         collider_normal_field: Output outward normals per node.
-        collider_velocity: Output collider velocity per node [m/s].
+        collider_velocity: Output collider velocity [m/s], with a speculative normal offset for point contacts.
         collider_friction: Output Coulomb friction coefficient per node.
         collider_adhesion: Output adhesion per node [Pa].
         collider_ids: Output collider index per node, or ``_NULL_COLLIDER_ID``.
@@ -775,7 +953,9 @@ def rasterize_collider(
     )
 
     activation_distance = (
-        0.0 if collider_position_field.degree == 0 else _COLLIDER_ACTIVATION_DISTANCE / collider_position_field.degree
+        _PIC_COLLIDER_ACTIVATION_DISTANCE
+        if collider_position_field.degree == 0
+        else _COLLIDER_ACTIVATION_DISTANCE / collider_position_field.degree
     )
 
     wp.launch(
@@ -788,6 +968,7 @@ def rasterize_collider(
             body_q_prev,
             voxel_size,
             activation_distance,
+            _is_speculative(collider_position_field),
             dt,
             collider_position_field.dof_values,
             node_environment_offsets,
@@ -807,6 +988,9 @@ def interpolate_collider_normals(
     collider_distance_field: fem.DiscreteField,
     collider_normal_field: fem.DiscreteField,
     temporary_store: fem.TemporaryStore,
+    *,
+    collider_velocity: wp.array[wp.vec3],
+    dt: float,
 ):
     """Smooth collider normals by computing the gradient of the distance field.
 
@@ -819,6 +1003,8 @@ def interpolate_collider_normals(
         collider_distance_field: Per-node signed-distance field.
         collider_normal_field: Per-node normal field (updated in place).
         temporary_store: Temporary storage for intermediate buffers.
+        collider_velocity: Collider constraint velocities, updated for the corrected normals [m/s].
+        dt: Timestep length [s].
     """
     corrected_normal = wp.empty_like(collider_normal_field.dof_values)
     fem.interpolate(
@@ -834,7 +1020,13 @@ def interpolate_collider_normals(
     wp.launch(
         normalize_gradient,
         dim=collider_normal_field.dof_values.shape,
-        inputs=[corrected_normal, collider_normal_field.dof_values],
+        inputs=[
+            corrected_normal,
+            collider_normal_field.dof_values,
+            collider_distance_field.dof_values,
+            collider_velocity,
+            dt if _is_speculative(collider_normal_field) else 0.0,
+        ],
     )
 
 

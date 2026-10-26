@@ -1,1 +1,1 @@
-Add experimental S2 contact-impulse warm starts that survive sparse-grid rebuilds, with collider, normal, world, timestep, and reset validation.
+Add experimental `SolverImplicitMPM.Config.warmstart_contact_impulses` to control native keyed grid-contact history on rebuildable sparse grids; `None` preserves the upstream default and `False` starts contacts cold.
