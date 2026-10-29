@@ -1,0 +1,1 @@
+Add experimental, opt-in `SolverImplicitMPM.Config.contact_recovery_time` for velocity-level particle-collider penetration recovery, disabled by default. Recovery can add energy and alter friction and deformation; it does not guarantee containment or material accuracy.

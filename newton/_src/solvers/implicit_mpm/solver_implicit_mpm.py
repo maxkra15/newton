@@ -1108,6 +1108,27 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             without prior notice.
         """
 
+        contact_recovery_time: float = 0.0
+        """Velocity-level recovery time for particle-collider penetration [s].
+
+        Zero disables recovery and preserves the default contact response. A
+        positive finite value requires a particle collider basis (``"picN"``).
+        For a negative signed gap, impose an outward relative velocity of
+        ``-gap * (1 - exp(-dt / contact_recovery_time)) / dt``. Positive-gap
+        speculative contacts are unchanged. This normalizes the recovery target
+        across timesteps; it does not make the coupled trajectory timestep invariant.
+
+        Recovery uses contact impulses rather than position projection. It can add
+        energy, increase friction, and alter deformation or geometric volume; it is
+        numerical stabilization, not material compliance or guaranteed containment.
+        Configure it in Python; no USD scene attribute is provided. Changing it after
+        CUDA graph capture requires recapture, as with other solver settings.
+
+        .. experimental::
+
+            Particle contact recovery behavior may change without prior notice.
+        """
+
         @classmethod
         def create_from_usd(cls, scene_prim: Any) -> SolverImplicitMPM.Config:
             """Create a solver configuration from ``NewtonMPMSceneAPI``.
@@ -1571,6 +1592,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
 
         if self._initial_particle_count == 0:
             raise ValueError("SolverImplicitMPM requires at least one particle.")
+
+        self.contact_recovery_time = float(config.contact_recovery_time)
+        if not math.isfinite(self.contact_recovery_time) or self.contact_recovery_time < 0.0:
+            raise ValueError("contact_recovery_time must be finite and nonnegative.")
+        if self.contact_recovery_time > 0.0 and not config.collider_basis.startswith("pic"):
+            raise ValueError("Positive contact_recovery_time requires a particle collider basis ('picN').")
 
         self._separate_worlds = bool(config.separate_worlds and self._initial_world_count > 1)
         self._environment_count = self._initial_world_count if self._separate_worlds else 1
@@ -3567,6 +3594,9 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         # Rasterize collider to grid
         collider_node_count = scratch.collider_node_count
         vel_node_count = scratch.velocity_node_count
+        recovery_fraction = (
+            -math.expm1(-dt / self.contact_recovery_time) if self.contact_recovery_time > 0.0 and dt > 0.0 else 0.0
+        )
 
         with self._timer("Rasterize collider"):
             # volume associated to each collider node
@@ -3598,6 +3628,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 scratch.collider_ids,
                 temporary_store=self.temporary_store,
                 node_environment_offsets=scratch.collider_environment_offsets,
+                contact_recovery_fraction=recovery_fraction,
             )
 
             # normal interpolation
@@ -3609,6 +3640,7 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                     temporary_store=self.temporary_store,
                     collider_velocity=scratch.collider_velocity,
                     dt=dt,
+                    contact_recovery_fraction=recovery_fraction,
                 )
 
             contact_nodes = scratch.gimp_particle_contact_nodes

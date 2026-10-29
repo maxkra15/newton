@@ -56,6 +56,14 @@ _ALL_COLLIDER_WORLDS = -2
 """Environment sentinel that queries every collider in stable order."""
 
 
+@wp.func
+def _speculative_contact_gap(sdf: float, recovery_fraction: float):
+    gap = wp.max(sdf, 0.0)
+    if recovery_fraction > 0.0 and sdf < 0.0:
+        gap = recovery_fraction * sdf
+    return gap
+
+
 @wp.struct
 class Collider:
     """Packed collider parameters and geometry queried during rasterization."""
@@ -636,6 +644,7 @@ def rasterize_collider_kernel(
     activation_distance: float,
     speculative: bool,
     dt: float,
+    recovery_fraction: float,
     node_positions: wp.array[wp.vec3],
     node_environment_offsets: wp.array[int],
     node_volumes: wp.array[float],
@@ -663,6 +672,7 @@ def rasterize_collider_kernel(
         activation_distance: Distance (in voxels) below which to activate the collider.
         speculative: Whether to offset the collider velocity so a positive gap can close within the step.
         dt: Timestep length (used to scale adhesion and finite-difference velocity).
+        recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
         node_positions: Grid node positions to sample at.
         node_environment_offsets: Packed node offsets by world, or null to query every collider.
         node_volumes: Per-node integration volumes.
@@ -708,9 +718,9 @@ def rasterize_collider_kernel(
         adhesion = collider.material_adhesion[material_id] * dt * node_volumes[i] / voxel_size
     collider_adhesion[i] = adhesion
 
-    # Allow approach until the end-of-step gap closes; penetrating nodes keep the collider velocity.
+    # Close positive gaps over the step and optionally recover negative gaps through the contact solve.
     if speculative and dt > 0.0:
-        sdf_vel -= (wp.max(sdf, 0.0) / dt) * sdf_gradient
+        sdf_vel -= (_speculative_contact_gap(sdf, recovery_fraction) / dt) * sdf_gradient
     collider_velocity[i] = sdf_vel
 
 
@@ -875,12 +885,13 @@ def normalize_gradient(
     sdf: wp.array[float],
     velocity: wp.array[wp.vec3],
     dt: float,
+    recovery_fraction: float,
 ):
     i = wp.tid()
     previous_normal = normal[i]
     corrected_normal = wp.normalize(gradient[i])
     if wp.length_sq(previous_normal) > 0.0 and dt > 0.0:
-        velocity[i] += (wp.max(sdf[i], 0.0) / dt) * (previous_normal - corrected_normal)
+        velocity[i] += (_speculative_contact_gap(sdf[i], recovery_fraction) / dt) * (previous_normal - corrected_normal)
     normal[i] = corrected_normal
 
 
@@ -907,6 +918,8 @@ def rasterize_collider(
     collider_ids: wp.array[int],
     temporary_store: fem.TemporaryStore,
     node_environment_offsets: wp.array | None = None,
+    *,
+    contact_recovery_fraction: float = 0.0,
 ):
     """Rasterize collider signed-distance, normals, velocity, and material onto grid nodes.
 
@@ -933,6 +946,7 @@ def rasterize_collider(
         temporary_store: Temporary storage for intermediate buffers.
         node_environment_offsets: Packed collision-node offsets by world. If ``None``, every node
             queries every collider in stable order.
+        contact_recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
     """
     collision_node_count = collider_position_field.dof_values.shape[0]
 
@@ -963,6 +977,7 @@ def rasterize_collider(
             activation_distance,
             _is_speculative(collider_position_field),
             dt,
+            contact_recovery_fraction,
             collider_position_field.dof_values,
             node_environment_offsets,
             collider_node_volume,
@@ -984,6 +999,7 @@ def interpolate_collider_normals(
     *,
     collider_velocity: wp.array[wp.vec3],
     dt: float,
+    contact_recovery_fraction: float = 0.0,
 ):
     """Smooth collider normals by computing the gradient of the distance field.
 
@@ -998,6 +1014,7 @@ def interpolate_collider_normals(
         temporary_store: Temporary storage for intermediate buffers.
         collider_velocity: Collider constraint velocities, updated for the corrected normals [m/s].
         dt: Timestep length [s].
+        contact_recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
     """
     corrected_normal = wp.empty_like(collider_normal_field.dof_values)
     fem.interpolate(
@@ -1019,6 +1036,7 @@ def interpolate_collider_normals(
             collider_distance_field.dof_values,
             collider_velocity,
             dt if _is_speculative(collider_normal_field) else 0.0,
+            contact_recovery_fraction,
         ],
     )
 
