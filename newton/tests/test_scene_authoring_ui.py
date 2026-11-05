@@ -303,13 +303,25 @@ class TestSceneAuthoringUI(unittest.TestCase):
                     # The large inspector preview is also a placement source.
                     before = len(editor.objects)
                     builds = editor.rebuild_count
-                    native_mouse(1080, 222)
-                    native_mouse(1080, 222, True)
-                    native_mouse(1060, 230)
-                    native_mouse(*target)
-                    render(3)
+                    model = editor.model
+                    with mock.patch.object(viewer, "log_lines", wraps=viewer.log_lines) as lines:
+                        native_mouse(1080, 222)
+                        native_mouse(1080, 222, True)
+                        native_mouse(1060, 230)
+                        native_mouse(*target)
+                        render(3)
+                        outlines = [
+                            call
+                            for call in lines.call_args_list
+                            if call.args[0] == "__scene_authoring/placement" and call.args[1] is not None
+                        ]
+                        self.assertTrue(outlines)
+                        vertices = np.concatenate([array.numpy() for array in outlines[-1].args[1:3]])
+                        lower, upper = vertices.min(axis=0), vertices.max(axis=0)
+                        np.testing.assert_allclose(upper - lower, (0.02, 0.02, 0.02), atol=1e-6)
                     self.assertEqual(len(editor.objects), before)
                     self.assertEqual(editor.rebuild_count, builds)
+                    self.assertIs(editor.model, model)
                     native_mouse(*target, False)
                     render(4)
                     self.assertIsNone(editor.error)
@@ -317,6 +329,9 @@ class TestSceneAuthoringUI(unittest.TestCase):
                     self.assertEqual(editor.rebuild_count, builds + 1)
                     self.assertEqual(editor.objects[-1].kind.value, "usd")
                     self.assertTrue(editor.body_indices(editor.objects[-1].id))
+                    center = editor.get_pose(editor.objects[-1].id)[0]
+                    np.testing.assert_allclose(lower, np.asarray(center) - 0.01, atol=1e-5)
+                    np.testing.assert_allclose(upper, np.asarray(center) + 0.01, atol=1e-5)
 
             workspace.bind(None)
             self.assertIsNone(workspace.authoring)

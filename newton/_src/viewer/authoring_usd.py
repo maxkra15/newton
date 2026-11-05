@@ -17,6 +17,20 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import warp as wp
+
+from ..geometry.bvh import (
+    compute_box_bounds,
+    compute_capsule_bounds,
+    compute_cone_bounds,
+    compute_cylinder_bounds,
+    compute_ellipsoid_bounds,
+    compute_shape_bounds,
+    compute_sphere_bounds,
+)
+from ..geometry.flags import ShapeFlags
+from ..geometry.types import GeoType, Heightfield, Mesh
 from ..sim.builder import ModelBuilder
 from ..utils.color import color_srgb_to_linear
 
@@ -199,6 +213,88 @@ def prepare_usd(source: str, *, scale=(1.0, 1.0, 1.0)) -> ModelBuilder:
     if not builder.shape_count:
         raise ValueError(f"USD asset contains no supported rigid or visual geometry: {source}")
     return builder
+
+
+def template_bounds(builder: ModelBuilder) -> tuple[np.ndarray, np.ndarray] | None:
+    """Bound template collision geometry in its Z-up placement frame [m].
+
+    Reuse native primitive bounds and host geometry without finalizing a model,
+    mesh, or solver. Body and shape transforms retain the source asset's pivot.
+    Include physical margins, excluding the contact search gap. Negative margins
+    retain the unshrunk geometry for a conservative result. If there are no
+    rigid colliders, include visual geometry. Bodyless templates include every
+    shape because scene authoring promotes all their geometry to colliders.
+
+    Return ``None`` when the selected geometry is empty, unbounded, unsupported,
+    or has nonfinite bounds; explicit asset import can still proceed without a
+    finite placement preview.
+    """
+    colliders = [index for index, flags in enumerate(builder.shape_flags) if flags & int(ShapeFlags.COLLIDE_SHAPES)]
+    selected = (colliders if builder.body_count else ()) or range(builder.shape_count)
+    primitive_bounds = {
+        GeoType.BOX: compute_box_bounds,
+        GeoType.CAPSULE: compute_capsule_bounds,
+        GeoType.CYLINDER: compute_cylinder_bounds,
+        GeoType.CONE: compute_cone_bounds,
+        GeoType.ELLIPSOID: compute_ellipsoid_bounds,
+    }
+    aggregate_lower = np.full(3, np.inf)
+    aggregate_upper = np.full(3, -np.inf)
+    for index in selected:
+        kind = builder.shape_type[index]
+        scale = wp.vec3(builder.shape_scale[index])
+        transform = builder.shape_transform[index]
+        body = builder.shape_body[index]
+        if body >= 0:
+            transform = wp.transform_multiply(builder.body_q[body], transform)
+        margin = float(builder.shape_margin[index])
+        if (
+            not np.isfinite(np.asarray(transform)).all()
+            or not np.isfinite(np.asarray(scale)).all()
+            or not math.isfinite(margin)
+        ):
+            return None
+        if kind in primitive_bounds:
+            lower, upper = primitive_bounds[kind](transform, scale)
+        elif kind == GeoType.SPHERE:
+            lower, upper = compute_sphere_bounds(wp.transform_get_translation(transform), scale[0])
+        elif kind == GeoType.PLANE:
+            if scale[0] <= 0 or scale[1] <= 0:
+                return None
+            lower, upper = compute_box_bounds(transform, wp.vec3(scale[0] * 0.5, scale[1] * 0.5, 0))
+        elif kind in (GeoType.MESH, GeoType.CONVEX_MESH):
+            source = builder.shape_source[index]
+            if not isinstance(source, Mesh):
+                return None
+            vertices = np.asarray(source.vertices)
+            if not len(vertices) or not np.isfinite(vertices).all():
+                return None
+            lower, upper = compute_shape_bounds(
+                transform, scale, wp.vec3(vertices.min(axis=0)), wp.vec3(vertices.max(axis=0))
+            )
+        elif kind == GeoType.HFIELD:
+            source = builder.shape_source[index]
+            if not isinstance(source, Heightfield):
+                return None
+            heights = source.min_z + source.data * (source.max_z - source.min_z)
+            if not heights.size or not np.isfinite(heights).all():
+                return None
+            # Finalization adds a bottom cap below the lowest heightfield sample.
+            cap_gap = 1.0e-3 * max(1.0, source.hx, source.hy, abs(source.max_z - source.min_z))
+            floor = min(source.min_z, source.max_z) - cap_gap
+            lower, upper = compute_shape_bounds(
+                transform, scale, wp.vec3(-source.hx, -source.hy, floor), wp.vec3(source.hx, source.hy, heights.max())
+            )
+        else:
+            return None
+        lower, upper = np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+        if not np.isfinite([lower, upper]).all():
+            return None
+        aggregate_lower = np.minimum(aggregate_lower, lower - max(0.0, margin))
+        aggregate_upper = np.maximum(aggregate_upper, upper + max(0.0, margin))
+    if not np.isfinite([aggregate_lower, aggregate_upper]).all():
+        return None
+    return aggregate_lower, aggregate_upper
 
 
 def _definition(obj) -> dict[str, Any]:

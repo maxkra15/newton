@@ -8,11 +8,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline
+from newton import CollisionPipeline, ModelBuilder
 from newton.viewer import SceneEditor, ViewerNull
 
 
@@ -107,8 +108,8 @@ class TestSceneAuthoring(unittest.TestCase):
         first = editor.add_primitive("box", position=(live[0], live[1], 0.5))
         second = editor.add_primitive("box", position=(live[0], live[1], 0.5))
         reset_drop = editor.add_primitive("box", position=(0, 0, 0.5))
-        free = editor.add_primitive("box", position=(4, 0, 2))
-        for object_id in (first, second, reset_drop, free):
+        overhead_drop = editor.add_primitive("box", position=(4, 0, 2))
+        for object_id in (first, second, reset_drop, overhead_drop):
             editor.place_object(object_id)
         editor.commit()
         np.testing.assert_array_equal(editor.state_0.body_q.numpy()[: len(before_q)], before_q)
@@ -117,13 +118,14 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertLess(editor.get_object(first).position[2], height + 0.8)
         self.assertGreater(editor.get_object(second).position[2] - editor.get_object(first).position[2], 1.0)
         self.assertGreater(editor.get_object(reset_drop).position[2], 2.7)
-        self.assertEqual(editor.get_object(free).position, (4, 0, 2))
+        self.assertGreater(editor.get_object(overhead_drop).position[2], 10.75)
+        self.assertLess(editor.get_object(overhead_drop).position[2], 10.8)
         self.assertEqual(editor.rebuild_count, 2)
         editor.step()
         self.assertLess(np.linalg.norm(editor.state_0.body_qd.numpy()[:, :3], axis=1).max(), 1.0)
         self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
         resolved = {obj.id: obj.position for obj in editor.objects}
-        for removed in (free, reset_drop, second):
+        for removed in (overhead_drop, reset_drop, second):
             first_body = editor.body_indices(first)[0]
             first_pose = editor.state_0.body_q.numpy()[first_body].copy()
             first_velocity = editor.state_0.body_qd.numpy()[first_body].copy()
@@ -134,7 +136,7 @@ class TestSceneAuthoring(unittest.TestCase):
             first_body = editor.body_indices(first)[0]
             np.testing.assert_array_equal(editor.state_0.body_q.numpy()[first_body], first_pose)
             np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[first_body], first_velocity)
-        for restored_id in (second, reset_drop, free):
+        for restored_id in (second, reset_drop, overhead_drop):
             editor.redo()
             editor.before_frame()
             self.assertEqual(editor.get_object(restored_id).position, resolved[restored_id])
@@ -268,8 +270,36 @@ class TestSceneAuthoring(unittest.TestCase):
             UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
             cube = UsdGeom.Cube.Define(stage, "/Asset/Cube")
             cube.CreateSizeAttr(0.4)
-            cube.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.6))
+            cube.AddTranslateOp().Set(Gf.Vec3d(0.4, -0.3, -0.6))
             stage.GetRootLayer().Save()
+            with (
+                mock.patch.object(editor.viewer, "log_lines", wraps=editor.viewer.log_lines) as lines,
+                mock.patch.object(
+                    ModelBuilder, "finalize", autospec=True, side_effect=ModelBuilder.finalize
+                ) as finalize,
+            ):
+                for x in (2.0, 2.1, 2.2):
+                    deadline = time.monotonic() + 5
+                    pivot = None
+                    while pivot is None and time.monotonic() < deadline:
+                        pivot = editor.preview_usd(source, position=(x, -1, 0), scale=(2, 0.5, 3), placement=True)
+                        editor.before_frame()
+                        self.assertFalse(editor.busy)
+                        self.assertEqual(editor.objects, ())
+                        self.assertIs(editor.model, original_model)
+                        self.assertEqual(editor.rebuild_count, 1)
+                        if pivot is None:
+                            time.sleep(0.005)
+                    self.assertIsNotNone(pivot, editor.error)
+                    editor.render()
+                    vertices = np.concatenate([array.numpy() for array in lines.call_args.args[1:3]])
+                    lower, upper = vertices.min(axis=0), vertices.max(axis=0)
+                    np.testing.assert_allclose(upper - lower, (0.8, 0.2, 1.2), atol=1e-6)
+                    np.testing.assert_allclose((lower + upper) / 2 - pivot, (0.8, -0.15, -1.8), atol=1e-6)
+                    self.assertGreaterEqual(lower[2], 0)
+                    self.assertLess(lower[2], 0.03)
+                finalize.assert_not_called()
+                editor.clear_preview()
             plane_path = Path(directory) / "plane.usda"
             plane_stage = Usd.Stage.CreateNew(str(plane_path))
             UsdGeom.SetStageMetersPerUnit(plane_stage, 1)
@@ -337,13 +367,30 @@ class TestSceneAuthoring(unittest.TestCase):
             self.assertEqual(restored.model.body_count, 1)
             np.testing.assert_allclose(restored.get_pose(object_id)[0], (0, 0, 2), atol=1e-6)
 
-            editor.begin_edit()
-            for index in range(16):
-                editor.update_object(object_id, size=(1 + index * 0.01,) * 3)
-                editor.before_frame()
-                self.assertFalse(editor.busy, "USD resizing must not prepare intermediate drag samples")
-            editor.end_edit()
-            editor.commit()
+            model = editor.model
+            with (
+                mock.patch.object(editor, "_prepare_template", wraps=editor._prepare_template) as prepare,
+                mock.patch.object(editor.viewer, "log_lines", wraps=editor.viewer.log_lines) as lines,
+            ):
+                editor.begin_edit()
+                for index in range(16):
+                    scale = (1 + index * 0.01,) * 3
+                    editor.update_object(object_id, size=scale)
+                    pivot = editor.preview_usd(source, position=editor.get_pose(object_id)[0], scale=scale)
+                    self.assertFalse(editor.busy, "USD resize previews must not start intermediate preparation")
+                    self.assertIsNotNone(pivot)
+                    editor.before_frame()
+                    editor.render()
+                    vertices = np.concatenate([array.numpy() for array in lines.call_args.args[1:3]])
+                    np.testing.assert_allclose(
+                        vertices.max(axis=0) - vertices.min(axis=0), np.asarray(scale) * 0.4, atol=1e-6
+                    )
+                    self.assertIs(editor.model, model)
+                    self.assertEqual(editor.rebuild_count, 1)
+                prepare.assert_not_called()
+                editor.end_edit()
+                editor.commit()
+                prepare.assert_called_once()
             self.assertEqual(editor.rebuild_count, 2)
 
             # Undo snapshots created while metadata loads retain authored mass semantics.

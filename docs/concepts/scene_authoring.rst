@@ -33,9 +33,9 @@ application to load subsequent Python changes.
 The left panel has three tabs:
 
 * **Create** adds boxes, spheres, capsules, and cylinders. Click a card to place
-  an object near the viewport center, or drag it onto the ground plane. A
-  placement outline follows the pointer. Scale, color, and Dynamic configure
-  new primitives. **Import USD** and local file drops add USD assets.
+  an object near the viewport center, or drag it onto the scene. A
+  collision-bounds outline follows the pointer. Scale, color, and Dynamic
+  configure new primitives. **Import USD** and local file drops add USD assets.
 * **Assets** searches the SimReady catalog. Select a card to inspect its source
   and available license information. Drag a card or its large inspector preview
   into the viewport, double-click it, or choose **Place in scene** to download
@@ -67,8 +67,8 @@ SimReady packages and offline use
 The browser reads the public
 `SimReady submission registry <https://github.com/NVIDIA-Omniverse/simready-central/blob/main/submissions/nvidia/simready-assets>`_.
 Each registered asset names a pinned Hugging Face revision. Only visible
-thumbnails are requested; a full package is downloaded when placement is
-requested. Downloads keep the package's relative paths, referenced files,
+thumbnails are requested; dragging an asset into the viewport also starts its
+package download so its geometry can be previewed. Downloads keep relative paths, referenced files,
 metadata, and license files, and verify the package before importing it.
 Review the source package's license for its permitted uses.
 
@@ -88,6 +88,8 @@ buffers. Primitive dimensions, USD scale, mass, motion type, and object
 additions or removals require a replacement runtime. A drag groups these
 structural edits into one commit on release. Its outline is transient viewer
 geometry and does not rerun ``ModelBuilder`` for each pointer movement.
+During a USD scale gesture, the outline scales its cached envelope; the updated
+USD template is prepared once after release.
 
 USD preparation runs in a worker and caches read-only builder templates. At a
 safe frame boundary, the editor constructs a candidate Model, States, Control,
@@ -98,8 +100,15 @@ resolved again after a commit.
 The current simulation continues during downloads and background preparation.
 
 Interactive additions and duplicates aim at the surface under the cursor.
-Before publication, their complete collision bounds are raised clear of the
-ground and occupied footprints, including other additions in the same batch.
+The bottom of the placement outline stays above the highest collider under its
+whole footprint, including separated overhead surfaces. Tall colliders elsewhere
+in the scene do not raise the outline. USD outlines use cached native collision
+bounds, including their offset from the asset pivot, instead of a fixed-size box.
+Downloading or preparing an asset shows a status message until its bounds are
+available. Preview preparation reuses the import template and does not disable
+dragging or add an object to the document. Surface-height queries read two floats
+from the device while the pointer or simulation moves; they do not rebuild the model.
+Before publication, collision bounds are checked again, including other additions in the same batch.
 This conservative placement can stack crowded objects instead of inserting
 overlapping volumes. It checks both live and authored reset poses and retains
 the resolved insertion coordinates in undo history. Existing bodies keep their
@@ -107,6 +116,10 @@ live poses and velocities.
 Programmatic ``add_primitive`` and ``add_usd`` calls retain exact coordinates;
 call :meth:`~newton.viewer.SceneEditor.place_object` before the commit to opt
 into the same placement. Infinite planes require explicit placement.
+The transient :meth:`~newton.viewer.SceneEditor.preview_primitive` and
+:meth:`~newton.viewer.SceneEditor.preview_usd` methods accept ``placement=True``
+to return a safe pivot position for a subsequent add. USD preview returns
+``None`` while its template is being prepared.
 
 The owned runtime checks contact capacity before solving and expands collision
 buffers when dense mesh contacts exceed the initial estimate. This does not

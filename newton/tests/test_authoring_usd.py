@@ -9,9 +9,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import warp as wp
 
 import newton
-from newton._src.viewer.authoring_usd import NotAuthoringSceneError, load_scene, prepare_usd, save_scene
+from newton._src.viewer.authoring_usd import (
+    NotAuthoringSceneError,
+    load_scene,
+    prepare_usd,
+    save_scene,
+    template_bounds,
+)
 from newton.tests.unittest_utils import USD_AVAILABLE
 
 
@@ -109,6 +116,16 @@ class TestAuthoringUsd(unittest.TestCase):
             box_shape = builder.shape_label.index("/World/Object_0/Geometry")
             np.testing.assert_allclose(builder.shape_scale[box_shape], (1.0, 1.0, 2.0))
             np.testing.assert_allclose(builder.shape_color[box_shape], objects[0].color, atol=1.0e-6)
+            self.assertIsNone(template_bounds(builder))
+            builder.shape_flags[ground] &= ~int(newton.ShapeFlags.COLLIDE_SHAPES)
+            lower, upper = template_bounds(builder)
+            np.testing.assert_allclose(lower, (0, -1, -1), atol=1e-6)
+            np.testing.assert_allclose(upper, (5, 3, 5), atol=1e-6)
+            sphere_shape = builder.shape_label.index("/World/Object_1/Geometry")
+            builder.shape_margin[sphere_shape] = 0.2
+            lower, upper = template_bounds(builder)
+            np.testing.assert_allclose(lower, (0, -1.2, -1.2), atol=1e-6)
+            np.testing.assert_allclose(upper, (5.2, 3, 5), atol=1e-6)
 
     def test_asset_variant_units_axis_and_source_isolation(self):
         """Apply Newton variants and SI conversion without editing source layers."""
@@ -120,6 +137,9 @@ class TestAuthoringUsd(unittest.TestCase):
             self.assertEqual(template.body_count, 1)
             self.assertEqual(template.body_mass[0], 7.0)
             np.testing.assert_allclose(template.body_q[0].p, (0.0, 0.0, 4.0), atol=1.0e-6)
+            lower, upper = template_bounds(template)
+            np.testing.assert_allclose(lower, (-2, -2, 2), atol=1e-6)
+            np.testing.assert_allclose(upper, (2, 2, 6), atol=1e-6)
             self.assertEqual(path.read_bytes(), previous)
             self.assertEqual(
                 stage.GetDefaultPrim().GetVariantSets().GetVariantSet("Newton").GetVariantSelection(), "Disabled"
@@ -135,6 +155,44 @@ class TestAuthoringUsd(unittest.TestCase):
             self.asset(rigid, units=0.01)
             with self.assertRaisesRegex(ValueError, "metersPerUnit=1"):
                 prepare_usd(str(rigid))
+
+    def test_template_bounds_scaled_mesh_and_heightfield(self):
+        """Bound host geometry with signed scale, composed frames, and terrain caps."""
+        with wp.ScopedDevice("cpu"):
+            mesh = newton.Mesh(
+                [(0, 0, 0), (1, 0, 0), (0, 2, 0), (0, 0, 3)],
+                [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+                compute_inertia=False,
+            )
+            builder = newton.ModelBuilder()
+            body = builder.add_link(xform=wp.transform((1, 2, 3), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), wp.pi / 2)))
+            for shape_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
+                builder.add_shape(
+                    body=body,
+                    type=shape_type,
+                    src=mesh,
+                    xform=wp.transform((0.25, 0, 0), wp.quat_identity()),
+                    scale=(-2, 3, 0.5),
+                    cfg=newton.ModelBuilder.ShapeConfig(margin=0.1),
+                )
+            lower, upper = template_bounds(builder)
+            np.testing.assert_allclose(lower, (-5.1, 0.15, 2.9), atol=1e-6)
+            np.testing.assert_allclose(upper, (1.1, 2.35, 4.6), atol=1e-6)
+            field = newton.Heightfield([[0, 0], [0, 1]], nrow=2, ncol=2, hx=1, hy=2, min_z=-1, max_z=3)
+            terrain = newton.ModelBuilder()
+            terrain.add_shape_heightfield(
+                heightfield=field,
+                xform=wp.transform((4, 0, 1), wp.quat_identity()),
+                scale=(2, 0.5, 3),
+            )
+            lower, upper = template_bounds(terrain)
+            np.testing.assert_allclose(lower, (2, -1, -2.012), atol=1e-6)
+            np.testing.assert_allclose(upper, (6, 1, 10), atol=1e-6)
+            plane = newton.ModelBuilder()
+            plane.add_shape_plane(width=2, length=4, xform=wp.transform((0, 0, 1), wp.quat_identity()))
+            lower, upper = template_bounds(plane)
+            np.testing.assert_allclose(lower, (-1, -2, 1), atol=1e-6)
+            np.testing.assert_allclose(upper, (1, 2, 1), atol=1e-6)
 
     def test_reference_composition_roundtrip(self):
         """Keep referenced rigid topology, scale, and object physics in exported USD."""
@@ -156,6 +214,9 @@ class TestAuthoringUsd(unittest.TestCase):
                 instance.GetPrim().SetInstanceable(True)
             variant.SetVariantSelection("Disabled")
             source_stage.GetRootLayer().Save()
+            lower, upper = template_bounds(prepare_usd(str(source)))
+            np.testing.assert_allclose(lower, (-1, -1, 1), atol=1e-6)
+            np.testing.assert_allclose(upper, (1, 1, 3), atol=1e-6)
             path = Path(directory) / "scene.usda"
             save_scene(path, [self.object("usd", source=str(source), size=(2.0, 2.0, 2.0), color=(1.0, 1.0, 1.0))])
             definition = load_scene(path)[0]
@@ -212,7 +273,7 @@ class TestAuthoringUsd(unittest.TestCase):
 
     def test_preserve_native_physics_and_promote_visual_asset(self):
         """Preserve untouched rigid physics and give bare visual props a physical root."""
-        from pxr import Usd, UsdGeom, UsdPhysics
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "rigid.usda"
@@ -245,6 +306,19 @@ class TestAuthoringUsd(unittest.TestCase):
             stage.GetPrimAtPath("/Asset/Body").RemoveAPI(UsdPhysics.CollisionAPI)
             UsdGeom.BasisCurves.Define(stage, "/Asset/grasp_identifier_curve").CreatePurposeAttr(UsdGeom.Tokens.guide)
             stage.GetRootLayer().Save()
+            lower, upper = template_bounds(prepare_usd(str(visual)))
+            np.testing.assert_allclose(lower, (-1, -1, 1), atol=1e-6)
+            np.testing.assert_allclose(upper, (1, 1, 3), atol=1e-6)
+            UsdPhysics.CollisionAPI.Apply(stage.GetPrimAtPath("/Asset/Body"))
+            decoration = UsdGeom.Cube.Define(stage, "/Asset/Decoration")
+            decoration.CreateSizeAttr(1.0)
+            decoration.AddTranslateOp().Set(Gf.Vec3d(5, 0, 0))
+            stage.GetRootLayer().Save()
+            mixed = prepare_usd(str(visual))
+            self.assertEqual(mixed.body_count, 0)
+            lower, upper = template_bounds(mixed)
+            np.testing.assert_allclose(lower, (-1, -1, -0.5), atol=1e-6)
+            np.testing.assert_allclose(upper, (5.5, 1, 3), atol=1e-6)
             promoted = Path(directory) / "promoted.usda"
             save_scene(
                 promoted,

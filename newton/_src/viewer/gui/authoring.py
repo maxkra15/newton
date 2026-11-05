@@ -81,6 +81,7 @@ class AuthoringPanel:
         self._gizmo_pause = False
         self._field_edit = False
         self._drag_preview = False
+        self._drag_asset_id: str | None = None
         self._pose_frame = -1
         self._pose_cache = {}
         self._placement_ray = None
@@ -578,9 +579,18 @@ class AuthoringPanel:
             self._run(self.editor.update_object, object_id, **{field: value})
             if field == "size" and not self.message:
                 obj = self.editor.get_object(object_id)
-                self.editor.preview_primitive(
-                    obj.kind.value, position=self._pose(object_id)[0], size=value, color=obj.color
-                )
+                if obj.source is not None:
+                    self._run(
+                        self.editor.preview_usd,
+                        obj.source,
+                        position=self._pose(object_id)[0],
+                        scale=value,
+                        color=obj.color,
+                    )
+                else:
+                    self.editor.preview_primitive(
+                        obj.kind.value, position=self._pose(object_id)[0], size=value, color=obj.color
+                    )
         if self._field_edit and (edit.finished or not self.ui.is_any_item_active()):
             self.editor.end_edit()
             self.editor.clear_preview()
@@ -716,6 +726,7 @@ class AuthoringPanel:
         ui = self.ui
         payload = ui.get_drag_drop_payload_py_id()
         if payload is None or payload.type != self.payload_type or payload.data_id not in self._payloads:
+            self._drag_asset_id = None
             if self._drag_preview:
                 self.editor.clear_preview()
                 self._drag_preview = False
@@ -723,16 +734,36 @@ class AuthoringPanel:
         kind, value = self._payloads[payload.data_id]
         mouse = ui.get_io().mouse_pos
         hovered = ui.is_item_hovered(ui.HoveredFlags_.allow_when_blocked_by_active_item)
+        point = None
         if hovered and self.editable:
             self._drag_preview = True
+            aim = self.world_position((mouse.x, mouse.y))
             if kind == "primitive":
                 size = self._primitive_size(value)
-                axis = int(self.workspace.model.up_axis)
-                point = self.world_position((mouse.x, mouse.y), lift=size[axis] * 0.5)
-                self.editor.preview_primitive(value, position=point, size=size, color=self._color)
+                point = self._run(
+                    self.editor.preview_primitive, value, position=aim, size=size, color=self._color, placement=True
+                )
             else:
-                point = self.world_position((mouse.x, mouse.y))
-                self.editor.preview_primitive("box", position=point, color=theme.CONTACT_SOFT_RIGID[:3])
+                path = self.assets.ready(value) if self.assets is not None else None
+                if path is not None:
+                    point = self._run(
+                        self.editor.preview_usd,
+                        path,
+                        position=aim,
+                        color=theme.CONTACT_SOFT_RIGID[:3],
+                        placement=True,
+                    )
+                    if point is None and not self.message:
+                        ui.set_tooltip("Preparing collision preview…")
+                else:
+                    self.editor.clear_preview()
+                    if self.assets is not None:
+                        if self._drag_asset_id != value.id:
+                            self._drag_asset_id = value.id
+                            self.assets.download(value)
+                        if error := self.assets.download_error(value):
+                            self.message = error
+                    ui.set_tooltip(self.message or "Downloading geometry for the collision preview…")
         else:
             self.editor.clear_preview()
             self._drag_preview = False
@@ -742,11 +773,11 @@ class AuthoringPanel:
                 if delivered is not None and self.editable:
                     mouse_position = (mouse.x, mouse.y)
                     if kind == "primitive":
-                        size = self._primitive_size(value)
-                        axis = int(self.workspace.model.up_axis)
-                        self._add_primitive(value, self.world_position(mouse_position, lift=size[axis] * 0.5))
+                        if point is not None:
+                            self._add_primitive(value, point)
                     else:
-                        self._place_asset(value, self.world_position(mouse_position))
+                        if point is not None or not self.message:
+                            self._place_asset(value, point or self.world_position(mouse_position))
                     self.editor.clear_preview()
                     self._drag_preview = False
             finally:

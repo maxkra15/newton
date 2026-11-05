@@ -19,16 +19,93 @@ import numpy as np
 import warp as wp
 
 from ..geometry import GeoType, ShapeFlags
+from ..geometry.bvh import (
+    compute_box_bounds,
+    compute_capsule_bounds,
+    compute_cylinder_bounds,
+    compute_shape_bounds,
+    compute_sphere_bounds,
+)
 from ..sim import BodyFlags, CollisionPipeline, JointType, ModelBuilder, eval_ik
 from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
-from .authoring_usd import NotAuthoringSceneError, load_scene, prepare_usd, save_scene
+from .authoring_usd import NotAuthoringSceneError, load_scene, prepare_usd, save_scene, template_bounds
 
 if TYPE_CHECKING:
     from ..sim import Contacts, Control, Model, State
     from .viewer import ViewerBase
 
 logger = logging.getLogger(__name__)
+
+
+@wp.kernel
+def _placement_surface(
+    live: wp.array[wp.transform],
+    reset: wp.array[wp.transform],
+    bodies: wp.array[int],
+    transforms: wp.array[wp.transform],
+    kinds: wp.array[int],
+    scales: wp.array[wp.vec3],
+    flags: wp.array[int],
+    margins: wp.array[float],
+    local_lower: wp.array[wp.vec3],
+    local_upper: wp.array[wp.vec3],
+    lower: wp.vec3,
+    upper: wp.vec3,
+    axis: int,
+    result: wp.array[float],
+):
+    shape = wp.tid()
+    if flags[shape] & int(ShapeFlags.COLLIDE_SHAPES) == 0:
+        return
+    for snapshot in range(2):
+        transform = transforms[shape]
+        body = bodies[shape]
+        if body >= 0:
+            pose = live[body]
+            if snapshot == 1:
+                pose = reset[body]
+            transform = wp.transform_multiply(pose, transform)
+        margin = margins[shape]
+        if kinds[shape] == int(GeoType.PLANE) and scales[shape][0] == 0.0 and scales[shape][1] == 0.0:
+            anchor = wp.transform_get_translation(transform)
+            normal = wp.quat_rotate(wp.transform_get_rotation(transform), wp.vec3(0.0, 0.0, 1.0))
+            if normal[axis] <= 1.0e-6:
+                wp.atomic_max(result, 1, 1.0)
+            else:
+                rise = float(0.0)
+                for lateral in range(3):
+                    if lateral != axis:
+                        rise += wp.max(
+                            normal[lateral] * (anchor[lateral] - lower[lateral]),
+                            normal[lateral] * (anchor[lateral] - upper[lateral]),
+                        )
+                wp.atomic_max(result, 0, anchor[axis] + rise / normal[axis] + margin)
+        else:
+            lo, hi = compute_shape_bounds(transform, wp.vec3(1.0), local_lower[shape], local_upper[shape])
+            if kinds[shape] == int(GeoType.PLANE):
+                lo, hi = compute_box_bounds(transform, wp.vec3(scales[shape][0] * 0.5, scales[shape][1] * 0.5, 0.0))
+            elif kinds[shape] == int(GeoType.SPHERE):
+                lo, hi = compute_sphere_bounds(wp.transform_get_translation(transform), scales[shape][0])
+            elif kinds[shape] == int(GeoType.CAPSULE):
+                lo, hi = compute_capsule_bounds(transform, scales[shape])
+            elif kinds[shape] == int(GeoType.CYLINDER):
+                lo, hi = compute_cylinder_bounds(transform, scales[shape])
+            overlaps = bool(True)
+            for lateral in range(3):
+                if lateral != axis:
+                    if hi[lateral] + margin < lower[lateral] - 0.001:
+                        overlaps = False
+                    if lo[lateral] - margin > upper[lateral] + 0.001:
+                        overlaps = False
+            if overlaps:
+                wp.atomic_max(result, 0, hi[axis] + margin)
+
+
+@dataclasses.dataclass(frozen=True)
+class _AssetTemplate:
+    builder: ModelBuilder
+    bounds: tuple[np.ndarray, np.ndarray] | None
 
 
 @wp.kernel
@@ -235,13 +312,17 @@ class SceneEditor:
         self._edit_before: tuple[SceneEditor.Object, ...] | None = None
         self._requested_commit = False
         self._attempted_revision = -1
-        self._templates: dict[tuple[Any, ...], ModelBuilder] = {}
+        self._templates: dict[tuple[Any, ...], _AssetTemplate] = {}
         self._preparing: dict[tuple[Any, ...], Future] = {}
         self._executor: ThreadPoolExecutor | None = None
         self._closed = False
         self._preview: tuple | None = None
         self._preview_last: tuple | None = None
         self._preview_buffers = None
+        self._preview_source: SceneEditor.Object | None = None
+        self._preview_error: tuple | None = None
+        self._placement_result = None
+        self._placement_cache = None
 
     @property
     def objects(self) -> tuple[Object, ...]:
@@ -255,8 +336,9 @@ class SceneEditor:
 
     @property
     def busy(self) -> bool:
-        """Report outstanding background USD preparation."""
-        return any(not future.done() for future in self._preparing.values())
+        """Report background USD preparation required by the authored document."""
+        active = {(obj.source, obj.size) for obj in self._objects if obj.kind == self.Shape.USD}
+        return any(key[:2] in active and not future.done() for key, future in self._preparing.items())
 
     @property
     def can_undo(self) -> bool:
@@ -549,9 +631,10 @@ class SceneEditor:
         return str(path), obj.size, stat.st_mtime_ns, stat.st_size
 
     @staticmethod
-    def _prepare_template(source: str, size: tuple) -> ModelBuilder:
+    def _prepare_template(source: str, size: tuple) -> _AssetTemplate:
         with wp.ScopedDevice("cpu"):
-            return prepare_usd(source, scale=size)
+            builder = prepare_usd(source, scale=size)
+            return _AssetTemplate(builder, template_bounds(builder))
 
     def _schedule_template(self, obj: Object) -> None:
         key = self._template_key(obj)
@@ -564,6 +647,8 @@ class SceneEditor:
     def _trim_templates(self) -> None:
         # Retain every active source, but bound old scale variants after gestures.
         active = {(obj.source, obj.size) for obj in self._objects if obj.kind == self.Shape.USD}
+        if self._preview_source is not None:
+            active.add((self._preview_source.source, self._preview_source.size))
         for key in list(self._templates):
             if len(self._templates) <= 32:
                 break
@@ -579,9 +664,12 @@ class SceneEditor:
         """Publish edits before workspace/history binding, even while physics is paused."""
         if self._closed:
             return
-        requested = (
+        document_sources = (
             {(obj.source, obj.size) for obj in self._objects if obj.kind == self.Shape.USD} if self._preparing else ()
         )
+        requested = document_sources
+        if self._preview_source is not None:
+            requested = {*requested, (self._preview_source.source, self._preview_source.size)}
         for key, future in list(self._preparing.items()):
             if key[:2] not in requested:
                 future.cancel()
@@ -591,10 +679,17 @@ class SceneEditor:
                 continue
             try:
                 self._templates[key] = future.result()
+                self._trim_templates()
                 self._objects = self._resolved_defaults(self._objects)
             except Exception as exc:
-                self.error = str(exc)
-                self._attempted_revision = self.revision
+                if key[:2] in document_sources:
+                    self.error = str(exc)
+                    self._attempted_revision = self.revision
+                if self._preview_source is not None and key[:2] == (
+                    self._preview_source.source,
+                    self._preview_source.size,
+                ):
+                    self._preview_error = key, str(exc)
             del self._preparing[key]
         if self._fast_pending:
             self._apply_fast_edits()
@@ -623,7 +718,7 @@ class SceneEditor:
                 future.result() if future is not None else self._prepare_template(obj.source, obj.size)
             )
             self._objects = self._resolved_defaults(self._objects)
-        return self._templates[key]
+        return self._templates[key].builder
 
     def _resolved_defaults(self, objects: tuple[Object, ...]) -> tuple[Object, ...]:
         result = []
@@ -631,7 +726,7 @@ class SceneEditor:
             obj = original
             template = next(
                 (
-                    template
+                    template.builder
                     for key, template in reversed(self._templates.items())
                     if obj.kind == self.Shape.USD and key[:2] == (obj.source, obj.size)
                 ),
@@ -925,6 +1020,10 @@ class SceneEditor:
         lower += search_gap[:, None]
         upper -= search_gap[:, None]
         infinite = (types == GeoType.PLANE) & (scales[:, 0] == 0) & (scales[:, 1] == 0)
+        for shape in np.flatnonzero((types == GeoType.PLANE) & ~infinite):
+            transform = wp.transform(wp.vec3(*transforms[shape, :3]), wp.quat(*transforms[shape, 3:]))
+            lo, hi = compute_box_bounds(transform, wp.vec3(*(scales[shape, :2] * 0.5), 0.0))
+            lower[shape], upper[shape] = np.asarray(lo) - margins[shape], np.asarray(hi) + margins[shape]
         colliding = np.tile((model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES)) != 0, 2)
         occupied = colliding.copy()
         for object_id in requested:
@@ -938,7 +1037,10 @@ class SceneEditor:
             rows = np.r_[np.arange(shapes.start, shapes.stop), np.arange(shapes.start, shapes.stop) + model.shape_count]
             if shapes.start == shapes.stop or infinite[shapes].any():
                 raise ValueError("Automatic placement requires bounded geometry; place infinite planes explicitly")
-            lo, hi = lower[shapes].min(axis=0), upper[shapes].max(axis=0)
+            physical = np.arange(shapes.start, shapes.stop)
+            if colliding[physical].any():
+                physical = physical[colliding[physical]]
+            lo, hi = lower[physical].min(axis=0), upper[physical].max(axis=0)
             if not np.isfinite([lo, hi]).all():
                 raise ValueError("Automatic placement requires finite shape bounds")
             footprint = occupied & np.all(upper[:, lateral] >= lo[lateral] - clearance, axis=1)
@@ -952,14 +1054,9 @@ class SceneEditor:
                 # Evaluate the plane over this footprint, not its million-metre AABB.
                 rise = sum(max(normal[j] * (anchor[j] - lo[j]), normal[j] * (anchor[j] - hi[j])) for j in lateral)
                 supports.append(anchor[axis] + rise / normal[axis] + margins[shape])
-            height = float(max(supports))
+            finite = upper[footprint & ~infinite, axis]
+            height = max(*supports, float(finite.max(initial=0)))
             lift = max(0.0, height + clearance - float(lo[axis]))
-            for shape in sorted(np.flatnonzero(footprint & ~infinite), key=lambda shape: lower[shape, axis]):
-                if (
-                    float(lo[axis]) + lift < float(upper[shape, axis]) + clearance
-                    and float(hi[axis]) + lift > float(lower[shape, axis]) - clearance
-                ):
-                    lift = max(lift, float(upper[shape, axis]) + clearance - float(lo[axis]))
             if lift:
                 translation = [0.0, 0.0, 0.0]
                 translation[axis] = lift
@@ -1267,6 +1364,7 @@ class SceneEditor:
 
     def reset_scene(self) -> None:
         """Restore the authored reset poses without rebuilding model or solver."""
+        self._placement_cache = None
         if self._runtime is not None:
             runtime = self._runtime
             if runtime.model.body_count:
@@ -1312,13 +1410,125 @@ class SceneEditor:
         self._draw_preview()
         self.viewer.end_frame()
 
-    def preview_primitive(self, kind: Shape | str, *, position, size=(1.0, 1.0, 1.0), color=(0.3, 0.85, 1.0)) -> None:
-        """Update a transient placement outline without modifying the document/model."""
-        self._preview = self.Shape(kind).value, tuple(position), tuple(size), tuple(color)
+    def preview_primitive(
+        self,
+        kind: Shape | str,
+        *,
+        position,
+        size=(1.0, 1.0, 1.0),
+        color=(0.3, 0.85, 1.0),
+        placement: bool = False,
+    ) -> tuple[float, float, float]:
+        """Outline primitive dimensions [m] without modifying the document/model.
+
+        When ``placement`` is true, raise the bounds above every collider under
+        their footprint and return the resolved object position [m].
+        """
+        kind = self.Shape(kind)
+        if kind == self.Shape.USD:
+            raise ValueError("Use preview_usd() for referenced asset geometry")
+        self._preview_source = None
+        self._preview = None
+        half = np.asarray(self._vector(size, 3, "size")) * 0.5
+        return self._preview_bounds(position, (-half, half), color, placement=placement)
+
+    def preview_usd(
+        self,
+        source: str | Path,
+        *,
+        position,
+        scale=(1.0, 1.0, 1.0),
+        color=(0.3, 0.85, 1.0),
+        placement: bool = False,
+    ) -> tuple[float, float, float] | None:
+        """Outline cached USD collision bounds without building a simulation model.
+
+        Prepare the native template and its bounds once on a CPU worker. Return
+        ``None`` while preparation is pending. Otherwise return the object pivot
+        position [m], raised above colliders when ``placement`` is true. The
+        outline retains offsets between the pivot and the collision geometry.
+        Unbounded geometry cannot be previewed.
+        """
+        obj = self._validate(
+            self.Object(
+                id="preview",
+                name="Preview",
+                kind=self.Shape.USD,
+                source=str(Path(source).expanduser().resolve()),
+                size=scale,
+            )
+        )
+        key = self._template_key(obj)
+        self._preview = None
+        if self._edit_before is not None and key not in self._templates:
+            # Scaling a cached envelope keeps a held field responsive. Import
+            # the new scale only after release, alongside its structural edit.
+            for previous, template in reversed(self._templates.items()):
+                if previous[0] == key[0] and previous[2:] == key[2:] and template.bounds is not None:
+                    ratio = np.asarray(obj.size) / previous[1]
+                    bounds = tuple(bound * ratio for bound in template.bounds)
+                    self._preview_source = None
+                    return self._preview_bounds(position, bounds, color, placement=placement)
+        self._preview_source = obj
+        if self._preview_error is not None and self._preview_error[0] == key:
+            raise ValueError(self._preview_error[1])
+        self._schedule_template(obj)
+        template = self._templates.get(key)
+        if template is None:
+            return None
+        if template.bounds is None:
+            raise ValueError("The asset has no finite collision bounds for a placement preview")
+        return self._preview_bounds(position, template.bounds, color, placement=placement)
+
+    def _preview_bounds(self, position, bounds, color, *, placement: bool) -> tuple[float, float, float]:
+        point = np.asarray(self._vector(position, 3, "position"))
+        lo, hi = bounds
+        if placement:
+            axis = int(self.model.up_axis) if self.model is not None else 2
+            height = 0.0
+            if self._runtime is not None:
+                key = (id(self.model), self.sim_time, self.revision, tuple(point), tuple(lo), tuple(hi))
+                if self._placement_cache is None or self._placement_cache[0] != key:
+                    if self._placement_result is None:
+                        self._placement_result = wp.zeros(2, dtype=float, device=self.device)
+                    else:
+                        self._placement_result.zero_()
+                    model = self.model
+                    wp.launch(
+                        _placement_surface,
+                        model.shape_count,
+                        inputs=[
+                            self.state_0.body_q,
+                            model.body_q,
+                            model.shape_body,
+                            model.shape_transform,
+                            model.shape_type,
+                            model.shape_scale,
+                            model.shape_flags,
+                            model.shape_margin,
+                            model.shape_collision_aabb_lower,
+                            model.shape_collision_aabb_upper,
+                            wp.vec3(*(point + lo)),
+                            wp.vec3(*(point + hi)),
+                            axis,
+                        ],
+                        outputs=[self._placement_result],
+                        device=self.device,
+                        record_tape=False,
+                    )
+                    height, unsupported = self._placement_result.numpy()
+                    if unsupported:
+                        raise ValueError("Automatic placement against a vertical or downward plane is unsupported")
+                    self._placement_cache = key, float(height)
+                height = self._placement_cache[1]
+            point[axis] = max(point[axis], height + 0.001 - lo[axis])
+        self._preview = "box", tuple(point + (lo + hi) * 0.5), tuple(hi - lo), tuple(color)
+        return tuple(float(value) for value in point)
 
     def clear_preview(self) -> None:
         """Hide the transient placement outline on the next render."""
         self._preview = None
+        self._preview_source = None
 
     def _draw_preview(self) -> None:
         name = "__scene_authoring/placement"
