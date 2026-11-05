@@ -261,6 +261,77 @@ class TestAuthoringUsd(unittest.TestCase):
             guide = exported.GetPrimAtPath("/World/Object_0/Asset/Asset/grasp_identifier_curve")
             self.assertFalse(guide.HasAPI(UsdPhysics.CollisionAPI))
 
+    def test_jointed_asset_without_articulation_metadata(self):
+        """Compile unrooted joint branches without dropping joints or changing authored roots."""
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "jointed.usda"
+            stage = Usd.Stage.CreateNew(str(source))
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            scene = UsdGeom.Xform.Define(stage, "/Scene")
+            stage.SetDefaultPrim(scene.GetPrim())
+
+            def add_body(path, position):
+                body = UsdGeom.Cube.Define(stage, path)
+                body.CreateSizeAttr(0.1)
+                body.AddTranslateOp().Set(Gf.Vec3d(position, 0.0, 0.0))
+                UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+                UsdPhysics.CollisionAPI.Apply(body.GetPrim())
+                UsdPhysics.MassAPI.Apply(body.GetPrim()).CreateMassAttr(1.0)
+
+            for name, count, offset in (("Prop", 6, 0.0), ("Existing", 2, 4.0)):
+                group = UsdGeom.Xform.Define(stage, f"/Scene/{name}")
+                if name == "Existing":
+                    UsdPhysics.ArticulationRootAPI.Apply(group.GetPrim())
+                for index in range(count):
+                    path = f"{group.GetPath()}/Body{index}"
+                    add_body(path, offset + index * 0.25)
+                    if index and index != 4:
+                        parent = 4 if index == 5 else 0
+                        joint_type = UsdPhysics.RevoluteJoint if index in (2, 3) else UsdPhysics.FixedJoint
+                        joint = joint_type.Define(stage, f"{group.GetPath()}/Joint{index}")
+                        joint.CreateBody0Rel().SetTargets([f"{group.GetPath()}/Body{parent}"])
+                        joint.CreateBody1Rel().SetTargets([path])
+                        joint.CreateLocalPos0Attr(Gf.Vec3f((index - parent) * 0.25, 0.0, 0.0))
+            # A third unowned graph crosses top-level namespaces, so no shared
+            # authored prim can carry its articulation root.
+            add_body("/External0", 8.0)
+            add_body("/External1", 8.25)
+            external = UsdPhysics.FixedJoint.Define(stage, "/ExternalJoint")
+            external.CreateBody0Rel().SetTargets(["/External0"])
+            external.CreateBody1Rel().SetTargets(["/External1"])
+            external.CreateLocalPos0Attr(Gf.Vec3f(0.25, 0.0, 0.0))
+            stage.GetRootLayer().Save()
+            original = source.read_bytes()
+            template = prepare_usd(str(source))
+            model = template.finalize(device="cpu")
+            self.assertEqual(model.body_count, 10)
+            self.assertEqual(model.joint_count, 10)
+            self.assertEqual(model.articulation_count, 4)
+            self.assertEqual(sum(kind == newton.JointType.REVOLUTE for kind in template.joint_type), 2)
+            state = model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            np.testing.assert_allclose(state.body_q.numpy(), model.body_q.numpy(), atol=1.0e-6)
+            output = Path(directory) / "scene.usda"
+            save_scene(
+                output,
+                [self.object("usd", source=str(source), size=(1.0, 1.0, 1.0), color=(1.0, 1.0, 1.0), overrides=())],
+            )
+            exported = Usd.Stage.Open(str(output))
+            for root in ("Scene/Prop/Body0", "Scene/Prop/Body4", "Scene/Existing", "External0"):
+                self.assertTrue(
+                    exported.GetPrimAtPath(f"/World/Object_0/Asset/{root}").HasAPI(UsdPhysics.ArticulationRootAPI)
+                )
+            imported = newton.ModelBuilder()
+            imported.add_usd(exported, collapse_fixed_joints=False)
+            rebuilt = imported.finalize(device="cpu")
+            self.assertEqual((rebuilt.body_count, rebuilt.joint_count, rebuilt.articulation_count), (10, 10, 4))
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse(stage.GetPrimAtPath("/Scene/Prop").HasAPI(UsdPhysics.ArticulationRootAPI))
+            self.assertTrue(stage.GetPrimAtPath("/Scene/Existing").HasAPI(UsdPhysics.ArticulationRootAPI))
+
     def test_scalar_material_tint_and_unsupported_graph_save(self):
         """Tint scalar materials and retain the old file when a graph cannot be exported."""
         from pxr import Gf, Sdf, UsdShade

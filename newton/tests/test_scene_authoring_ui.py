@@ -3,13 +3,21 @@
 
 """Native authoring interaction coverage, separate from CPU document tests."""
 
+import hashlib
+import importlib.util
+import json
+import threading
+import time
 import unittest
+from io import BytesIO
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 from newton._src.viewer.gui.viewer_gui import ViewerGui
 from newton.examples.basic.example_scene_editor import Example
+from newton.tests import test_viewer_assets
 from newton.tests.test_viewer_get_frame import _make_headless_viewer_gl_or_skip
 
 
@@ -126,6 +134,107 @@ class TestSceneAuthoringUI(unittest.TestCase):
             viewer.gui.handle_key_press(key.H)
             render(2)
             self.assertTrue(viewer.gui.show_ui)
+
+            if importlib.util.find_spec("pxr") is not None:
+                # Reuse the real HTTP package/cache fixture. Only worker timing
+                # is controlled: parsing, metadata, USD import and native input
+                # all follow their production paths.
+                assets = test_viewer_assets.TestAssetLibrary()
+                assets.setUp()
+                self.addCleanup(assets.doCleanups)
+                # The service fixture checks bytes; this workflow also imports
+                # its USD and decodes its thumbnail, so supply complete content.
+                assets.files["simready_usd/payloads/mesh.usda"] = (
+                    b'#usda 1.0\n(defaultPrim = "Root")\ndef Xform "Root" {\n def Cube "Mesh" {}\n}\n'
+                )
+                from pyglet.image import SolidColorImagePattern
+
+                image_bytes = BytesIO()
+                SolidColorImagePattern((100, 180, 200, 255)).create_image(8, 8).save("thumbnail.png", file=image_bytes)
+                assets.files["simready_usd/.thumbs/256x256/root.usda.png"] = image_bytes.getvalue()
+                bom_path = ".metadata/com.nvidia.simready.packaging.bom.json"
+                bom = json.loads(assets.files[bom_path])
+                for item in bom["items"]:
+                    data = assets.files[item["relative_path"]]
+                    item.update(size=len(data), hash={"sha256": hashlib.sha256(data).hexdigest()})
+                assets.files[bom_path] = json.dumps(bom).encode()
+                manifest_path = "com.nvidia.simready.packaging.json"
+                manifest = json.loads(assets.files[manifest_path])
+                manifest["metadata"][0]["hash"]["sha256"] = hashlib.sha256(assets.files[bom_path]).hexdigest()
+                assets.files[manifest_path] = json.dumps(manifest).encode()
+                record = assets.record()
+                assets.library.download(record)
+                assets.until(lambda: assets.library.ready(record) is not None)
+                release_thumbnail = threading.Event()
+                self.addCleanup(release_thumbnail.set)
+                thumbnail = assets.library._thumbnail
+
+                def deferred_thumbnail(record):
+                    release_thumbnail.wait(5)
+                    return thumbnail(record)
+
+                with mock.patch.object(assets.library, "_thumbnail", deferred_thumbnail):
+                    panel.assets = assets.library
+                    panel.query = panel._submitted_query = "sponge"
+
+                    def native_mouse(x, y, down=None):
+                        window = viewer.renderer.window
+                        native_y = window.height - y
+                        window.dispatch_event("on_mouse_motion", x, native_y, 0, 0)
+                        if down is not None:
+                            window.dispatch_event("on_mouse_press" if down else "on_mouse_release", x, native_y, 1, 0)
+                        window.dispatch_events()
+                        render()
+
+                    native_mouse(95, 123)
+                    native_mouse(95, 123, True)
+                    native_mouse(95, 123, False)
+                    render(3)
+                    native_mouse(75, 290)
+                    native_mouse(75, 290, True)
+                    native_mouse(75, 290, False)
+                    render(2)
+                    self.assertIsNotNone(panel._selected_asset)
+                    self.assertEqual(panel._selected_asset.id, record.id)
+                    self.assertIsNone(editor.selected_id)
+                    before = len(editor.objects)
+                    # A quick second press is also a potential double click.
+                    # It must remain a drag until its release decides otherwise.
+                    native_mouse(75, 290, True)
+                    self.assertEqual(len(editor.objects), before)
+                    release_thumbnail.set()
+                    assets.until(lambda: not assets.library.loading)
+                    render(3)
+                    self.assertIsNotNone(panel._selected_asset)
+                    self.assertEqual(panel._selected_asset.id, record.id)
+                    self.assertEqual(panel._selected_asset.license, "CC-BY-4.0")
+                    native_mouse(100, 295)
+                    native_mouse(*target)
+                    render(3)
+                    self.assertEqual(len(editor.objects), before)
+                    native_mouse(*target, False)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and (len(editor.objects) == before or editor.pending):
+                        render()
+                        time.sleep(0.01)
+                    self.assertIsNone(editor.error)
+                    self.assertEqual(len(editor.objects), before + 1)
+                    imported = editor.objects[-1]
+                    self.assertEqual(imported.kind.value, "usd")
+                    self.assertTrue(editor.body_indices(imported.id))
+                    self.assertTrue(panel._textures)
+                    before = len(editor.objects)
+                    # A different point starts a fresh double-click sequence
+                    # without sleeping for ImGui's multi-click timeout.
+                    native_mouse(110, 290)
+                    native_mouse(110, 290, True)
+                    native_mouse(110, 290, False)
+                    native_mouse(110, 290, True)
+                    self.assertEqual(len(editor.objects), before)
+                    native_mouse(110, 290, False)
+                    render(3)
+                    self.assertEqual(len(editor.objects), before + 1)
+                    self.assertTrue(editor.body_indices(editor.objects[-1].id))
 
             workspace.bind(None)
             self.assertIsNone(workspace.authoring)

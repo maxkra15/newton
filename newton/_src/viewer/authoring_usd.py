@@ -35,6 +35,74 @@ def _make_instances_editable(stage):
         stage.GetPrimAtPath(path).SetInstanceable(False)
 
 
+def _ensure_articulation_roots(stage):
+    """Give unowned joint networks standard roots for native runtime import."""
+    from pxr import UsdPhysics
+
+    roots = {prim.GetPath() for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.ArticulationRootAPI)}
+    rigid_bodies = {prim.GetPath() for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)}
+    neighbors = {}
+    joints = {}
+    children = set()
+    world_joints = {}
+
+    def rigid_body(targets):
+        if len(targets) != 1:
+            return None
+        prim = stage.GetPrimAtPath(targets[0])
+        while prim and not prim.IsPseudoRoot():
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                return prim.GetPath()
+            prim = prim.GetParent()
+        return None
+
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdPhysics.Joint):
+            continue
+        joint = UsdPhysics.Joint(prim)
+        if not joint.GetJointEnabledAttr().Get():
+            continue
+        parent = rigid_body(joint.GetBody0Rel().GetTargets())
+        child = rigid_body(joint.GetBody1Rel().GetTargets())
+        bodies = {body for body in (parent, child) if body is not None}
+        for body in bodies:
+            neighbors.setdefault(body, set()).update(bodies - {body})
+            joints.setdefault(body, set()).add(prim.GetPath())
+        if child is not None:
+            children.add(child)
+            if parent is None:
+                world_joints[child] = prim.GetPath()
+    pending = set(neighbors)
+    while pending:
+        component = set()
+        stack = [min(pending)]
+        while stack:
+            body = stack.pop()
+            if body not in component:
+                component.add(body)
+                stack.extend(neighbors[body] - component)
+        pending -= component
+        paths = component | set().union(*(joints[body] for body in component))
+        if any(path.HasPrefix(root) for path in paths for root in roots):
+            continue
+        ordered = sorted(paths)
+        ancestor = ordered[0]
+        for path in ordered[1:]:
+            ancestor = ancestor.GetCommonPrefix(path)
+        if (
+            ancestor.IsAbsoluteRootPath()
+            or any(root.HasPrefix(ancestor) for root in roots)
+            or any(body.HasPrefix(ancestor) for body in rigid_bodies - component)
+        ):
+            # Keep independent components separate: the native importer expects
+            # one kinematic tree per root. USD permits a floating root body or
+            # the fixed joint that anchors the component to the world.
+            anchored = sorted(body for body in component if body in world_joints)
+            ancestor = world_joints[anchored[0]] if anchored else min(component - children or component)
+        UsdPhysics.ArticulationRootAPI.Apply(stage.GetPrimAtPath(ancestor))
+        roots.add(ancestor)
+
+
 def _open_asset(source: str):
     from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
@@ -81,6 +149,10 @@ def _open_asset(source: str):
                     "USD assets with rigid-body, joint, or mass data must use metersPerUnit=1 and kilogramsPerUnit=1; "
                     f"found {linear_unit:g} and {mass_unit:g}"
                 )
+    # Jointed props may omit articulation metadata while remaining valid USD.
+    # The owned runtime needs complete kinematic trees; let the native parser
+    # choose roots, order joints, and preserve loop constraints using standard API.
+    _ensure_articulation_roots(stage)
     return stage, path, linear_unit
 
 
@@ -235,6 +307,8 @@ def _write_references(stage, path, definition):
         # their descendants so overrides never target an instance proxy.
         if prim.IsInstanceable():
             prim.SetInstanceable(False)
+        if source_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            UsdPhysics.ArticulationRootAPI.Apply(prim)
         for relationship in source_prim.GetRelationships():
             targets = relationship.GetTargets()
             if targets:

@@ -112,6 +112,8 @@ Primitive dimensions and positions are in metres, mass is in kilograms, and
 rotations are XYZW quaternions in the Python API. Capsule height includes both
 hemispheres. USD scale is multiplicative in the editor's Z-up frame. Native USD
 import preserves supported rigid bodies, joints, colliders, and visuals.
+Jointed props without articulation-root metadata receive standard articulation
+roots in the anonymous session layer for native runtime import and USD export.
 Geometry without an authored body is promoted to a rigid prop with collision
 geometry. SimReady backend variants select Newton when available and disable
 alternative backend variants in an anonymous session layer; source files stay

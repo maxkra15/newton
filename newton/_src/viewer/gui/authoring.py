@@ -65,6 +65,8 @@ class AuthoringPanel:
             i + 1: ("primitive", kind) for i, (kind, _, _) in enumerate(self.primitives)
         }
         self._asset_payloads: dict[str, int] = {}
+        self._double_click_payload: int | None = None
+        self._card_double_clicked = False
         self._dialog_action: str | None = None
         self._dialog_request = None
         self._scale = 1.0
@@ -356,10 +358,12 @@ class AuthoringPanel:
             library.search(self.query)
             self._submitted_query = self.query
         ui.text_disabled(f"{len(library.records):,} assets")
-        if library.loading:
-            ui.text_wrapped(library.progress or "Loading the catalog…")
-        if library.error:
-            ui.text_colored(ui.ImVec4(*theme.CONSOLE_WARNING), library.error)
+        # Reserve one status row: thumbnail jobs must not move the cards under
+        # a held pointer when their loading state or metadata changes.
+        status = library.error or ((library.progress or "Loading the catalog…") if library.loading else "")
+        ui.text_colored(ui.ImVec4(*(theme.CONSOLE_WARNING if library.error else theme.TEXT_DISABLED)), status or " ")
+        if status and ui.is_item_hovered():
+            ui.set_tooltip(status)
         records = library.records
         columns = 2 if ui.get_content_region_avail().x >= 210 * s else 1
         width = (ui.get_content_region_avail().x - (columns - 1) * 8 * s) / columns
@@ -383,11 +387,10 @@ class AuthoringPanel:
                     if self._card(
                         record.name, "mesh", width, width + 30 * s, payload, record=record, selected=selected
                     ):
-                        self.editor.select(None)
+                        self.select(None)
                         self._selected_asset = record
-                        self.workspace.show_right = True
-                    if ui.is_item_hovered() and ui.is_mouse_double_clicked(0):
-                        self._place_asset(record)
+                        if self._card_double_clicked:
+                            self._place_asset(record)
         clipper.end()
         if not records and not library.loading:
             ui.text_wrapped("No matching assets. Try a shorter search or refresh the catalog.")
@@ -398,6 +401,11 @@ class AuthoringPanel:
         position = ui.get_cursor_screen_pos()
         clicked = ui.invisible_button(f"##asset_card_{payload}", ui.ImVec2(width, height))
         hovered = ui.is_item_hovered()
+        self._card_double_clicked = clicked and self._double_click_payload == payload
+        if hovered and ui.is_mouse_clicked(0):
+            self._double_click_payload = payload if ui.is_mouse_double_clicked(0) else None
+        elif clicked:
+            self._double_click_payload = None
         if ui.is_item_visible():
             draw = ui.get_window_draw_list()
             end = ui.ImVec2(position.x + width, position.y + height)
@@ -438,6 +446,9 @@ class AuthoringPanel:
         if hovered:
             ui.set_tooltip(title + "\nDrag into the viewport to place" + (" · Double-click to add" if record else ""))
         if self.editable and ui.begin_drag_drop_source():
+            # A quick second press may become a drag. Only a completed click
+            # can place on double-click; an early import would cancel this drag.
+            self._double_click_payload = None
             ui.set_drag_drop_payload_py_id(self.payload_type, payload)
             ui.text_unformatted(title)
             ui.text_disabled("Drop in the viewport")
@@ -514,7 +525,9 @@ class AuthoringPanel:
         ui = self.ui
         ui.spacing()
         if self.editor.error or self.message:
+            ui.push_text_wrap_pos()
             ui.text_colored(ui.ImVec4(*theme.CONSOLE_WARNING), self.editor.error or self.message)
+            ui.pop_text_wrap_pos()
         elif self.editor.status:
             ui.text_wrapped(self.editor.status)
         if self.editor.pending and not self.editor.auto_apply:
