@@ -232,6 +232,14 @@ class ViewerWorkspace:
                 if hasattr(self._active_timeline, name):
                     self.timeline_options[name] = getattr(self._active_timeline, name)
 
+    def reset_history(self) -> None:
+        """Discard snapshots after an authored edit without disrupting scene interaction."""
+        self.save_preferences()
+        self._active_timeline = self.history = None
+        self._cache.clear()
+        self._live_cache.clear()
+        self._last_timeline_cursor = None
+
     def detach_example(self) -> None:
         """Keep UI choices while releasing scene-owned state and history."""
         self.save_preferences()

@@ -50,14 +50,28 @@ class TestSceneAuthoringUI(unittest.TestCase):
             editor.commit()
             viewer.set_camera(pos=(5, -7, 4), pitch=-23, yaw=125)
 
-            def render(count=1):
+            def render(count=1, *, simulate=False):
                 for _ in range(count):
                     editor.before_frame()
                     viewer.gui._workspace_example = editor
                     if viewer.gui.workspace is not None:
                         viewer.gui.workspace.bind(editor)
-                    editor.render()
+                    if simulate and viewer.should_step() and viewer.gui.workspace.before_step():
+                        editor.step()
+                    if simulate:
+                        viewer.gui.workspace.render_example()
+                    else:
+                        editor.render()
                     self.assertFalse(viewer.gui.ui.section_errors)
+
+            def native_mouse(x, y, down=None, *, simulate=False):
+                window = viewer.renderer.window
+                native_y = window.height - y
+                window.dispatch_event("on_mouse_motion", x, native_y, 0, 0)
+                if down is not None:
+                    window.dispatch_event("on_mouse_press" if down else "on_mouse_release", x, native_y, 1, 0)
+                window.dispatch_events()
+                render(simulate=simulate)
 
             def mouse(x, y, down=None):
                 viewer.gui.ui.io.add_mouse_pos_event(x, y)
@@ -135,6 +149,59 @@ class TestSceneAuthoringUI(unittest.TestCase):
             render(2)
             self.assertTrue(viewer.gui.show_ui)
 
+            # Keep a real viewport handle active across physics/frame boundaries,
+            # rather than publishing only one edit before releasing the mouse.
+            workspace.history.set_recording(True)
+            workspace.history.playback_speed = 2.0
+            render(simulate=True)
+            self.assertTrue(workspace.history.frames)
+            original = editor.get_object(edited.id)
+            clip = (
+                viewer.camera.get_projection_matrix().reshape(4, 4).T
+                @ viewer.camera.get_view_matrix().reshape(4, 4).T
+                @ np.array((*editor.get_pose(edited.id)[0], 1.0))
+            )
+            ndc = clip[:3] / clip[3]
+            vx, vy, width, height = workspace.rect
+            gx, gy = vx + (ndc[0] + 1) * width / 2, vy + (1 - ndc[1]) * height / 2 - 20
+            sim_time = editor.sim_time
+            viewer._paused = False
+            native_mouse(gx, gy, simulate=True)
+            self.assertTrue(viewer.gui._gizmo_hovered)
+            native_mouse(gx, gy, True, simulate=True)
+            self.assertTrue(panel._gizmo_active)
+            self.assertTrue(viewer.is_paused())
+            model, builds = editor.model, editor.rebuild_count
+            last_z = original.position[2]
+            deadline = time.monotonic() + 2.1
+            moved = 0
+            while time.monotonic() < deadline:
+                moved += 1
+                native_mouse(gx, gy - 2 * moved, simulate=True)
+                self.assertEqual(editor.selected_id, edited.id)
+                self.assertTrue(panel._gizmo_active)
+                self.assertTrue(viewer.is_paused())
+                self.assertIs(editor.model, model)
+                self.assertEqual(editor.rebuild_count, builds)
+                self.assertTrue(workspace.history.recording)
+                self.assertTrue(workspace.history.frames)
+                self.assertEqual(workspace.history.playback_speed, 2.0)
+                position = editor.get_object(edited.id).position
+                self.assertGreater(position[2], last_z)
+                last_z = position[2]
+                time.sleep(0.05)
+            native_mouse(gx, gy - 2 * moved, False, simulate=True)
+            render(2, simulate=True)
+            self.assertFalse(panel._gizmo_active)
+            self.assertFalse(viewer.is_paused())
+            self.assertTrue(workspace.history.recording)
+            self.assertEqual(workspace.history.playback_speed, 2.0)
+            self.assertGreater(editor.sim_time, sim_time)
+            self.assertGreater(editor.get_object(edited.id).position[2], original.position[2])
+            editor.undo()
+            render()
+            self.assertEqual(editor.get_object(edited.id).position, original.position)
+
             if importlib.util.find_spec("pxr") is not None:
                 # Reuse the real HTTP package/cache fixture. Only worker timing
                 # is controlled: parsing, metadata, USD import and native input
@@ -176,15 +243,6 @@ class TestSceneAuthoringUI(unittest.TestCase):
                 with mock.patch.object(assets.library, "_thumbnail", deferred_thumbnail):
                     panel.assets = assets.library
                     panel.query = panel._submitted_query = "sponge"
-
-                    def native_mouse(x, y, down=None):
-                        window = viewer.renderer.window
-                        native_y = window.height - y
-                        window.dispatch_event("on_mouse_motion", x, native_y, 0, 0)
-                        if down is not None:
-                            window.dispatch_event("on_mouse_press" if down else "on_mouse_release", x, native_y, 1, 0)
-                        window.dispatch_events()
-                        render()
 
                     native_mouse(95, 123)
                     native_mouse(95, 123, True)

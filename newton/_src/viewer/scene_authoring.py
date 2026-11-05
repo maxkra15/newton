@@ -1205,12 +1205,12 @@ class SceneEditor:
         if moved:
             self._collide(runtime)
         self._fast_pending.clear()
-        # A material/topology edit defines a new authored scene, not historical
-        # sensor data. Rebind after leaving FrameHistory's temporary references.
+        # Previous snapshots use the old authored poses and materials. Drop
+        # them without clearing the selection or interrupting a held gizmo.
         gui = getattr(self.viewer, "gui", None)
         workspace = getattr(gui, "workspace", None)
         if workspace is not None and workspace.example is self:
-            workspace.detach_example()
+            workspace.reset_history()
 
     def _collide(self, runtime: _Runtime) -> bool:
         """Detect complete contacts before solving, growing owned buffers if needed."""
@@ -1279,7 +1279,7 @@ class SceneEditor:
             self.sim_time = 0.0
             workspace = getattr(getattr(self.viewer, "gui", None), "workspace", None)
             if workspace is not None and workspace.example is self:
-                workspace.detach_example()
+                workspace.reset_history()
 
     def step(self) -> None:
         """Step owned XPBD physics; topology never changes during these launches."""
