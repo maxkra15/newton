@@ -26,6 +26,10 @@ The ``examples`` extra includes the native viewer and USD import dependencies:
    uv run --extra examples -m newton.examples scene_editor --empty
    uv run --extra examples -m newton.examples scene_editor --scene scene.usda
 
+The window title identifies the source commit at launch, with ``-dirty`` for
+tracked local edits. Installed wheels show the package version. Restart the
+application to load subsequent Python changes.
+
 The left panel has three tabs:
 
 * **Create** adds boxes, spheres, capsules, and cylinders. Click a card to place

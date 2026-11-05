@@ -378,6 +378,58 @@ class TestSceneAuthoring(unittest.TestCase):
             self.assertEqual(explicit.get_object(explicit_id).mass, 1)
             self.assertAlmostEqual(explicit.model.body_mass.numpy()[0], 1, places=6)
 
+    @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
+    def test_topology_changes_preserve_fixed_joint_asset_controls(self):
+        """Move jointed controls across topology edits without copying empty joint spans."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        editor = self.make_editor()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixed.usda"
+            stage = Usd.Stage.CreateNew(str(path))
+            UsdGeom.SetStageMetersPerUnit(stage, 1)
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            root = UsdGeom.Xform.Define(stage, "/Assembly")
+            UsdPhysics.ArticulationRootAPI.Apply(root.GetPrim())
+            for name, height in (("Base", 0.0), ("Child", 0.2)):
+                body = UsdGeom.Cube.Define(stage, f"/Assembly/{name}")
+                body.CreateSizeAttr(0.1)
+                body.AddTranslateOp().Set((0, 0, height))
+                UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+                UsdPhysics.CollisionAPI.Apply(body.GetPrim())
+                UsdPhysics.MassAPI.Apply(body.GetPrim()).CreateMassAttr(1)
+            joint = UsdPhysics.FixedJoint.Define(stage, "/Assembly/Weld")
+            joint.CreateBody0Rel().SetTargets(["/Assembly/Base"])
+            joint.CreateBody1Rel().SetTargets(["/Assembly/Child"])
+            joint.CreateLocalPos0Attr((0, 0, 0.2))
+            stage.GetRootLayer().Save()
+            leading = editor.add_primitive("box", position=(-3, 0, 1))
+            asset = editor.add_usd(path, position=(0, 0, 2))
+            editor.commit()
+            old_pose = editor.state_0.body_q.numpy()[list(editor.body_indices(asset))].copy()
+            expected = {}
+            for field in ("joint_f", "joint_act", "joint_target_q", "joint_target_qd"):
+                values = getattr(editor.control, field, None)
+                if values is not None:
+                    data = np.arange(values.size, dtype=np.float32) / 100 + 0.1
+                    values.assign(data)
+                    expected[field] = data[7 if field == "joint_target_q" else 6 :].copy()
+            editor.remove_object(leading)
+            trailing = editor.add_primitive("box", position=(3, 0, 1))
+            editor.commit()
+            np.testing.assert_array_equal(editor.state_0.body_q.numpy()[list(editor.body_indices(asset))], old_pose)
+            for field, data in expected.items():
+                actual = getattr(editor.control, field).numpy()
+                np.testing.assert_array_equal(actual[: len(data)], data)
+                np.testing.assert_array_equal(
+                    actual[len(data) :], getattr(editor.model.control(), field).numpy()[len(data) :]
+                )
+            editor.remove_object(trailing)
+            editor.commit()
+            for field, data in expected.items():
+                np.testing.assert_array_equal(getattr(editor.control, field).numpy(), data)
+            self.assertEqual(editor.rebuild_count, 3)
+
     def test_contact_capacity_recovers_before_solving(self):
         """Grow an undersized native contact pipeline while retaining the physical runtime."""
         editor = self.make_editor()

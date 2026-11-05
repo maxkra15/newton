@@ -6,6 +6,9 @@
 Command: python -m newton.examples scene_editor
 """
 
+import subprocess
+from pathlib import Path
+
 import newton.examples
 from newton.viewer import SceneEditor
 
@@ -37,6 +40,21 @@ class Example(SceneEditor):
             )
         self.commit()
         viewer.set_camera(pos=(5.0, -7.0, 4.5), pitch=-23.0, yaw=125.0)
+        window = getattr(getattr(viewer, "renderer", None), "window", None)
+        if window is not None:
+            revision = newton.__version__
+            root = Path(__file__).resolve().parents[3]
+            if (root / ".git").exists():
+                try:
+                    revision = subprocess.check_output(
+                        ["git", "-C", str(root), "describe", "--always", "--dirty", "--abbrev=12", "--exclude=*"],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1,
+                    ).strip()
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            window.set_caption(f"Newton Scene Editor [{revision}]")
 
 
 if __name__ == "__main__":

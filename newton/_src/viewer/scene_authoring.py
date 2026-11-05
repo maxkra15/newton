@@ -849,6 +849,8 @@ class SceneEditor:
                     count = int(starts_new[joint + 1] - starts_new[joint])
                     if count != int(starts_old[previous + 1] - starts_old[previous]):
                         raise ValueError("An unchanged joint changed control layout during compilation")
+                    if count == 0:
+                        continue
                     wp.copy(
                         target,
                         source,
