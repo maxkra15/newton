@@ -170,6 +170,9 @@ class ViewerDockspace:
                     uv1=ui.ImVec2(x1 / display.x, 1.0 - y1 / display.y),
                 )
                 self.viewport_hovered = ui.is_item_hovered()
+                authoring = getattr(ws, "authoring", None)
+                if authoring is not None:
+                    authoring.drop_target()
         ui.end()
         ui.pop_style_var()
 

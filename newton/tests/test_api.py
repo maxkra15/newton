@@ -116,6 +116,12 @@ class TestApi(unittest.TestCase):
             viewer.end_frame()
             assert not viewer.is_running()
             viewer.close()
+            assert not any(name in sys.modules for name in (
+                "newton._src.viewer.scene_authoring",
+                "newton._src.viewer.authoring_usd",
+                "newton._src.viewer.viewer_assets",
+                "newton._src.viewer.gui.authoring",
+            ))
         """)
         result = subprocess.run(
             [sys.executable, "-c", script],

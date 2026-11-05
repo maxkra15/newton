@@ -1,0 +1,448 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""USD interchange for the experimental scene authoring application.
+
+OpenUSD is imported only when these helpers are called. Imported builders are
+owned by the caller and must be treated as read-only templates.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import tempfile
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
+
+from ..sim.builder import ModelBuilder
+from ..utils.color import color_srgb_to_linear
+
+_MARKER = "newtonSceneAuthoring"
+
+
+class NotAuthoringSceneError(ValueError):
+    """Indicate an ordinary USD asset rather than an authored scene document."""
+
+
+def _make_instances_editable(stage):
+    from pxr import Usd
+
+    paths = [prim.GetPath() for prim in stage.Traverse(Usd.TraverseInstanceProxies()) if prim.IsInstanceable()]
+    for path in paths:
+        stage.GetPrimAtPath(path).SetInstanceable(False)
+
+
+def _open_asset(source: str):
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
+    path = str(Path(source).expanduser().resolve())
+    layer = Sdf.Layer.FindOrOpen(path)
+    if layer is None:
+        raise ValueError(f"Cannot open USD asset: {source}")
+    session = Sdf.Layer.CreateAnonymous("authoring-session.usda")
+    stage = Usd.Stage.Open(layer, session, Usd.Stage.LoadAll)
+    stage.SetEditTarget(session)
+    _make_instances_editable(stage)
+    # SimReady assets ship independent backend variants. Select them in the
+    # session layer, keeping downloaded packages and their defaults untouched.
+    for prim in list(stage.Traverse()):
+        for name in ("Newton", "MuJoCo", "PhysX"):
+            variants = prim.GetVariantSets().GetVariantSet(name)
+            names = variants.GetVariantNames()
+            selection = "Enabled" if name == "Newton" else "Disabled"
+            if selection in names:
+                variants.SetVariantSelection(selection)
+    _make_instances_editable(stage)
+    for prim in stage.Traverse():
+        if prim.IsA(UsdGeom.Xformable) and UsdGeom.Xformable(prim).GetResetXformStack():
+            raise ValueError(f"Scene authoring does not support resetXformStack at {prim.GetPath()}")
+        schemas = prim.GetPrimTypeInfo().GetAppliedAPISchemas()
+        # Bare TetMesh has legacy soft-body semantics in native import. Points
+        # and curves require an explicit simulation API; untagged grasp guides
+        # and other annotations are harmless rigid-asset metadata.
+        if prim.GetTypeName() == "TetMesh" or any("Deformable" in schema or "Particle" in schema for schema in schemas):
+            raise ValueError(
+                f"Scene authoring supports rigid USD assets only; unsupported simulation at {prim.GetPath()}"
+            )
+    linear_unit = UsdGeom.GetStageMetersPerUnit(stage)
+    mass_unit = UsdPhysics.GetStageKilogramsPerUnit(stage)
+    if not math.isfinite(linear_unit) or linear_unit <= 0 or not math.isfinite(mass_unit) or mass_unit <= 0:
+        raise ValueError("USD length and mass units must be finite and positive")
+    # Native rigid import does not convert stage units. Visual/static geometry
+    # can be converted by a world scale; articulated or authored inertial data
+    # requires a complete physical-parameter conversion, which is not supported.
+    if not math.isclose(linear_unit, 1.0) or not math.isclose(mass_unit, 1.0):
+        for prim in stage.Traverse():
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI) or prim.HasAPI(UsdPhysics.MassAPI) or prim.IsA(UsdPhysics.Joint):
+                raise ValueError(
+                    "USD assets with rigid-body, joint, or mass data must use metersPerUnit=1 and kilogramsPerUnit=1; "
+                    f"found {linear_unit:g} and {mass_unit:g}"
+                )
+    return stage, path, linear_unit
+
+
+def _source_scale(stage, scale, linear_unit):
+    from pxr import UsdGeom
+
+    values = tuple(float(value) for value in scale)
+    if len(values) != 3 or any(not math.isfinite(value) or value <= 0 for value in values):
+        raise ValueError("USD scale must contain three finite positive values")
+    if UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y:
+        values = (values[0], values[2], values[1])
+    return tuple(value * linear_unit for value in values)
+
+
+def prepare_usd(source: str, *, scale=(1.0, 1.0, 1.0)) -> ModelBuilder:
+    """Import a rigid USD asset as a caller-owned, read-only builder template.
+
+    Preserve bodies, joints, colliders, and visuals through native USD import.
+    Visual/static assets are converted to meters; non-SI authored rigid physics
+    is rejected. Placement uses a Z-up frame and scale uses that frame's axes.
+    """
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    stage, _, linear_unit = _open_asset(source)
+    factors = _source_scale(stage, scale, linear_unit)
+    if factors != (1.0, 1.0, 1.0):
+        pending = list(stage.GetPseudoRoot().GetChildren())
+        while pending:
+            prim = pending.pop()
+            if prim.IsA(UsdGeom.Xformable):
+                xform = UsdGeom.Xformable(prim)
+                previous = xform.GetOrderedXformOps()
+                op = xform.AddScaleOp(UsdGeom.XformOp.PrecisionDouble, "sceneAuthoring")
+                op.Set(Gf.Vec3d(*factors))
+                xform.SetXformOpOrder([op, *previous])
+            else:
+                pending.extend(prim.GetChildren())
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+    builder = ModelBuilder()
+    builder.add_usd(stage, collapse_fixed_joints=False)
+    if builder.particle_count or builder.tri_count or builder.tet_count:
+        raise ValueError("Scene authoring supports rigid USD assets only")
+    if not builder.shape_count:
+        raise ValueError(f"USD asset contains no supported rigid or visual geometry: {source}")
+    return builder
+
+
+def _definition(obj) -> dict[str, Any]:
+    kind = obj.kind.value
+    if kind not in {"box", "sphere", "capsule", "cylinder", "usd"}:
+        raise ValueError(f"Unsupported scene object kind: {kind}")
+    definition = {
+        "id": obj.id,
+        "name": obj.name,
+        "kind": kind,
+        "position": list(obj.position),
+        "rotation": list(obj.rotation),
+        "size": list(obj.size),
+        "color": list(obj.color),
+        "mass": float(obj.mass),
+        "friction": float(obj.friction),
+        "dynamic": bool(obj.dynamic),
+        "source": str(Path(obj.source).expanduser().resolve()) if obj.source else None,
+        "visible": bool(obj.visible),
+        "overrides": list(getattr(obj, "overrides", ("mass", "friction", "dynamic"))),
+    }
+    _validate_definition(definition)
+    return definition
+
+
+def _validate_definition(definition):
+    for field in (
+        "id",
+        "name",
+        "kind",
+        "position",
+        "rotation",
+        "size",
+        "color",
+        "mass",
+        "friction",
+        "dynamic",
+        "source",
+        "visible",
+    ):
+        if field not in definition:
+            raise ValueError(f"Scene object is missing {field}")
+    for field, length in (("position", 3), ("rotation", 4), ("size", 3), ("color", 3)):
+        values = definition[field]
+        if len(values) != length or any(not math.isfinite(float(value)) for value in values):
+            raise ValueError(f"Invalid {field} in authoring object")
+    size = definition["size"]
+    if min(size) <= 0 or not math.isfinite(definition["mass"]) or definition["mass"] <= 0:
+        raise ValueError("Scene object dimensions and mass must be positive")
+    if not math.isfinite(definition["friction"]) or definition["friction"] < 0:
+        raise ValueError("Scene object friction must be finite and nonnegative")
+    if any(value < 0 or value > 1 for value in definition["color"]):
+        raise ValueError("Scene object color must lie between zero and one")
+    if not math.isclose(sum(value * value for value in definition["rotation"]), 1.0, abs_tol=1.0e-5):
+        raise ValueError("Scene object rotation must be a unit quaternion")
+    if definition["kind"] == "sphere" and not all(math.isclose(value, size[0]) for value in size):
+        raise ValueError("Sphere dimensions must be equal")
+    if definition["kind"] in {"capsule", "cylinder"} and not math.isclose(size[0], size[1]):
+        raise ValueError("Capsule and cylinder radial dimensions must be equal")
+    if definition["kind"] == "capsule" and size[2] < size[0]:
+        raise ValueError("Capsule total height must be at least its diameter")
+    if definition["kind"] == "usd" and not definition["source"]:
+        raise ValueError("USD scene objects require a source asset")
+    if any(value not in {"mass", "friction", "dynamic"} for value in definition.get("overrides", ())):
+        raise ValueError("Unknown USD physical property override")
+
+
+def _write_references(stage, path, definition):
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
+
+    source_stage, source, linear_unit = _open_asset(definition["source"])
+    factors = _source_scale(source_stage, definition["size"], linear_unit)
+    template = prepare_usd(source, scale=definition["size"])
+    overrides = set(definition.get("overrides", ("mass", "friction", "dynamic")))
+    promote = not template.body_count
+    asset = UsdGeom.Xform.Define(stage, f"{path}/Asset")
+    if UsdGeom.GetStageUpAxis(source_stage) == UsdGeom.Tokens.y:
+        asset.AddRotateXOp().Set(90.0)
+    asset.AddScaleOp().Set(Gf.Vec3f(*factors))
+    mappings = []
+    for root in source_stage.GetPseudoRoot().GetChildren():
+        destination = asset.GetPath().AppendChild(root.GetName())
+        prim = stage.DefinePrim(destination)
+        prim.GetReferences().AddReference(source, root.GetPath())
+        prim.SetInstanceable(False)
+        mappings.append((root.GetPath(), destination))
+
+    # References to separate root prims preserve all source composition. Repair
+    # cross-root relationships/connections, whose targets lie outside each
+    # individual reference's namespace.
+    def remap(target):
+        for old, new in mappings:
+            if target.HasPrefix(old):
+                return target.ReplacePrefix(old, new)
+        return target
+
+    for source_prim in source_stage.Traverse():
+        prim = stage.GetPrimAtPath(remap(source_prim.GetPath()))
+        if not prim:
+            continue
+        for name in ("Newton", "MuJoCo", "PhysX"):
+            selection = source_prim.GetVariantSets().GetVariantSet(name).GetVariantSelection()
+            if selection:
+                prim.GetVariantSets().GetVariantSet(name).SetVariantSelection(selection)
+        # References and variants restore instanceability. Visit parents before
+        # their descendants so overrides never target an instance proxy.
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
+        for relationship in source_prim.GetRelationships():
+            targets = relationship.GetTargets()
+            if targets:
+                prim.CreateRelationship(relationship.GetName(), relationship.IsCustom()).SetTargets(
+                    [remap(target) for target in targets]
+                )
+        for attribute in source_prim.GetAttributes():
+            connections = attribute.GetConnections()
+            if connections:
+                prim.CreateAttribute(attribute.GetName(), attribute.GetTypeName(), attribute.IsCustom()).SetConnections(
+                    [remap(target) for target in connections]
+                )
+        if "dynamic" in overrides and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(not definition["dynamic"])
+    if promote:
+        UsdPhysics.RigidBodyAPI.Apply(asset.GetPrim()).CreateKinematicEnabledAttr(not definition["dynamic"])
+        geometry_paths = set(template.shape_label)
+        for prim in Usd.PrimRange(asset.GetPrim()):
+            source_path = str(prim.GetPath()).replace(str(asset.GetPath()), "", 1)
+            if prim.IsA(UsdGeom.Gprim) and source_path in geometry_paths:
+                UsdPhysics.CollisionAPI.Apply(prim)
+    if promote or "friction" in overrides:
+        material = UsdShade.Material.Define(stage, f"{path}/PhysicsMaterial")
+        physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+        physics_material.CreateStaticFrictionAttr(definition["friction"])
+        physics_material.CreateDynamicFrictionAttr(definition["friction"])
+        for prim in Usd.PrimRange(asset.GetPrim()):
+            if prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, materialPurpose="physics")
+    if definition["color"] != [1.0, 1.0, 1.0]:
+        _tint_reference(asset.GetPrim(), definition["color"])
+    # Record a total authored mass without replacing the source's rigid topology.
+    bodies = [prim for prim in Usd.PrimRange(asset.GetPrim()) if prim.HasAPI(UsdPhysics.RigidBodyAPI)]
+    if bodies and (promote or "mass" in overrides):
+        masses = dict(zip(template.body_label, template.body_mass, strict=True))
+        weights = [
+            max(0.0, float(masses.get(str(prim.GetPath()).replace(str(asset.GetPath()), "", 1), 0.0)))
+            for prim in bodies
+        ]
+        total = sum(weights)
+        for prim, weight in zip(bodies, weights, strict=True):
+            mass = definition["mass"] * (weight / total if total else 1.0 / len(bodies))
+            UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(mass)
+            if weight > 0:
+                for name in ("physics:diagonalInertia", "newton:inertia"):
+                    attribute = prim.GetAttribute(name)
+                    if attribute and attribute.HasAuthoredValueOpinion():
+                        value = attribute.Get()
+                        scaled = [component * mass / weight for component in value]
+                        attribute.Set(Gf.Vec3f(*scaled) if name == "physics:diagonalInertia" else scaled)
+
+
+def _tint_reference(root, tint):
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
+
+    from ..usd.utils import _color_to_display_space  # noqa: PLC0415 - defer optional USD parser imports
+
+    def linear_tint(value, attribute):
+        display = _color_to_display_space(tuple(value[:3]), attribute)
+        return Gf.Vec3f(
+            *color_srgb_to_linear(tuple(channel * factor for channel, factor in zip(display, tint, strict=True)))
+        )
+
+    visited = set()
+    for prim in Usd.PrimRange(root):
+        if not prim.IsA(UsdGeom.Gprim):
+            continue
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+        if material:
+            shader, _, _ = material.ComputeSurfaceSource()
+            if not shader or shader.GetIdAttr().Get() != "UsdPreviewSurface":
+                raise ValueError(
+                    "Nonwhite USD tint export supports displayColor and scalar UsdPreviewSurface only; use white tint for other shader graphs"
+                )
+            color = shader.GetInput("baseColor") or shader.GetInput("diffuseColor")
+            if color and color.HasConnectedSource():
+                raise ValueError(
+                    "Nonwhite USD tint export does not support connected color textures or shader graphs; use white tint"
+                )
+            if shader.GetPath() not in visited:
+                visited.add(shader.GetPath())
+                if not color:
+                    color = shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f)
+                    color.Set(Gf.Vec3f(0.18))
+                value = color.Get()
+                if value is None or len(value) != 3:
+                    raise ValueError("Nonwhite USD tint export requires a scalar RGB UsdPreviewSurface color")
+                color.Set(linear_tint(value, color.GetAttr()))
+                color.GetAttr().SetColorSpace("lin_rec709_scene")
+        geometry = UsdGeom.Gprim(prim)
+        attribute = geometry.GetDisplayColorAttr()
+        colors = attribute.Get() or [Gf.Vec3f(0.18)]
+        geometry.CreateDisplayColorAttr().Set(Vt.Vec3fArray([linear_tint(value, attribute) for value in colors]))
+        attribute.SetColorSpace("lin_rec709_scene")
+
+
+def save_scene(path: str | os.PathLike, objects: Iterable) -> None:
+    """Atomically write authored objects using standard USD geometry and physics.
+
+    Custom data stores editor definitions and stable IDs, never a private
+    simulation schema. Referenced assets remain referenced rather than flattened.
+    Nonwhite asset tint supports displayColor and scalar UsdPreviewSurface;
+    connected textures and other shader graphs require white tint.
+    """
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
+
+    destination = Path(path).expanduser().resolve()
+    if destination.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+        raise ValueError("Scene destination must end in .usd, .usda, or .usdc")
+    definitions = [_definition(obj) for obj in objects]
+    ids = [definition["id"] for definition in definitions]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Scene object IDs must be unique")
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+    stage.GetRootLayer().customLayerData = {_MARKER: 1}
+    world = UsdGeom.Xform.Define(stage, "/World")
+    stage.SetDefaultPrim(world.GetPrim())
+    UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
+    floor = UsdGeom.Plane.Define(stage, "/World/Ground")
+    floor.CreateAxisAttr(UsdGeom.Tokens.z)
+    floor.CreateWidthAttr(100.0)
+    floor.CreateLengthAttr(100.0)
+    floor.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*color_srgb_to_linear((0.28, 0.31, 0.34)))]))
+    UsdPhysics.CollisionAPI.Apply(floor.GetPrim())
+    floor_material = UsdShade.Material.Define(stage, "/World/GroundMaterial")
+    floor_physics = UsdPhysics.MaterialAPI.Apply(floor_material.GetPrim())
+    floor_physics.CreateStaticFrictionAttr(0.7)
+    floor_physics.CreateDynamicFrictionAttr(0.7)
+    UsdShade.MaterialBindingAPI.Apply(floor.GetPrim()).Bind(floor_material, materialPurpose="physics")
+    for index, definition in enumerate(definitions):
+        object_path = f"/World/Object_{index}"
+        obj = UsdGeom.Xform.Define(stage, object_path)
+        obj.GetPrim().SetCustomDataByKey(_MARKER, json.dumps(definition, allow_nan=False))
+        obj.GetPrim().SetDisplayName(definition["name"])
+        obj.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*definition["position"]))
+        x, y, z, w = definition["rotation"]
+        obj.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+        obj.CreateVisibilityAttr(UsdGeom.Tokens.inherited if definition["visible"] else UsdGeom.Tokens.invisible)
+        kind, size = definition["kind"], definition["size"]
+        if kind == "usd":
+            _write_references(stage, object_path, definition)
+            continue
+        geometry_path = f"{object_path}/Geometry"
+        if kind == "box":
+            geometry = UsdGeom.Cube.Define(stage, geometry_path)
+            geometry.CreateSizeAttr(1.0)
+            geometry.AddScaleOp().Set(Gf.Vec3f(*size))
+        elif kind == "sphere":
+            geometry = UsdGeom.Sphere.Define(stage, geometry_path)
+            geometry.CreateRadiusAttr(size[0] / 2.0)
+        else:
+            geometry = (UsdGeom.Capsule if kind == "capsule" else UsdGeom.Cylinder).Define(stage, geometry_path)
+            geometry.CreateRadiusAttr(size[0] / 2.0)
+            geometry.CreateHeightAttr(size[2] - size[0] if kind == "capsule" else size[2])
+            geometry.CreateAxisAttr(UsdGeom.Tokens.z)
+        prim = geometry.GetPrim()
+        geometry.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*color_srgb_to_linear(definition["color"]))]))
+        UsdPhysics.CollisionAPI.Apply(prim)
+        body = UsdPhysics.RigidBodyAPI.Apply(obj.GetPrim())
+        body.CreateKinematicEnabledAttr(not definition["dynamic"])
+        UsdPhysics.MassAPI.Apply(obj.GetPrim()).CreateMassAttr(definition["mass"])
+        material = UsdShade.Material.Define(stage, f"{object_path}/Material")
+        physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+        physics_material.CreateStaticFrictionAttr(definition["friction"])
+        physics_material.CreateDynamicFrictionAttr(definition["friction"])
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, materialPurpose="physics")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.stem}-", suffix=destination.suffix, dir=destination.parent
+    )
+    os.close(descriptor)
+    try:
+        if not stage.GetRootLayer().Export(temporary):
+            raise OSError(f"Cannot export scene to {destination}")
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def load_scene(path: str | os.PathLike) -> list[dict[str, Any]]:
+    """Read definitions from an authored scene; reject ordinary USD assets distinctly."""
+    from pxr import Usd
+
+    stage = Usd.Stage.Open(str(Path(path).expanduser().resolve()))
+    if stage is None:
+        raise ValueError(f"Cannot open USD scene: {path}")
+    if stage.GetRootLayer().customLayerData.get(_MARKER) != 1:
+        raise NotAuthoringSceneError("USD file is an asset, not a saved authoring scene")
+    world = stage.GetPrimAtPath("/World")
+    if not world:
+        raise ValueError("Saved authoring scene is missing /World")
+    definitions = []
+    for prim in world.GetChildren():
+        encoded = prim.GetCustomDataByKey(_MARKER)
+        if encoded is not None:
+            try:
+                definition = json.loads(encoded)
+                definition.setdefault("overrides", ["mass", "friction", "dynamic"])
+                if definition["kind"] not in {"box", "sphere", "capsule", "cylinder", "usd"}:
+                    raise ValueError("Unknown shape kind")
+                _validate_definition(definition)
+                definitions.append(definition)
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"Invalid authoring metadata at {prim.GetPath()}") from exc
+    ids = [definition["id"] for definition in definitions]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Saved scene object IDs must be unique")
+    return definitions

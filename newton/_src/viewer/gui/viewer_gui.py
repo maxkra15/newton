@@ -233,6 +233,9 @@ class ViewerGui:
                     giz.pop_id()
             self.ui.cancel_mouse_interaction()
         self._gizmo_active.clear()
+        authoring = getattr(getattr(self, "workspace", None), "authoring", None)
+        if authoring is not None:
+            authoring.cancel_interaction()
         self._gizmo_hovered = False
         self._selection_press = None
         self._viewer.gizmo_is_using = False
@@ -791,6 +794,9 @@ class ViewerGui:
 
     def close_console(self) -> None:
         """Release logging routes on window close, including close events outside run()."""
+        workspace = getattr(self, "workspace", None)
+        if workspace is not None:
+            workspace.close_authoring()
         if self.console_capture is not None:
             self.console_capture.close()
 
@@ -874,7 +880,10 @@ class ViewerGui:
             return
         if self.workspace is not None and self.workspace.console.poll_warnings():
             self.show_ui = True
-        if (not self.show_ui or self._loading_splash_active) and any(self._gizmo_active.values()):
+        authoring = getattr(self.workspace, "authoring", None)
+        if (not self.show_ui or self._loading_splash_active) and (
+            any(self._gizmo_active.values()) or (authoring is not None and authoring.interacting)
+        ):
             self._cancel_mouse_interaction()
         if not self.show_ui and self.workspace is not None:
             self.workspace.collision.contacts_tab = False
@@ -1282,6 +1291,8 @@ class ViewerGui:
             self.workspace.bind(self._workspace_example)
             self.workspace.draw()
             self._render_gizmos()
+            if self.workspace.authoring is not None:
+                self.workspace.authoring.finish_gizmo()
             if self._ui_callbacks["stats"]:
                 self._render_stats_overlay(custom_only=True)
             for callback in self._ui_callbacks["free"]:

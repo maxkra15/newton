@@ -155,6 +155,7 @@ class ViewerWorkspace:
         self.show_right = True
         self.rect = (0, 0, 1, 1)
         self.dockspace = ViewerDockspace(self)
+        self.authoring = None
         self._cache = {}
         self._live_cache = {}
         self._live_time = 0.0
@@ -271,7 +272,14 @@ class ViewerWorkspace:
         reuse their tree and history. A different Model discards topology,
         selection, and display buffers before inspection resumes.
         """
-        if example is not self.example:
+        if example is not self.example or (example is None and self.authoring is not None):
+            editor = getattr(example, "scene_editor", None)
+            if self.authoring is not None and self.authoring.editor is not editor:
+                self.close_authoring()
+            if editor is not None and self.authoring is None:
+                from .authoring import AuthoringPanel  # noqa: PLC0415
+
+                self.authoring = AuthoringPanel(self, editor)
             self.save_preferences()
             self._active_timeline = None
             self.history = None
@@ -292,6 +300,8 @@ class ViewerWorkspace:
             self.select(None)
             self._tree_pending = True
         self._capture_control_initial()
+        if self.authoring is not None:
+            self.authoring.poll()
         if example is not None and self.model is not None and self._history_compatible:
             timeline = getattr(example, "timeline", None)
             if timeline is None:
@@ -306,6 +316,12 @@ class ViewerWorkspace:
         elif self.history is not None or self._active_timeline is not None:
             self.save_preferences()
             self._active_timeline = self.history = None
+
+    def close_authoring(self) -> None:
+        """Release optional authoring services and textures before replacing their owner."""
+        if self.authoring is not None:
+            self.authoring.close()
+            self.authoring = None
 
     def before_step(self) -> bool:
         """Advance replay and return whether the example runner may step live physics.
@@ -837,14 +853,18 @@ class ViewerWorkspace:
         ui.end()
         if left:
             if self._window("##workspace_explorer", 0, top, left, view_h):
-                self.gui.ui.draw_section("Explorer", self._explorer)
+                self.gui.ui.draw_section(
+                    "Explorer", self.authoring.draw if self.authoring is not None else self._explorer
+                )
             ui.end()
         # Visibility is established by the inspector drawn this frame, not by
         # the last selected tab in a hidden panel or the Environment/Solver tab.
         self.collision.contacts_tab = False
         if right:
             if self._window("##workspace_inspector", w - right, top, right, view_h):
-                self.gui.ui.draw_section("Properties", self._inspector)
+                self.gui.ui.draw_section(
+                    "Properties", self.authoring.draw_inspector if self.authoring is not None else self._inspector
+                )
             ui.end()
         if console_h > 4 * s:
             if self._window("##workspace_console", 0, top + view_h, w, console_h):
@@ -917,6 +937,8 @@ class ViewerWorkspace:
                 if len(self.selection) == 1 and self.selected[0] == "joint":
                     self._joint_selection = self._joint_selections.joints[0]
             self._joint_selections.draw(self, compact=len(self.selection) > 1 or self.selected[0] != "joint")
+        if self.authoring is not None and self.dockspace.viewport_visible:
+            self.authoring.prepare_gizmo()
         self.draw_ms = 0.9 * self.draw_ms + 0.1 * ((perf_counter() - started) * 1000)
 
     def _status(self, timeline: TimelineView | None) -> None:

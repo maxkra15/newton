@@ -651,11 +651,19 @@ def run(example, args):
         frame_start_time = time.perf_counter()
 
         if browser is not None and browser.switch_target is not None:
+            authoring = getattr(example, "scene_editor", None)
+            if authoring is not None:
+                authoring.close()
             example = None
             example, example_class = browser.switch(example_class)
             continue
 
         if browser is not None and browser._reset_requested:
+            authoring = getattr(example, "scene_editor", None)
+            if authoring is not None:
+                browser._reset_requested = False
+                authoring.reset_scene()
+                continue
             # Scene cleanup releases callbacks and cycles before construction.
             example = None
             example = browser.reset(example_class)
@@ -668,6 +676,9 @@ def run(example, args):
             continue
 
         try:
+            before_frame = getattr(example, "before_frame", None)
+            if before_frame is not None:
+                before_frame()
             gui = getattr(viewer, "gui", None)
             if gui is not None and hasattr(gui, "_workspace_example"):
                 gui._workspace_example = example
@@ -686,6 +697,9 @@ def run(example, args):
                 else:
                     workspace.render_example()
         except (Exception, SystemExit) as error:
+            authoring = getattr(example, "scene_editor", None)
+            if authoring is not None:
+                authoring.close()
             if browser is None:
                 # Test/benchmark failures must still propagate to the caller.
                 raise
@@ -698,6 +712,9 @@ def run(example, args):
     if perform_test:
         example.test_final()
 
+    authoring = getattr(example, "scene_editor", None)
+    if authoring is not None:
+        authoring.close()
     viewer.close()
 
     if hasattr(viewer, "benchmark_result"):
