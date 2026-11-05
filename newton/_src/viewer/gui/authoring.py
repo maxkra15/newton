@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 from ...core.host_transform import transform_assign
+from ...geometry.raycast import intersect_ray
 from . import theme
 from .widgets import PropertyEdit
 
@@ -82,6 +83,7 @@ class AuthoringPanel:
         self._drag_preview = False
         self._pose_frame = -1
         self._pose_cache = {}
+        self._placement_ray = None
         self._body_map_key = None
         self._body_objects = {}
         self._last_selection = None
@@ -192,7 +194,7 @@ class AuthoringPanel:
         self._sync_selection()
 
     def world_position(self, mouse: tuple[float, float] | None = None, *, lift: float = 0.0):
-        """Intersect the viewport ray with its up-axis ground plane, without GPU queries."""
+        """Aim placement at the current visible surface, falling back to the ground."""
         x, y, width, height = self.workspace.rect
         mx, my = mouse if mouse is not None else (x + width * 0.5, y + height * 0.5)
         camera = self.workspace.viewer.camera
@@ -201,6 +203,25 @@ class AuthoringPanel:
         origin, direction = camera.get_world_ray(px, py)
         origin, direction = np.asarray(origin, dtype=float), np.asarray(direction, dtype=float)
         axis = int(getattr(self.workspace.model, "up_axis", camera.up_axis))
+        model, state = self.editor.model, self.editor.state_0
+        if model is not None and state is not None:
+            if self._placement_ray is None:
+                self._placement_ray = (
+                    wp.empty(1, dtype=wp.vec3, device=model.device),
+                    wp.empty(1, dtype=wp.vec3, device=model.device),
+                    wp.full(1, -1, dtype=int, device=model.device),
+                    wp.empty(1, dtype=float, device=model.device),
+                )
+            origins, directions, worlds, distances = self._placement_ray
+            origins.assign(np.asarray([origin], dtype=np.float32))
+            directions.assign(np.asarray([direction], dtype=np.float32))
+            model.bvh_refit_shapes(state)
+            intersect_ray(model, ray_origins=origins, ray_directions=directions, ray_worlds=worlds, out_dist=distances)
+            distance = float(distances.numpy()[0])
+            if distance >= 0:
+                point = origin + direction * distance
+                point[axis] += lift
+                return tuple(float(value) for value in point)
         distance = -origin[axis] / direction[axis] if abs(direction[axis]) > 1.0e-6 else -1.0
         point = origin + direction * (distance if 0 < distance < 1000 else 3.0)
         point[axis] = lift
@@ -224,11 +245,13 @@ class AuthoringPanel:
             dynamic=self._dynamic,
         )
         if object_id is not None:
+            self._run(self.editor.place_object, object_id)
             self.select(object_id)
 
     def _import_path(self, path, position) -> None:
         object_id = self._run(self.editor.add_usd, str(path), position=position)
         if object_id is not None:
+            self._run(self.editor.place_object, object_id)
             self.select(object_id)
 
     def _place_asset(self, record: AssetRecord, position=None) -> None:
@@ -378,11 +401,7 @@ class AuthoringPanel:
                     record = records[index]
                     if column:
                         ui.same_line(spacing=8 * s)
-                    payload = self._asset_payloads.get(record.id)
-                    if payload is None:
-                        payload = len(self._asset_payloads) + len(self.primitives) + 1
-                        self._asset_payloads[record.id] = payload
-                        self._payloads[payload] = ("asset", record)
+                    payload = self._asset_payload(record)
                     selected = self._selected_asset is not None and self._selected_asset.id == record.id
                     if self._card(
                         record.name, "mesh", width, width + 30 * s, payload, record=record, selected=selected
@@ -395,6 +414,15 @@ class AuthoringPanel:
         if not records and not library.loading:
             ui.text_wrapped("No matching assets. Try a shorter search or refresh the catalog.")
         self._draw_status()
+
+    def _asset_payload(self, record: AssetRecord) -> int:
+        """Share one pinned asset identity between its card and inspector preview."""
+        payload = self._asset_payloads.get(record.id)
+        if payload is None:
+            payload = len(self._asset_payloads) + len(self.primitives) + 1
+            self._asset_payloads[record.id] = payload
+        self._payloads[payload] = ("asset", record)
+        return payload
 
     def _card(self, title, icon, width, height, payload, *, record=None, selected=False) -> bool:
         ui, w, s = self.ui, self.widgets, self.widgets.scale
@@ -445,6 +473,12 @@ class AuthoringPanel:
             )
         if hovered:
             ui.set_tooltip(title + "\nDrag into the viewport to place" + (" · Double-click to add" if record else ""))
+        self._drag_source(title, payload)
+        return clicked
+
+    def _drag_source(self, title: str, payload: int) -> None:
+        """Make the last submitted widget a source for viewport asset placement."""
+        ui = self.ui
         if self.editable and ui.begin_drag_drop_source():
             # A quick second press may become a drag. Only a completed click
             # can place on double-click; an early import would cancel this drag.
@@ -453,7 +487,6 @@ class AuthoringPanel:
             ui.text_unformatted(title)
             ui.text_disabled("Drop in the viewport")
             ui.end_drag_drop_source()
-        return clicked
 
     def _thumbnail(self, record):
         path = self.assets.thumbnail(record)
@@ -524,6 +557,8 @@ class AuthoringPanel:
     def _draw_status(self) -> None:
         ui = self.ui
         ui.spacing()
+        if self.editor.busy:
+            ui.text_disabled("Preparing USD geometry…")
         if self.editor.error or self.message:
             ui.push_text_wrap_pos()
             ui.text_colored(ui.ImVec4(*theme.CONSOLE_WARNING), self.editor.error or self.message)
@@ -554,6 +589,7 @@ class AuthoringPanel:
     def _duplicate(self, object_id: str) -> None:
         new_id = self._run(self.editor.duplicate_object, object_id)
         if new_id is not None:
+            self._run(self.editor.place_object, new_id)
             self.select(new_id)
 
     def draw_inspector(self) -> None:
@@ -654,9 +690,16 @@ class AuthoringPanel:
         if reference is not None:
             texture, texture_ref = reference
             width = min(ui.get_content_region_avail().x, 280 * s)
-            ui.image(
-                texture_ref, ui.ImVec2(width, width * texture.height / texture.width), ui.ImVec2(0, 1), ui.ImVec2(1, 0)
+            ui.push_style_var(ui.StyleVar_.frame_padding, ui.ImVec2(0, 0))
+            ui.image_button(
+                f"##asset_preview_{record.id}",
+                texture_ref,
+                ui.ImVec2(width, width * texture.height / texture.width),
+                ui.ImVec2(0, 1),
+                ui.ImVec2(1, 0),
             )
+            ui.pop_style_var()
+            self._drag_source(record.name, self._asset_payload(record))
         ui.text_wrapped(record.repo_id)
         if record.license:
             ui.text_disabled(record.license)

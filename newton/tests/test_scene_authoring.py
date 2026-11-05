@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import warp as wp
 
+from newton import CollisionPipeline
 from newton.viewer import SceneEditor, ViewerNull
 
 
@@ -79,10 +81,11 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertLess(editor.get_pose(first)[0][2], before_q[2])
 
     def test_authored_objects_collide_in_one_physical_scene(self):
-        """Settle a dynamic sphere on an authored static box rather than the ground."""
+        """Settle on an authored support and insert overlapping drops without launching its occupant."""
         editor = self.make_editor()
         support = editor.add_primitive("box", position=(0, 0, 0.5), dynamic=False)
         sphere = editor.add_primitive("sphere", position=(0, 0, 2), size=(0.5, 0.5, 0.5))
+        editor.add_primitive("box", position=(4, 0, 10), size=(2, 2, 0.5), dynamic=False)
         editor.commit()
         for _ in range(120):
             editor.step()
@@ -91,6 +94,65 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertLess(height, 1.30)
         np.testing.assert_allclose(editor.get_pose(support)[0], (0, 0, 0.5), atol=1e-6)
         self.assertEqual(editor.rebuild_count, 1)
+        index = editor.body_indices(sphere)[0]
+        editor.state_0.body_qd[index : index + 1].fill_(wp.spatial_vector(10, 0, 0, 0, 0, 0))
+        for _ in range(12):
+            editor.step()
+        for state in (editor.state_0, editor.state_1):
+            state.body_qd[index : index + 1].zero_()
+        live = editor.get_pose(sphere)[0]
+        self.assertGreater(live[0], 1.5)
+        height = live[2]
+        before_q, before_v = editor.state_0.body_q.numpy().copy(), editor.state_0.body_qd.numpy().copy()
+        first = editor.add_primitive("box", position=(live[0], live[1], 0.5))
+        second = editor.add_primitive("box", position=(live[0], live[1], 0.5))
+        reset_drop = editor.add_primitive("box", position=(0, 0, 0.5))
+        free = editor.add_primitive("box", position=(4, 0, 2))
+        for object_id in (first, second, reset_drop, free):
+            editor.place_object(object_id)
+        editor.commit()
+        np.testing.assert_array_equal(editor.state_0.body_q.numpy()[: len(before_q)], before_q)
+        np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[: len(before_v)], before_v)
+        self.assertGreater(editor.get_object(first).position[2], height + 0.7)
+        self.assertLess(editor.get_object(first).position[2], height + 0.8)
+        self.assertGreater(editor.get_object(second).position[2] - editor.get_object(first).position[2], 1.0)
+        self.assertGreater(editor.get_object(reset_drop).position[2], 2.7)
+        self.assertEqual(editor.get_object(free).position, (4, 0, 2))
+        self.assertEqual(editor.rebuild_count, 2)
+        editor.step()
+        self.assertLess(np.linalg.norm(editor.state_0.body_qd.numpy()[:, :3], axis=1).max(), 1.0)
+        self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+        resolved = {obj.id: obj.position for obj in editor.objects}
+        for removed in (free, reset_drop, second):
+            first_body = editor.body_indices(first)[0]
+            first_pose = editor.state_0.body_q.numpy()[first_body].copy()
+            first_velocity = editor.state_0.body_qd.numpy()[first_body].copy()
+            editor.undo()
+            editor.before_frame()
+            self.assertNotIn(removed, {obj.id for obj in editor.objects})
+            self.assertEqual(editor.get_object(first).position, resolved[first])
+            first_body = editor.body_indices(first)[0]
+            np.testing.assert_array_equal(editor.state_0.body_q.numpy()[first_body], first_pose)
+            np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[first_body], first_velocity)
+        for restored_id in (second, reset_drop, free):
+            editor.redo()
+            editor.before_frame()
+            self.assertEqual(editor.get_object(restored_id).position, resolved[restored_id])
+            self.assertEqual(editor.get_object(first).position, resolved[first])
+        editor.reset_scene()
+        for _ in range(60):
+            editor.step()
+            self.assertLess(np.linalg.norm(editor.state_0.body_qd.numpy()[:, :3], axis=1).max(), 10.0)
+        if importlib.util.find_spec("pxr"):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "safe-reset.usda"
+                editor.save_usd(output)
+                restored = self.make_editor()
+                restored.load_usd(output)
+                restored.commit()
+                for _ in range(60):
+                    restored.step()
+                    self.assertLess(np.linalg.norm(restored.state_0.body_qd.numpy()[:, :3], axis=1).max(), 10.0)
 
     def test_structural_edits_preserve_live_pose_and_authored_reset(self):
         """Resize and change mass of a settled prop at its live location, then reset it."""
@@ -181,6 +243,72 @@ class TestSceneAuthoring(unittest.TestCase):
             self.assertGreater(editor.get_pose(sphere)[0][2], 1.20)
             self.assertLess(editor.get_pose(sphere)[0][2], 1.30)
             np.testing.assert_allclose(editor.get_pose(plane_id)[0], (0, 0, 1), atol=1e-6)
+            # A minute tilt must use this footprint's plane equation, rather
+            # than the collision half-space's million-metre lateral extent.
+            editor.update_object(plane_id, rotation=tuple(wp.quat_from_axis_angle(wp.vec3(1, 0, 0), 0.001)))
+            editor.before_frame()
+            placed = editor.add_primitive("box", position=(3, 0, 0.5))
+            editor.place_object(placed)
+            editor.commit()
+            self.assertGreater(editor.get_object(placed).position[2], 1.5)
+            self.assertLess(editor.get_object(placed).position[2], 1.6)
+
+    @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
+    def test_safe_usd_placement_uses_bounds_and_rolls_back(self):
+        """Place offset assets as a batch and retain unresolved authoring data on failed publication."""
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+        editor = self.make_editor()
+        editor.commit()
+        original_model = editor.model
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "offset.usda"
+            stage = Usd.Stage.CreateNew(str(source))
+            UsdGeom.SetStageMetersPerUnit(stage, 1)
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            cube = UsdGeom.Cube.Define(stage, "/Asset/Cube")
+            cube.CreateSizeAttr(0.4)
+            cube.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.6))
+            stage.GetRootLayer().Save()
+            plane_path = Path(directory) / "plane.usda"
+            plane_stage = Usd.Stage.CreateNew(str(plane_path))
+            UsdGeom.SetStageMetersPerUnit(plane_stage, 1)
+            UsdGeom.SetStageUpAxis(plane_stage, UsdGeom.Tokens.z)
+            plane = UsdGeom.Plane.Define(plane_stage, "/Plane")
+            UsdPhysics.CollisionAPI.Apply(plane.GetPrim())
+            plane_stage.GetRootLayer().Save()
+            first = editor.add_usd(source, position=(0, 0, 0))
+            second = editor.add_usd(source, position=(0, 0, 0))
+            invalid = editor.add_usd(plane_path)
+            for object_id in (first, second, invalid):
+                editor.place_object(object_id)
+            with self.assertRaisesRegex(ValueError, "bounded geometry"):
+                editor.commit()
+            self.assertIs(editor.model, original_model)
+            self.assertEqual(editor.get_object(first).position, (0, 0, 0))
+            self.assertEqual(editor.get_object(second).position, (0, 0, 0))
+            editor.remove_object(invalid)
+            explicit = editor.add_primitive("box", position=(4, 0, 0.123))
+            editor.commit()
+            self.assertGreater(editor.get_object(first).position[2], 0.8)
+            self.assertGreater(editor.get_object(second).position[2] - editor.get_object(first).position[2], 0.4)
+            self.assertEqual(editor.get_object(explicit).position, (4, 0, 0.123))
+            self.assertEqual(editor.rebuild_count, 2)
+            editor.step()
+            for object_id in (first, second):
+                index = editor.body_indices(object_id)[0]
+                self.assertLess(np.linalg.norm(editor.state_0.body_qd.numpy()[index, :3]), 1.0)
+            output = Path(directory) / "placed.usda"
+            editor.save_usd(output)
+            restored = self.make_editor()
+            restored.load_usd(output)
+            restored.commit()
+            self.assertEqual(restored.objects, editor.objects)
+            editor.reset_scene()
+            for object_id in (first, second):
+                np.testing.assert_allclose(
+                    editor.get_pose(object_id)[0], editor.get_object(object_id).position, atol=1e-6
+                )
 
     @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
     def test_usd_roundtrip_and_plain_geometry_get_real_physics(self):
@@ -249,6 +377,38 @@ class TestSceneAuthoring(unittest.TestCase):
             explicit.commit()
             self.assertEqual(explicit.get_object(explicit_id).mass, 1)
             self.assertAlmostEqual(explicit.model.body_mass.numpy()[0], 1, places=6)
+
+    def test_contact_capacity_recovers_before_solving(self):
+        """Grow an undersized native contact pipeline while retaining the physical runtime."""
+        editor = self.make_editor()
+        editor.add_primitive("box", position=(0, 0, 0.5))
+        editor.commit()
+        model, solver, control = editor.model, editor.solver, editor.control
+        states = {id(editor.state_0), id(editor.state_1)}
+        poses = {id(editor.state_0.body_q), id(editor.state_1.body_q)}
+        undersized = CollisionPipeline(model, rigid_contact_max=1)
+        editor._runtime.pipeline = editor.collision_pipeline = undersized
+        editor._runtime.contacts = editor.contacts = undersized.contacts()
+        editor.viewer.set_collision_pipeline(undersized)
+        with self.assertLogs("newton", level="WARNING") as messages:
+            editor.step()
+        self.assertTrue(any("Expanded rigid contact capacity" in line for line in messages.output))
+        self.assertGreater(editor.contacts.rigid_contact_max, 1)
+        self.assertGreaterEqual(int(editor.contacts.rigid_contact_count.numpy()[0]), 4)
+        self.assertLessEqual(int(editor.contacts.rigid_contact_count.numpy()[0]), editor.contacts.rigid_contact_max)
+        self.assertEqual(model.rigid_contact_max, editor.contacts.rigid_contact_max)
+        self.assertEqual(
+            model._get_contact_capacity(), (editor.contacts.rigid_contact_max, editor.contacts.soft_contact_max)
+        )
+        self.assertIs(editor.collision_pipeline, editor._runtime.pipeline)
+        self.assertIs(editor.contacts, editor._runtime.contacts)
+        self.assertIs(editor.model, model)
+        self.assertIs(editor.solver, solver)
+        self.assertIs(editor.control, control)
+        self.assertEqual({id(editor.state_0), id(editor.state_1)}, states)
+        self.assertEqual({id(editor.state_0.body_q), id(editor.state_1.body_q)}, poses)
+        self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+        self.assertEqual(editor.rebuild_count, 1)
 
     def test_empty_scene_and_invalid_values(self):
         """Keep an empty ground usable and reject invalid edits before changing the document."""

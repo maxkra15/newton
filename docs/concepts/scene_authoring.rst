@@ -33,8 +33,9 @@ The left panel has three tabs:
   placement outline follows the pointer. Scale, color, and Dynamic configure
   new primitives. **Import USD** and local file drops add USD assets.
 * **Assets** searches the SimReady catalog. Select a card to inspect its source
-  and available license information. Drag a card into the viewport,
-  double-click it, or choose **Place in scene** to download and import it.
+  and available license information. Drag a card or its large inspector preview
+  into the viewport, double-click it, or choose **Place in scene** to download
+  and import it.
 * **Scene** lists authored objects and filters them by name. Select an object
   here or in the viewport. Its context menu offers Duplicate and Delete.
 
@@ -92,6 +93,22 @@ IDs identify objects across model replacement; compiled body indices must be
 resolved again after a commit.
 The current simulation continues during downloads and background preparation.
 
+Interactive additions and duplicates aim at the surface under the cursor.
+Before publication, their complete collision bounds are raised clear of the
+ground and occupied footprints, including other additions in the same batch.
+This conservative placement can stack crowded objects instead of inserting
+overlapping volumes. It checks both live and authored reset poses and retains
+the resolved insertion coordinates in undo history. Existing bodies keep their
+live poses and velocities.
+Programmatic ``add_primitive`` and ``add_usd`` calls retain exact coordinates;
+call :meth:`~newton.viewer.SceneEditor.place_object` before the commit to opt
+into the same placement. Infinite planes require explicit placement.
+
+The owned runtime checks contact capacity before solving and expands collision
+buffers when dense mesh contacts exceed the initial estimate. This does not
+rebuild the model or reset physics. The check reads contact counters from the
+device on each collision pass.
+
 This ownership boundary is deliberate. The editor does not mutate arbitrary
 examples' private solvers or captured CUDA graphs. Other solvers, replicated
 training environments, deformable authoring, and editing an existing Isaac Lab
@@ -147,6 +164,7 @@ Import the editor through its public module:
    viewer = ViewerNull()
    editor = SceneEditor(viewer, device="cpu")
    box = editor.add_primitive("box", position=(0, 0, 1), size=(0.5, 0.5, 0.5))
+   editor.place_object(box)
    editor.before_frame()
    editor.begin_edit()
    editor.update_object(box, size=(0.7, 0.5, 0.5))

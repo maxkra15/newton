@@ -20,6 +20,7 @@ import warp as wp
 
 from ..geometry import GeoType, ShapeFlags
 from ..sim import BodyFlags, CollisionPipeline, JointType, ModelBuilder, eval_ik
+from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
 from .authoring_usd import NotAuthoringSceneError, load_scene, prepare_usd, save_scene
 
@@ -40,13 +41,15 @@ def _move_bodies(
     other: wp.array[wp.transform],
     velocity: wp.array[wp.spatial_vector],
     other_velocity: wp.array[wp.spatial_vector],
+    clear_velocity: bool,
 ):
     index = start + wp.tid()
     pose = wp.transform_multiply(delta, poses[index])
     poses[index] = pose
     other[index] = pose
-    velocity[index] = wp.spatial_vector()
-    other_velocity[index] = wp.spatial_vector()
+    if clear_velocity:
+        velocity[index] = wp.spatial_vector()
+        other_velocity[index] = wp.spatial_vector()
     initial[index] = wp.transform_multiply(initial_delta, initial[index])
 
 
@@ -226,6 +229,7 @@ class SceneEditor:
         self._runtime: _Runtime | None = None
         self._topology_dirty = True
         self._fast_pending: dict[str, SceneEditor.Object] = {}
+        self._placement_requests: set[str] = set()
         self._undo: list[tuple[SceneEditor.Object, ...]] = []
         self._redo: list[tuple[SceneEditor.Object, ...]] = []
         self._edit_before: tuple[SceneEditor.Object, ...] | None = None
@@ -443,12 +447,32 @@ class SceneEditor:
             self._fast_pending.setdefault(object_id, before)
         self._changed()
 
+    def place_object(self, object_id: str) -> None:
+        """Queue conservative, collision-free insertion of a newly staged object.
+
+        Raise its complete native shape bounds along the scene's up axis above
+        occupied footprints when committed. Explicit adds and USD loads retain
+        their exact positions unless this experimental operation is requested.
+        Infinite planes require explicit placement instead.
+
+        Args:
+            object_id: Stable ID of an added object that has not yet been committed.
+        """
+        self.get_object(object_id)
+        if self._runtime is not None and object_id in self._runtime.bindings:
+            raise ValueError("Automatic placement requires a newly added object")
+        if object_id not in self._placement_requests:
+            self._placement_requests.add(object_id)
+            self._topology_dirty = True
+            self._changed()
+
     def remove_object(self, object_id: str) -> None:
         """Stage object removal, retaining the current physical scene until commit."""
         self.get_object(object_id)
         self._remember()
         self._objects = tuple(obj for obj in self._objects if obj.id != object_id)
         self._fast_pending.pop(object_id, None)
+        self._placement_requests.discard(object_id)
         if self.selected_id == object_id:
             self.selected_id = None
         self._topology_dirty = True
@@ -492,6 +516,7 @@ class SceneEditor:
             self._structure(old[key]) != self._structure(new[key]) for key in old.keys() & new.keys()
         )
         self._objects = objects
+        self._placement_requests.intersection_update(new)
         self._topology_dirty |= structural
         for key in old.keys() & new.keys():
             if old[key] != new[key]:
@@ -844,6 +869,169 @@ class SceneEditor:
         self.control, self.solver = runtime.control, runtime.solver
         self.collision_pipeline, self.contacts = runtime.pipeline, runtime.contacts
 
+    def _place_candidate(self, runtime: _Runtime) -> None:
+        requested = [obj.id for obj in self._objects if obj.id in self._placement_requests]
+        if not requested:
+            return
+        model, pipeline, contacts = runtime.model, runtime.pipeline, runtime.contacts
+        snapshots = []
+        for poses in (runtime.state_0.body_q, model.body_q):
+            wp.launch(
+                compute_shape_aabbs,
+                model.shape_count,
+                inputs=[
+                    poses,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    contacts.contact_counters,
+                    contacts.contact_generation,
+                    pipeline.broad_phase_pair_count,
+                    contacts.contact_counters.shape[0],
+                ],
+                outputs=[
+                    pipeline.narrow_phase.shape_aabb_lower,
+                    pipeline.narrow_phase.shape_aabb_upper,
+                    pipeline.geom_data,
+                    pipeline.geom_transform,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+            # CPU numpy() shares Warp storage; preserve LIVE before RESET writes
+            # the same buffers. Keep two intervals, not a swept union of poses.
+            snapshots.append(
+                tuple(
+                    array.numpy().copy()
+                    for array in (
+                        pipeline.narrow_phase.shape_aabb_lower,
+                        pipeline.narrow_phase.shape_aabb_upper,
+                        pipeline.geom_transform,
+                    )
+                )
+            )
+        lower, upper, transforms = (np.concatenate([snapshot[index] for snapshot in snapshots]) for index in range(3))
+        types, scales = np.tile(model.shape_type.numpy(), 2), np.tile(model.shape_scale.numpy(), (2, 1))
+        margins, search_gap = np.tile(model.shape_margin.numpy(), 2), np.tile(model.shape_gap.numpy(), 2)
+        lower += search_gap[:, None]
+        upper -= search_gap[:, None]
+        infinite = (types == GeoType.PLANE) & (scales[:, 0] == 0) & (scales[:, 1] == 0)
+        colliding = np.tile((model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES)) != 0, 2)
+        occupied = colliding.copy()
+        for object_id in requested:
+            start, end = runtime.bindings[object_id].shapes
+            occupied[start:end] = occupied[start + model.shape_count : end + model.shape_count] = False
+        axis, clearance = int(model.up_axis), 0.001
+        lateral = [index for index in range(3) if index != axis]
+        for object_id in requested:
+            binding, obj = runtime.bindings[object_id], runtime.objects[object_id]
+            shapes = slice(*binding.shapes)
+            rows = np.r_[np.arange(shapes.start, shapes.stop), np.arange(shapes.start, shapes.stop) + model.shape_count]
+            if shapes.start == shapes.stop or infinite[shapes].any():
+                raise ValueError("Automatic placement requires bounded geometry; place infinite planes explicitly")
+            lo, hi = lower[shapes].min(axis=0), upper[shapes].max(axis=0)
+            if not np.isfinite([lo, hi]).all():
+                raise ValueError("Automatic placement requires finite shape bounds")
+            footprint = occupied & np.all(upper[:, lateral] >= lo[lateral] - clearance, axis=1)
+            footprint &= np.all(lower[:, lateral] <= hi[lateral] + clearance, axis=1)
+            supports = [0.0]
+            for shape in np.flatnonzero(footprint & infinite):
+                anchor = transforms[shape, :3]
+                normal = wp.quat_rotate(wp.quat(*transforms[shape, 3:]), wp.vec3(0, 0, 1))
+                if normal[axis] <= 1.0e-6:
+                    raise ValueError("Automatic placement against a vertical or downward plane is unsupported")
+                # Evaluate the plane over this footprint, not its million-metre AABB.
+                rise = sum(max(normal[j] * (anchor[j] - lo[j]), normal[j] * (anchor[j] - hi[j])) for j in lateral)
+                supports.append(anchor[axis] + rise / normal[axis] + margins[shape])
+            height = float(max(supports))
+            lift = max(0.0, height + clearance - float(lo[axis]))
+            for shape in sorted(np.flatnonzero(footprint & ~infinite), key=lambda shape: lower[shape, axis]):
+                if (
+                    float(lo[axis]) + lift < float(upper[shape, axis]) + clearance
+                    and float(hi[axis]) + lift > float(lower[shape, axis]) - clearance
+                ):
+                    lift = max(lift, float(upper[shape, axis]) + clearance - float(lo[axis]))
+            if lift:
+                translation = [0.0, 0.0, 0.0]
+                translation[axis] = lift
+                delta = wp.transform(translation, wp.quat_identity())
+                start, end = binding.bodies
+                if end > start:
+                    wp.launch(
+                        _move_bodies,
+                        end - start,
+                        inputs=[
+                            start,
+                            delta,
+                            delta,
+                            model.body_q,
+                            runtime.state_0.body_q,
+                            runtime.state_1.body_q,
+                            runtime.state_0.body_qd,
+                            runtime.state_1.body_qd,
+                            False,
+                        ],
+                        device=self.device,
+                    )
+                wp.launch(
+                    _move_world_shapes,
+                    shapes.stop - shapes.start,
+                    inputs=[shapes.start, delta, model.shape_body, model.shape_transform],
+                    device=self.device,
+                )
+                start, end = binding.joints
+                if end > start:
+                    wp.launch(
+                        _move_world_anchors,
+                        end - start,
+                        inputs=[start, delta, model.joint_parent, model.joint_type, model.joint_X_p],
+                        device=self.device,
+                    )
+                position = tuple(value + translation[index] for index, value in enumerate(obj.position))
+                runtime.objects[object_id] = dataclasses.replace(obj, position=position)
+                lower[rows, axis] += lift
+                upper[rows, axis] += lift
+            occupied[rows] = colliding[rows]
+        self._sync_coordinates(runtime)
+        eval_ik(model, model, model.joint_q, model.joint_qd)
+        self._collide(runtime)
+
+    def _resolve_placement_history(self, runtime: _Runtime) -> None:
+        # Pending additions can appear in later undo snapshots before a batch
+        # commits. Keep their insertion baseline aligned with the resolved pose.
+        offsets = {
+            obj.id: tuple(
+                after - before for after, before in zip(runtime.objects[obj.id].position, obj.position, strict=True)
+            )
+            for obj in self._objects
+            if obj.id in self._placement_requests and runtime.objects[obj.id].position != obj.position
+        }
+        if not offsets:
+            return
+
+        def translated(objects):
+            return tuple(
+                dataclasses.replace(
+                    obj,
+                    position=tuple(value + shift for value, shift in zip(obj.position, offsets[obj.id], strict=True)),
+                )
+                if obj.id in offsets
+                else obj
+                for obj in objects
+            )
+
+        self._undo = [translated(objects) for objects in self._undo]
+        self._redo = [translated(objects) for objects in self._redo]
+        if self._edit_before is not None:
+            self._edit_before = translated(self._edit_before)
+
     def commit(self) -> bool:
         """Build and adopt one candidate, keeping the old runtime on failure.
 
@@ -861,6 +1049,7 @@ class SceneEditor:
         candidate = self._build()
         if old is not None:
             self._preserve_state(old, candidate)
+        self._place_candidate(candidate)
         # Surface asynchronous build errors before replacing the displayed scene.
         wp.synchronize_device(self.device)
         try:
@@ -876,6 +1065,9 @@ class SceneEditor:
                 self.viewer.set_collision_pipeline(old.pipeline)
             raise
         self._publish(candidate)
+        self._resolve_placement_history(candidate)
+        self._objects = tuple(candidate.objects[obj.id] for obj in self._objects)
+        self._placement_requests.difference_update(candidate.bindings)
         self._topology_dirty = self._requested_commit = False
         self._fast_pending.clear()
         self._trim_templates()
@@ -972,6 +1164,7 @@ class SceneEditor:
                             runtime.state_1.body_q,
                             runtime.state_0.body_qd,
                             runtime.state_1.body_qd,
+                            True,
                         ],
                         device=self.device,
                     )
@@ -1008,7 +1201,7 @@ class SceneEditor:
                 self._apply_appearance(runtime, obj)
             runtime.objects[object_id] = obj
         if moved:
-            runtime.pipeline.collide(runtime.state_0, runtime.contacts)
+            self._collide(runtime)
         self._fast_pending.clear()
         # A material/topology edit defines a new authored scene, not historical
         # sensor data. Rebind after leaving FrameHistory's temporary references.
@@ -1016,6 +1209,59 @@ class SceneEditor:
         workspace = getattr(gui, "workspace", None)
         if workspace is not None and workspace.example is self:
             workspace.detach_example()
+
+    def _collide(self, runtime: _Runtime) -> bool:
+        """Detect complete contacts before solving, growing owned buffers if needed."""
+        pipeline, contacts = runtime.pipeline, runtime.contacts
+        try:
+            for attempt in range(4):
+                pipeline.collide(runtime.state_0, contacts)
+                counters = contacts.contact_counters.numpy()
+                count = int(counters[0])
+                if count < 0:
+                    raise RuntimeError("Rigid contact count exceeded supported indexing")
+                if count <= contacts.rigid_contact_max and not counters[2:].any():
+                    if pipeline is not runtime.pipeline:
+                        if runtime is self._runtime:
+                            self.viewer.set_collision_pipeline(pipeline)
+                        previous = runtime.contacts.rigid_contact_max
+                        runtime.pipeline, runtime.contacts = pipeline, contacts
+                        runtime.model.rigid_contact_max = contacts.rigid_contact_max
+                        runtime.model.soft_contact_max = contacts.soft_contact_max
+                        runtime.model._contact_capacity_initialized = True
+                        if runtime is self._runtime:
+                            self.collision_pipeline, self.contacts = pipeline, contacts
+                        logger.warning(
+                            "Expanded rigid contact capacity from %d to %d; retained all %d contacts",
+                            previous,
+                            contacts.rigid_contact_max,
+                            count,
+                        )
+                    return True
+                if attempt == 3:
+                    raise RuntimeError(
+                        f"Rigid contacts remain incomplete after three growth attempts (count={count}, capacity={contacts.rigid_contact_max}, overflow={counters[2:].tolist()})"
+                    )
+                pipeline = CollisionPipeline(
+                    runtime.model,
+                    rigid_contact_max=max(2 * contacts.rigid_contact_max, 2 * count),
+                    soft_contact_max=contacts.soft_contact_max,
+                    publish_capacity=False,
+                )
+                contacts = pipeline.contacts()
+        except (MemoryError, RuntimeError, ValueError) as error:
+            message = f"Contact detection could not produce a complete buffer: {error}"
+            if runtime is not self._runtime:
+                raise RuntimeError(message) from error
+            self.error = message
+            self.status = "Physics paused; the current scene is retained."
+            # An overflowing count must not reach display kernels either.
+            runtime.contacts.contact_counters.zero_()
+            logger.error(message)
+            if not hasattr(self.viewer, "_paused"):
+                raise RuntimeError(message) from error
+            self.viewer._paused = True
+        return False
 
     def reset_scene(self) -> None:
         """Restore the authored reset poses without rebuilding model or solver."""
@@ -1027,7 +1273,7 @@ class SceneEditor:
                     state.body_qd.zero_()
                     state.body_f.zero_()
             self._sync_coordinates(runtime)
-            runtime.pipeline.collide(runtime.state_0, runtime.contacts)
+            self._collide(runtime)
             self.sim_time = 0.0
             workspace = getattr(getattr(self.viewer, "gui", None), "workspace", None)
             if workspace is not None and workspace.example is self:
@@ -1042,10 +1288,14 @@ class SceneEditor:
         if runtime is None:
             return
         dt = self.frame_dt / self.sim_substeps
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             runtime.state_0.clear_forces()
             self.viewer.apply_forces(runtime.state_0)
-            runtime.pipeline.collide(runtime.state_0, runtime.contacts)
+            if not self._collide(runtime):
+                self._sync_coordinates(runtime)
+                self._publish(runtime)
+                self.sim_time += substep * dt
+                return
             runtime.solver.step(runtime.state_0, runtime.state_1, runtime.control, runtime.contacts, dt)
             runtime.state_0, runtime.state_1 = runtime.state_1, runtime.state_0
         self._sync_coordinates(runtime)
