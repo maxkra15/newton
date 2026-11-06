@@ -10,7 +10,7 @@ import inspect
 import sys
 import unittest
 from contextlib import nullcontext
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 from unittest.mock import Mock, patch
 
@@ -45,6 +45,19 @@ from newton._src.viewer.viewer_null import ViewerNull
 from newton.tests.unittest_utils import get_test_devices, import_pyglet_window, patch_sys_module
 
 
+def _own_imgui_context(test: unittest.TestCase, imgui: ModuleType) -> None:
+    previous = imgui.get_current_context()
+    context = imgui.create_context()
+    imgui.set_current_context(context)
+
+    def restore_context():
+        imgui.destroy_context(context)
+        if previous is not None:
+            imgui.set_current_context(previous)
+
+    test.addCleanup(restore_context)
+
+
 class TestViewerUI(unittest.TestCase):
     def setUp(self) -> None:
         try:
@@ -52,10 +65,7 @@ class TestViewerUI(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(f"Viewer UI dependencies not available: {exc}")
 
-        context = imgui.create_context()
-        # A previous native viewer test may have left another context current.
-        imgui.set_current_context(context)
-        self.addCleanup(imgui.destroy_context, context)
+        _own_imgui_context(self, imgui)
         # Exercise ImGui state without an OpenGL renderer or window.
         self.ui = ImGuiBackend.__new__(ImGuiBackend)
         self.ui._workspace_style = True
@@ -327,8 +337,7 @@ class TestViewerGuiRecovery(unittest.TestCase):
         """Unwind real ImGui windows and styles without a renderer or model."""
         from imgui_bundle import imgui, imguizmo
 
-        context = imgui.create_context()
-        self.addCleanup(imgui.destroy_context, context)
+        _own_imgui_context(self, imgui)
         io = imgui.get_io()
         io.set_ini_filename("")
         io.display_size = (320, 320)
@@ -1659,8 +1668,7 @@ class TestViewerGizmos(unittest.TestCase):
 
         self.imgui = imgui
         self.giz = imguizmo.im_guizmo
-        context = imgui.create_context()
-        self.addCleanup(imgui.destroy_context, context)
+        _own_imgui_context(self, imgui)
         self.io = imgui.get_io()
         self.io.set_ini_filename("")
         self.io.display_size = (800, 600)
