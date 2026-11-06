@@ -91,8 +91,13 @@ geometry and does not rerun ``ModelBuilder`` for each pointer movement.
 During a USD scale gesture, the outline scales its cached envelope; the updated
 USD template is prepared once after release.
 
-USD preparation runs in a worker and caches read-only builder templates. At a
-safe frame boundary, the editor constructs a candidate Model, States, Control,
+USD preparation runs in one reusable, spawned CPU process and caches read-only
+builder templates. Its Warp device and stream state are isolated from the
+rendering process. Only host geometry, physics metadata, and bounds are returned;
+no simulation Model is built for a preview. A native preparation failure is
+reported without terminating the viewer, and a later request can start a fresh
+worker. Closing the editor stops its owned preparation process. At a safe frame
+boundary, the editor constructs a candidate Model, States, Control,
 collision pipeline, and XPBD solver before adopting them. Failed compilation
 keeps the previous simulation available and displays the error. Stable authored
 IDs identify objects across model replacement; compiled body indices must be
@@ -200,6 +205,9 @@ it automatically for an example exposing ``scene_editor``. Use
 ``auto_apply`` and call :meth:`~newton.viewer.SceneEditor.request_commit` for an
 explicit structural commit. Call :meth:`~newton.viewer.SceneEditor.close` when
 the application is disposed to stop queued preparation.
+Scripts importing USD assets must put application startup under
+``if __name__ == "__main__":`` for Python's spawned-worker lifecycle. The normal
+``scene_editor`` launcher already does this.
 
 Agent access over MCP
 ---------------------

@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import io
 import logging
 import math
+import pickle
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,6 +110,36 @@ def _placement_surface(
 class _AssetTemplate:
     builder: ModelBuilder
     bounds: tuple[np.ndarray, np.ndarray] | None
+
+
+def _restore_template_dtype(constructor: str, arguments: dict):
+    return getattr(wp.types, constructor)(**arguments)
+
+
+class _TemplatePickler(pickle.Pickler):
+    """Transfer host templates without changing global Warp or pickle behavior."""
+
+    def reducer_override(self, value):
+        if isinstance(value, type) and "<locals>" in value.__qualname__:
+            constructor = getattr(value, "_wp_constructor_", None)
+            arguments = getattr(value, "_wp_type_args_", None)
+            if constructor in ("transformation", "vector", "matrix", "quaternion") and arguments is not None:
+                return _restore_template_dtype, (constructor, arguments)
+        return NotImplemented
+
+
+def _init_asset_worker() -> None:
+    # ScopedDevice/ScopedStream change process-wide Warp state. Keep all native
+    # USD preparation in this process, separate from the rendering owner.
+    wp.config.quiet = True
+    wp.set_device("cpu")
+
+
+def _prepare_asset_payload(source: str, size: tuple) -> bytes:
+    template = SceneEditor._prepare_template(source, size)
+    buffer = io.BytesIO()
+    _TemplatePickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(template)
+    return buffer.getvalue()
 
 
 @wp.kernel
@@ -314,7 +348,7 @@ class SceneEditor:
         self._attempted_revision = -1
         self._templates: dict[tuple[Any, ...], _AssetTemplate] = {}
         self._preparing: dict[tuple[Any, ...], Future] = {}
-        self._executor: ThreadPoolExecutor | None = None
+        self._executor: ProcessPoolExecutor | None = None
         self._closed = False
         self._preview: tuple | None = None
         self._preview_last: tuple | None = None
@@ -632,6 +666,7 @@ class SceneEditor:
 
     @staticmethod
     def _prepare_template(source: str, size: tuple) -> _AssetTemplate:
+        logger.info("Preparing USD asset %s", source)
         with wp.ScopedDevice("cpu"):
             builder = prepare_usd(source, scale=size)
             return _AssetTemplate(builder, template_bounds(builder))
@@ -641,8 +676,38 @@ class SceneEditor:
         if key in self._templates or key in self._preparing:
             return
         if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="newton-usd-authoring")
-        self._preparing[key] = self._executor.submit(self._prepare_template, obj.source, obj.size)
+            self._executor = self._create_preparation_executor()
+        try:
+            self._preparing[key] = self._executor.submit(_prepare_asset_payload, obj.source, obj.size)
+        except BrokenProcessPool:
+            self._close_preparation_executor()
+            self._executor = self._create_preparation_executor()
+            self._preparing[key] = self._executor.submit(_prepare_asset_payload, obj.source, obj.size)
+
+    @staticmethod
+    def _create_preparation_executor() -> ProcessPoolExecutor:
+        return ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn"), initializer=_init_asset_worker)
+
+    def _close_preparation_executor(self) -> None:
+        executor, self._executor = self._executor, None
+        if executor is None:
+            return
+        terminate = getattr(executor, "terminate_workers", None)
+        if terminate is not None:
+            terminate()
+            return
+        # Python <3.14 has no public process-pool termination API. The editor
+        # owns this one CPU worker and must not leave a native import running.
+        processes = list((getattr(executor, "_processes", None) or {}).values())
+        executor.shutdown(wait=False, cancel_futures=True)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
 
     def _trim_templates(self) -> None:
         # Retain every active source, but bound old scale variants after gestures.
@@ -678,18 +743,21 @@ class SceneEditor:
             if not future.done():
                 continue
             try:
-                self._templates[key] = future.result()
+                # Only our trusted CPU child produces this private host payload.
+                self._templates[key] = pickle.loads(future.result())
                 self._trim_templates()
                 self._objects = self._resolved_defaults(self._objects)
             except Exception as exc:
+                message = f"Could not prepare USD asset {Path(key[0]).name}: {exc}"
                 if key[:2] in document_sources:
-                    self.error = str(exc)
+                    self.error = message
                     self._attempted_revision = self.revision
                 if self._preview_source is not None and key[:2] == (
                     self._preview_source.source,
                     self._preview_source.size,
                 ):
-                    self._preview_error = key, str(exc)
+                    self._preview_error = key, message
+                logger.error("%s", message)
             del self._preparing[key]
         if self._fast_pending:
             self._apply_fast_edits()
@@ -715,7 +783,7 @@ class SceneEditor:
         if key not in self._templates:
             future = self._preparing.pop(key, None)
             self._templates[key] = (
-                future.result() if future is not None else self._prepare_template(obj.source, obj.size)
+                pickle.loads(future.result()) if future is not None else self._prepare_template(obj.source, obj.size)
             )
             self._objects = self._resolved_defaults(self._objects)
         return self._templates[key].builder
@@ -1586,8 +1654,7 @@ class SceneEditor:
         self._closed = True
         for future in self._preparing.values():
             future.cancel()
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+        self._close_preparation_executor()
 
     def test_final(self) -> None:
         """Validate finite physical state and one compiled scene for example test mode."""

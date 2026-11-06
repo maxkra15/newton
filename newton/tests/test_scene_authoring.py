@@ -13,7 +13,8 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline, ModelBuilder
+from newton import CollisionPipeline, Mesh, ModelBuilder
+from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, ViewerNull
 
 
@@ -23,6 +24,49 @@ class TestSceneAuthoring(unittest.TestCase):
         editor = SceneEditor(ViewerNull(), device="cpu")
         self.addCleanup(editor.close)
         return editor
+
+    @staticmethod
+    def write_jointed_mesh_asset(path):
+        """Write a closed native mesh and fixed joint for preparation/control tests."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateNew(str(path))
+        UsdGeom.SetStageMetersPerUnit(stage, 1)
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        root = UsdGeom.Xform.Define(stage, "/Assembly")
+        UsdPhysics.ArticulationRootAPI.Apply(root.GetPrim())
+        for name, height in (("Base", 0.0), ("Child", 0.2)):
+            if name == "Base":
+                body = UsdGeom.Cube.Define(stage, f"/Assembly/{name}")
+                body.CreateSizeAttr(0.1)
+            else:
+                body = UsdGeom.Mesh.Define(stage, f"/Assembly/{name}")
+                body.CreatePointsAttr(
+                    [
+                        (-0.05, -0.05, -0.05),
+                        (0.05, -0.05, -0.05),
+                        (0.05, 0.05, -0.05),
+                        (-0.05, 0.05, -0.05),
+                        (-0.05, -0.05, 0.05),
+                        (0.05, -0.05, 0.05),
+                        (0.05, 0.05, 0.05),
+                        (-0.05, 0.05, 0.05),
+                    ]
+                )
+                body.CreateFaceVertexCountsAttr([4] * 6)
+                body.CreateFaceVertexIndicesAttr(
+                    [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 3, 7, 6, 2, 0, 4, 7, 3, 1, 2, 6, 5]
+                )
+                body.CreateSubdivisionSchemeAttr("none")
+            body.AddTranslateOp().Set((0, 0, height))
+            UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+            UsdPhysics.CollisionAPI.Apply(body.GetPrim())
+            UsdPhysics.MassAPI.Apply(body.GetPrim()).CreateMassAttr(1)
+        joint = UsdPhysics.FixedJoint.Define(stage, "/Assembly/Weld")
+        joint.CreateBody0Rel().SetTargets(["/Assembly/Base"])
+        joint.CreateBody1Rel().SetTargets(["/Assembly/Child"])
+        joint.CreateLocalPos0Attr((0, 0, 0.2))
+        stage.GetRootLayer().Save()
 
     def test_fast_edits_preserve_storage_and_gesture_undo(self):
         """Apply pose and appearance edits without recompiling or replacing arrays."""
@@ -427,32 +471,32 @@ class TestSceneAuthoring(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
     def test_topology_changes_preserve_fixed_joint_asset_controls(self):
-        """Move jointed controls across topology edits without copying empty joint spans."""
-        from pxr import Usd, UsdGeom, UsdPhysics
-
+        """Prepare mesh geometry asynchronously and preserve parent devices, state, and joint controls."""
         editor = self.make_editor()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixed.usda"
-            stage = Usd.Stage.CreateNew(str(path))
-            UsdGeom.SetStageMetersPerUnit(stage, 1)
-            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-            root = UsdGeom.Xform.Define(stage, "/Assembly")
-            UsdPhysics.ArticulationRootAPI.Apply(root.GetPrim())
-            for name, height in (("Base", 0.0), ("Child", 0.2)):
-                body = UsdGeom.Cube.Define(stage, f"/Assembly/{name}")
-                body.CreateSizeAttr(0.1)
-                body.AddTranslateOp().Set((0, 0, height))
-                UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
-                UsdPhysics.CollisionAPI.Apply(body.GetPrim())
-                UsdPhysics.MassAPI.Apply(body.GetPrim()).CreateMassAttr(1)
-            joint = UsdPhysics.FixedJoint.Define(stage, "/Assembly/Weld")
-            joint.CreateBody0Rel().SetTargets(["/Assembly/Base"])
-            joint.CreateBody1Rel().SetTargets(["/Assembly/Child"])
-            joint.CreateLocalPos0Attr((0, 0, 0.2))
-            stage.GetRootLayer().Save()
+            self.write_jointed_mesh_asset(path)
             leading = editor.add_primitive("box", position=(-3, 0, 1))
-            asset = editor.add_usd(path, position=(0, 0, 2))
-            editor.commit()
+            cuda = get_cuda_test_devices()
+            owner_device = cuda[0] if cuda else wp.get_device("cpu")
+            with wp.ScopedDevice(owner_device):
+                values = np.arange(16, dtype=np.float32)
+                readback = wp.array(values, device=owner_device)
+                asset = editor.add_usd(path, position=(0, 0, 2))
+                deadline = time.monotonic() + 30
+                while editor.pending and time.monotonic() < deadline:
+                    np.testing.assert_array_equal(readback.numpy(), values)
+                    self.assertEqual(wp.get_device(), owner_device)
+                    editor.before_frame()
+                    self.assertEqual(wp.get_device(), owner_device)
+                    if editor.error:
+                        break
+                    time.sleep(0.001)
+                self.assertIsNone(editor.error)
+                self.assertFalse(editor.pending)
+            mesh = next(source for source in editor.model.shape_source if isinstance(source, Mesh))
+            np.testing.assert_allclose(np.ptp(mesh.vertices, axis=0), (0.1, 0.1, 0.1), atol=1e-6)
+            self.assertEqual(mesh.indices.size, 36)
             old_pose = editor.state_0.body_q.numpy()[list(editor.body_indices(asset))].copy()
             expected = {}
             for field in ("joint_f", "joint_act", "joint_target_q", "joint_target_qd"):
@@ -476,6 +520,58 @@ class TestSceneAuthoring(unittest.TestCase):
             for field, data in expected.items():
                 np.testing.assert_array_equal(getattr(editor.control, field).numpy(), data)
             self.assertEqual(editor.rebuild_count, 3)
+            for _ in range(60):
+                editor.step()
+            self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+
+    @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
+    def test_preparation_worker_failure_recovery_and_close(self):
+        """Retain the running scene after a real worker exit, recover, and terminate owned workers on close."""
+        editor = self.make_editor()
+        editor.add_primitive("box", position=(3, 0, 1))
+        editor.commit()
+        model = editor.model
+        with tempfile.TemporaryDirectory() as directory:
+            failed_path = Path(directory) / "interrupted.usda"
+            self.write_jointed_mesh_asset(failed_path)
+            failed = editor.add_usd(failed_path)
+            processes = list(editor._executor._processes.values())
+            self.assertTrue(processes)
+            self.assertTrue(editor.busy)
+            for process in processes:
+                process.terminate()
+                process.join(5)
+                self.assertFalse(process.is_alive())
+            with self.assertLogs("newton", level="ERROR"):
+                deadline = time.monotonic() + 10
+                while editor.error is None and time.monotonic() < deadline:
+                    editor.before_frame()
+                    time.sleep(0.005)
+            self.assertIsNotNone(editor.error)
+            self.assertIs(editor.model, model)
+            editor.step()
+            self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+            editor.remove_object(failed)
+            recovered_path = Path(directory) / "recovered.usda"
+            self.write_jointed_mesh_asset(recovered_path)
+            recovered = editor.add_usd(recovered_path)
+            deadline = time.monotonic() + 30
+            while editor.pending and time.monotonic() < deadline:
+                editor.before_frame()
+                if editor.error:
+                    break
+                time.sleep(0.005)
+            self.assertIsNone(editor.error)
+            self.assertFalse(editor.pending)
+            self.assertEqual(len(editor.body_indices(recovered)), 2)
+            self.assertEqual(editor.model.body_count, 3)
+            editor.preview_usd(recovered_path, position=(0, 0, 0), scale=(2, 2, 2))
+            self.assertTrue(editor._preparing)
+            processes = list(editor._executor._processes.values())
+            self.assertTrue(any(process.is_alive() for process in processes))
+            editor.close()
+            for process in processes:
+                self.assertFalse(process.is_alive())
 
     def test_contact_capacity_recovers_before_solving(self):
         """Grow an undersized native contact pipeline while retaining the physical runtime."""
