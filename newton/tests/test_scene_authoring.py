@@ -4,6 +4,7 @@
 """Physical and transactional contracts of the opt-in authoring scene."""
 
 import importlib.util
+import json
 import tempfile
 import time
 import unittest
@@ -13,7 +14,7 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline, Mesh, ModelBuilder
+from newton import CollisionPipeline, JointType, Mesh, ModelBuilder
 from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, ViewerNull
 
@@ -273,15 +274,25 @@ class TestSceneAuthoring(unittest.TestCase):
             path.write_text(
                 '#usda 1.0\n( metersPerUnit = 1 )\ndef Points "Unsupported" (prepend apiSchemas = ["NewtonParticleAPI"]) {}\n'
             )
+            valid = Path(directory) / "native.usda"
+            valid.write_text(
+                '#usda 1.0\n( metersPerUnit = 1 )\ndef Cube "Body" '
+                '(prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsCollisionAPI", "PhysicsMassAPI"]) {\n'
+                " double size = 0.1\n float physics:mass = 2\n}\n"
+            )
+            prepared = editor.add_usd(valid, position=(2, 0, 2))
             invalid = editor.add_usd(path)
+            pending_objects = editor.objects
             with self.assertRaisesRegex(ValueError, "rigid USD"):
                 editor.commit()
+            self.assertEqual(editor.objects, pending_objects)
             self.assertIs(editor.model, model)
             self.assertIs(editor.state_0, state)
             self.assertEqual(editor.rebuild_count, 1)
             editor.step()
             self.assertLess(editor.get_pose(object_id)[0][2], 2)
             editor.remove_object(invalid)
+            editor.remove_object(prepared)
             editor.commit()
             self.assertEqual(editor.model.body_count, 1)
             # A discarded failed preparation must not block unrelated valid edits.
@@ -295,6 +306,48 @@ class TestSceneAuthoring(unittest.TestCase):
             editor.before_frame()
             self.assertIsNone(editor.error)
             self.assertEqual(editor.model.body_count, 2)
+
+            malformed = Path(directory) / "malformed.usda"
+            malformed.write_text('#usda 1.0\ndef Cube "Broken" { invalid syntax }\n')
+            failed = editor.add_usd(malformed)
+            model = editor.model
+            with self.assertLogs("newton", level="ERROR"):
+                deadline = time.monotonic() + 30
+                while editor.error is None and time.monotonic() < deadline:
+                    editor.before_frame()
+                    time.sleep(0.001)
+            self.assertRegex(editor.error, "(?i)(parse|syntax|expected)")
+            self.assertNotIn("Pickling", editor.error)
+            self.assertIs(editor.model, model)
+            editor.remove_object(failed)
+            editor.before_frame()
+
+            malformed.write_text('#usda 1.0\n( metersPerUnit = 1 )\ndef Cube "Body" {\n double size = 0.1\n}\n')
+            imported = editor.add_usd(malformed)
+            next(iter(editor._preparing.values())).result(timeout=30)
+            malformed.write_text('#usda 1.0\n( metersPerUnit = 1 )\ndef Cube "Body" {\n double size = 0.2\n}\n')
+            model = editor.model
+            with self.assertLogs("newton", level="ERROR"):
+                editor.before_frame()
+            self.assertIn("changed after preparation", editor.error)
+            self.assertIs(editor.model, model)
+            editor.request_commit()
+            deadline = time.monotonic() + 30
+            while editor.pending and time.monotonic() < deadline:
+                editor.before_frame()
+                time.sleep(0.001)
+            self.assertFalse(editor.pending, editor.error)
+            self.assertIsNone(editor.error)
+            self.assertEqual(editor.model.body_count, 3)
+
+            editor.preview_usd(malformed, position=(0, 0, 2), scale=(3, 3, 3))
+            next(iter(editor._preparing.values())).result(timeout=30)
+            malformed.write_text('#usda 1.0\n( metersPerUnit = 1 )\ndef Cube "Body" {\n double size = 0.3\n}\n')
+            editor.update_object(imported, size=(3, 3, 3))
+            editor.commit()
+            editor.clear_preview()
+            editor.before_frame()
+            self.assertIsNone(editor.error)
 
     @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
     def test_static_usd_plane_supports_dynamic_objects(self):
@@ -443,10 +496,7 @@ class TestSceneAuthoring(unittest.TestCase):
             np.testing.assert_allclose(restored.get_pose(object_id)[0], (0, 0, 2), atol=1e-6)
 
             model = editor.model
-            with (
-                mock.patch.object(editor, "_prepare_template", wraps=editor._prepare_template) as prepare,
-                mock.patch.object(editor.viewer, "log_lines", wraps=editor.viewer.log_lines) as lines,
-            ):
+            with mock.patch.object(editor.viewer, "log_lines", wraps=editor.viewer.log_lines) as lines:
                 editor.begin_edit()
                 for index in range(16):
                     scale = (1 + index * 0.01,) * 3
@@ -462,24 +512,30 @@ class TestSceneAuthoring(unittest.TestCase):
                     )
                     self.assertIs(editor.model, model)
                     self.assertEqual(editor.rebuild_count, 1)
-                prepare.assert_not_called()
                 editor.end_edit()
                 editor.commit()
-                prepare.assert_called_once()
             self.assertEqual(editor.rebuild_count, 2)
+            np.testing.assert_allclose(editor.model.shape_scale.numpy()[1], np.asarray(scale) * 0.2, atol=1e-6)
 
             # Undo snapshots created while metadata loads retain authored mass semantics.
             from pxr import Usd, UsdGeom, UsdPhysics
 
-            native_source = Path(directory) / "native.usda"
-            stage = Usd.Stage.CreateNew(str(native_source))
+            geometry_source = Path(directory) / "native.usda"
+            stage = Usd.Stage.CreateNew(str(geometry_source))
             UsdGeom.SetStageMetersPerUnit(stage, 1)
             cube = UsdGeom.Cube.Define(stage, "/Body")
+            cube.CreateSizeAttr(0.4)
             cube.AddTranslateOp().Set((0, 0, 0.4))
             UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
             UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
             UsdPhysics.MassAPI.Apply(cube.GetPrim()).CreateMassAttr(2)
             stage.GetRootLayer().Save()
+            native_source = Path(directory) / "referenced.usda"
+            root = Usd.Stage.CreateNew(str(native_source))
+            UsdGeom.SetStageMetersPerUnit(root, 1)
+            UsdGeom.SetStageUpAxis(root, UsdGeom.Tokens.z)
+            root.DefinePrim("/Body").GetReferences().AddReference(geometry_source.name, "/Body")
+            root.GetRootLayer().Save()
             native = self.make_editor()
             native_id = native.add_usd(native_source, position=(0, 0, 2))
             native.update_object(native_id, position=(0, 0, 3))
@@ -500,9 +556,74 @@ class TestSceneAuthoring(unittest.TestCase):
             self.assertEqual(explicit.get_object(explicit_id).mass, 1)
             self.assertAlmostEqual(explicit.model.body_mass.numpy()[0], 1, places=6)
 
+            # A changed referenced layer must invalidate an unchanged root's template.
+            root_stat = native_source.stat()
+            cube.GetSizeAttr().Set(0.8)
+            UsdPhysics.MassAPI(cube.GetPrim()).GetMassAttr().Set(5)
+            stage.GetRootLayer().Save()
+            self.assertEqual(
+                (native_source.stat().st_mtime_ns, native_source.stat().st_size),
+                (root_stat.st_mtime_ns, root_stat.st_size),
+            )
+            model, revision = native.model, native.revision
+            pivot = None
+            deadline = time.monotonic() + 30
+            while pivot is None and time.monotonic() < deadline:
+                pivot = native.preview_usd(native_source, position=(0, 0, 3), scale=(2, 2, 2))
+                native.before_frame()
+                time.sleep(0.001)
+            self.assertIsNotNone(pivot, native.error)
+            np.testing.assert_allclose(native._preview[2], (1.6, 1.6, 1.6), atol=1e-6)
+            native.clear_preview()
+            self.assertIs(native.model, model)
+            self.assertEqual(native.revision, revision)
+            self.assertEqual(native.get_object(native_id).mass, 2)
+            self.assertAlmostEqual(native.model.body_mass.numpy()[0], 2, places=6)
+            added = native.add_usd(native_source, position=(3, 0, 2))
+            deadline = time.monotonic() + 30
+            while native.pending and time.monotonic() < deadline:
+                native.before_frame()
+                if native.error:
+                    break
+                time.sleep(0.001)
+            self.assertIsNone(native.error)
+            self.assertFalse(native.pending)
+            body = native.body_indices(added)[0]
+            shape = np.flatnonzero(native.model.shape_body.numpy() == body)[0]
+            np.testing.assert_allclose(native.model.shape_scale.numpy()[shape], (0.4, 0.4, 0.4), atol=1e-6)
+            self.assertEqual(native.get_object(added).mass, 5)
+            self.assertAlmostEqual(native.model.body_mass.numpy()[body], 5, places=6)
+
+            reopened = Path(directory) / "reopened.usda"
+            native.save_usd(reopened)
+            cube.GetSizeAttr().Set(1.2)
+            UsdPhysics.MassAPI(cube.GetPrim()).GetMassAttr().Set(7)
+            stage.GetRootLayer().Save()
+            model, builds = native.model, native.rebuild_count
+            native.load_usd(reopened)
+            self.assertTrue(native.pending)
+            self.assertIs(native.model, model)
+            deadline = time.monotonic() + 30
+            while native.pending and time.monotonic() < deadline:
+                native.before_frame()
+                if native.error:
+                    break
+                time.sleep(0.001)
+            self.assertIsNone(native.error)
+            self.assertFalse(native.pending)
+            self.assertIsNot(native.model, model)
+            self.assertEqual(native.rebuild_count, builds + 1)
+            body = native.body_indices(added)[0]
+            shape = np.flatnonzero(native.model.shape_body.numpy() == body)[0]
+            np.testing.assert_allclose(native.model.shape_scale.numpy()[shape], (0.6, 0.6, 0.6), atol=1e-6)
+            self.assertEqual(native.get_object(added).mass, 7)
+            self.assertAlmostEqual(native.model.body_mass.numpy()[body], 7, places=6)
+
     @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
     def test_topology_changes_preserve_fixed_joint_asset_controls(self):
-        """Prepare mesh geometry asynchronously and preserve parent devices, state, and joint controls."""
+        """Preserve compatible controls and initialize changed or replaced joints from native defaults."""
+        from pxr import Usd, UsdPhysics
+
         editor = self.make_editor()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixed.usda"
@@ -554,6 +675,54 @@ class TestSceneAuthoring(unittest.TestCase):
             for _ in range(60):
                 editor.step()
             self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+            saved = Path(directory) / "scene.usda"
+            editor.save_usd(saved)
+            source_stage = Usd.Stage.Open(str(path))
+            for schema, joint_type in (
+                (UsdPhysics.RevoluteJoint, JointType.REVOLUTE),
+                (UsdPhysics.PrismaticJoint, JointType.PRISMATIC),
+            ):
+                previous = editor.model
+                joint = next(
+                    index for index, label in enumerate(previous.joint_label) if label.endswith("/Assembly/Weld")
+                )
+                preserved = {}
+                for field in expected:
+                    values = getattr(editor.control, field)
+                    starts = previous.joint_q_start if field == "joint_target_q" else previous.joint_qd_start
+                    first, end = (int(value) for value in starts.numpy()[joint : joint + 2])
+                    if end > first:
+                        values[first:end].fill_(0.7)
+                    preserved[field] = values.numpy()[:first].copy()
+                schema.Define(source_stage, "/Assembly/Weld")
+                source_stage.GetRootLayer().Save()
+                editor.load_usd(saved)
+                editor.commit()
+                self.assertIsNot(editor.model, previous)
+                joint = next(
+                    index for index, label in enumerate(editor.model.joint_label) if label.endswith("/Assembly/Weld")
+                )
+                self.assertEqual(editor.model.joint_type.numpy()[joint], joint_type)
+                defaults = editor.model.control()
+                for field, data in preserved.items():
+                    actual = getattr(editor.control, field).numpy()
+                    np.testing.assert_array_equal(actual[: len(data)], data)
+                    np.testing.assert_array_equal(actual[len(data) :], getattr(defaults, field).numpy()[len(data) :])
+            # A different source with identical joint labels must not inherit the old asset's controls.
+            replacement = Path(directory) / "replacement.usda"
+            replacement.write_bytes(path.read_bytes())
+            for field in expected:
+                getattr(editor.control, field).fill_(0.9)
+            document = Usd.Stage.Open(str(saved))
+            prim = document.GetPrimAtPath("/World/Object_0")
+            definition = json.loads(prim.GetCustomDataByKey("newtonSceneAuthoring"))
+            prim.SetCustomDataByKey("newtonSceneAuthoring", json.dumps({**definition, "source": str(replacement)}))
+            document.GetRootLayer().Save()
+            editor.load_usd(saved)
+            editor.commit()
+            defaults = editor.model.control()
+            for field in expected:
+                np.testing.assert_array_equal(getattr(editor.control, field).numpy(), getattr(defaults, field).numpy())
 
     @unittest.skipUnless(importlib.util.find_spec("pxr"), "Requires the USD importer dependency")
     def test_preparation_worker_failure_recovery_and_close(self):

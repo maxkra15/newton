@@ -96,6 +96,7 @@ class SceneEditorMCP:
                 "Positions and sizes are world Z-up metres, rotations are XYZW quaternions, mass is kilograms. "
                 "Use the observed revision for apply_edits and undo_redo. Batch edits into one request. "
                 "A pending document is not yet a compiled scene: inspect pending, busy and error until ready. "
+                "Object pose_kind distinguishes live_root poses from authored_root fallbacks for independent assemblies. "
                 "A failed import retains the previous runtime; undo_redo can discard the failed document. "
                 "These tools control this simulation editor, not physical robot hardware."
             ),
@@ -220,7 +221,12 @@ class SceneEditorMCP:
 
         @server.tool(annotations=read)
         async def get_scene(offset: int = 0, limit: Annotated[int, Field(ge=1, le=256)] = 100) -> dict[str, Any]:
-            """Inspect authored objects, live poses, world units and revision; paginate with offset/limit."""
+            """Inspect objects, pose_kind, units and revision; paginate with offset/limit.
+
+            live_position/live_rotation follow a single free root when pose_kind
+            is live_root. Assemblies without one free root use authored_root and
+            return the authored placement, not their independent bodies' motion.
+            """
             return await self._submit("scene", offset=offset, limit=limit)
 
         @server.tool(annotations=read)
@@ -462,6 +468,9 @@ class SceneEditorMCP:
                         row = dataclasses.asdict(obj)
                         row["kind"] = obj.kind.value
                         row["live_position"], row["live_rotation"] = self.editor.get_pose(obj.id)
+                        runtime = self.editor._runtime
+                        binding = runtime.bindings.get(obj.id) if runtime is not None else None
+                        row["pose_kind"] = "live_root" if binding and binding.follows_body else "authored_root"
                         rows.append(row)
                     result = {**stamp, "objects": rows, "total_objects": len(self.editor.objects)}
                 elif request.operation == "viewport":

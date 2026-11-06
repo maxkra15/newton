@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from io import BytesIO
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -229,6 +230,9 @@ class TestSceneAuthoringUI(unittest.TestCase):
                 manifest = json.loads(assets.files[manifest_path])
                 manifest["metadata"][0]["hash"]["sha256"] = hashlib.sha256(assets.files[bom_path]).hexdigest()
                 assets.files[manifest_path] = json.dumps(manifest).encode()
+                replacement_path = Path(assets.directory.name) / "replacement.usda"
+                replacement_objects = editor.objects
+                editor.save_usd(replacement_path)
                 record = assets.record()
                 assets.library.download(record)
                 assets.until(lambda: assets.library.ready(record) is not None)
@@ -332,6 +336,86 @@ class TestSceneAuthoringUI(unittest.TestCase):
                     center = editor.get_pose(editor.objects[-1].id)[0]
                     np.testing.assert_allclose(lower, np.asarray(center) - 0.01, atol=1e-5)
                     np.testing.assert_allclose(upper, np.asarray(center) + 0.01, atol=1e-5)
+
+                def queue_download():
+                    # Request the same real package with an incomplete cache;
+                    # hold its response until another interaction owns the UI.
+                    (assets.library._package(record) / "complete.json").unlink()
+                    assets.library._verified.pop(record.id, None)
+                    assets.requests.clear()
+                    assets.hold.set()
+                    assets.release.clear()
+                    panel._place_asset(record, (-3, 0, 1))
+                    assets.until(lambda: any(path.endswith("LICENSE.txt") for path in assets.requests))
+                    self.assertEqual(len(panel._pending_imports), 1)
+
+                def complete_download():
+                    assets.release.set()
+                    assets.until(lambda: assets.library.ready(record) is not None)
+
+                def await_import(count):
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and (len(editor.objects) != count or editor.pending):
+                        render()
+                        time.sleep(0.01)
+                    self.assertIsNone(editor.error)
+                    self.assertEqual(len(editor.objects), count)
+                    self.assertFalse(editor.pending)
+
+                # A finished transfer must not mutate a historical scene.
+                viewer._paused = True
+                queue_download()
+                history = workspace.history
+                history.set_recording(True)
+                history.capture()
+                editor.step()
+                history.capture()
+                history.select(0)
+                self.assertTrue(history.replaying)
+                document = editor.objects
+                complete_download()
+                render(2, simulate=True)
+                self.assertEqual(editor.objects, document)
+                self.assertEqual(len(panel._pending_imports), 1)
+                history.select(len(history.frames) - 1)
+                await_import(len(document) + 1)
+
+                # Likewise, retain the completed request until a real held
+                # viewport gesture releases its single undo transaction.
+                queue_download()
+                editor.select(edited.id)
+                render(3)
+                clip = (
+                    viewer.camera.get_projection_matrix().reshape(4, 4).T
+                    @ viewer.camera.get_view_matrix().reshape(4, 4).T
+                    @ np.array((*editor.get_pose(edited.id)[0], 1.0))
+                )
+                ndc = clip[:3] / clip[3]
+                vx, vy, width, height = workspace.rect
+                gx, gy = vx + (ndc[0] + 1) * width / 2, vy + (1 - ndc[1]) * height / 2 - 20
+                native_mouse(gx, gy, simulate=True)
+                native_mouse(gx, gy, True, simulate=True)
+                native_mouse(gx, gy - 4, simulate=True)
+                self.assertTrue(panel._gizmo_active)
+                self.assertIsNotNone(editor._edit_before)
+                count = len(editor.objects)
+                complete_download()
+                render(2, simulate=True)
+                self.assertEqual(len(editor.objects), count)
+                self.assertEqual(len(panel._pending_imports), 1)
+                self.assertTrue(panel._gizmo_active)
+                native_mouse(gx, gy - 4, False, simulate=True)
+                await_import(count + 1)
+
+                # Opening a document supersedes the old drop request while its
+                # verified package remains available in the shared cache.
+                queue_download()
+                editor.load_usd(replacement_path)
+                complete_download()
+                await_import(len(replacement_objects))
+                self.assertEqual(editor.objects, replacement_objects)
+                self.assertFalse(panel._pending_imports)
+                self.assertIsNotNone(assets.library.ready(record))
 
             workspace.bind(None)
             self.assertIsNone(workspace.authoring)

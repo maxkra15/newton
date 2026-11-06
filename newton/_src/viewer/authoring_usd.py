@@ -16,6 +16,8 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 import numpy as np
 import warp as wp
@@ -168,6 +170,51 @@ def _open_asset(source: str):
     # choose roots, order joints, and preserve loop constraints using standard API.
     _ensure_articulation_roots(stage)
     return stage, path, linear_unit
+
+
+def _asset_dependencies(source: str | Path) -> tuple[str, ...]:
+    """Collect local USD dependencies, including anchored missing optional assets.
+
+    Use the native recursive dependency scanner without modifying layers. Each
+    package member watches its containing archive; nonlocal URLs are excluded.
+    The owner layer anchors unresolved paths so later file creation is visible.
+    """
+    from pxr import Ar, Sdf, UsdUtils
+
+    source = str(Path(source).expanduser().resolve())
+    paths = set()
+
+    def remember(value, layer=None):
+        if not value or value.startswith("anon:"):
+            return
+        parsed = urlsplit(value)
+        if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
+            value = url2pathname(parsed.path)
+        elif parsed.scheme and not Path(value).is_absolute():
+            return
+        if Ar.IsPackageRelativePath(value):
+            value = Ar.SplitPackageRelativePathOuter(value)[0]
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            owner = layer.realPath if layer is not None else source
+            if Ar.IsPackageRelativePath(owner):
+                path = Path(Ar.SplitPackageRelativePathOuter(owner)[0])
+            else:
+                path = Path(owner).parent / path
+        paths.add(str(path.resolve()))
+
+    def inspect(layer, dependency):
+        for value in (dependency.assetPath, *dependency.dependencies):
+            remember(Sdf.ComputeAssetPathRelativeToLayer(layer, value), layer)
+        return dependency
+
+    remember(source)
+    layers, assets, _ = UsdUtils.ComputeAllDependencies(source, inspect)
+    for layer in layers:
+        remember(layer.realPath)
+    for asset in assets:
+        remember(asset)
+    return tuple(sorted(paths))
 
 
 def _source_scale(stage, scale, linear_unit):
@@ -377,6 +424,13 @@ def _validate_definition(definition: dict[str, Any], *, normalize_rotation: bool
         definition["rotation"] = tuple(value / norm for value in rotation)
     elif not math.isclose(norm * norm, 1.0, abs_tol=1.0e-5):
         raise ValueError("Scene object rotation must be a unit quaternion")
+    native_limit = float(np.finfo(np.float32).max)
+    for field in ("position", "rotation", "size", "color", "mass", "friction"):
+        values = (definition[field],) if field in ("mass", "friction") else definition[field]
+        if any(abs(value) > native_limit for value in values):
+            raise ValueError(f"Scene object {field} exceeds the finite float32 range")
+        if field in ("size", "mass") and any(np.float32(value) <= 0 for value in values):
+            raise ValueError(f"Scene object {field} must remain positive in float32")
     if kind == "sphere" and not all(math.isclose(value, size[0]) for value in size):
         raise ValueError("Sphere dimensions must be equal")
     if kind in {"capsule", "cylinder"} and not math.isclose(size[0], size[1]):
@@ -548,6 +602,15 @@ def save_scene(path: str | os.PathLike, objects: Iterable) -> None:
     ids = [definition["id"] for definition in definitions]
     if len(set(ids)) != len(ids):
         raise ValueError("Scene object IDs must be unique")
+    for definition in definitions:
+        if definition["kind"] != "usd":
+            continue
+        for filename in _asset_dependencies(definition["source"]):
+            dependency = Path(filename)
+            if destination == dependency or (
+                destination.is_file() and dependency.is_file() and destination.samefile(dependency)
+            ):
+                raise ValueError(f"Scene destination would overwrite an imported asset dependency: {dependency}")
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)

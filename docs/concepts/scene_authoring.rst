@@ -79,6 +79,9 @@ bounded thumbnail cache. Downloaded packages use Newton's asset cache. Set
 entries and complete packages remain available. A missing package then reports
 an error rather than silently importing an incomplete asset. Local USD import
 does not require the catalog or a Hugging Face account.
+Completed placement requests wait during history replay and active editing
+gestures. Opening another authored document discards its predecessor's queued
+placements while retaining downloaded packages in the cache.
 
 Fast edits and structural changes
 ---------------------------------
@@ -97,6 +100,8 @@ Direct edits, MCP edits, and saved USD metadata share the same geometry and
 physics validation. Sphere diameters must agree on all axes; capsules and
 cylinders require equal X and Y diameters. Direct edits normalize nonzero
 quaternions; saved metadata must already contain unit quaternions.
+Values written to native arrays must be representable in Newton's float32
+storage; invalid edits are rejected before changing the document or runtime.
 
 USD preparation runs in one reusable, spawned CPU process and caches read-only
 builder templates. Its Warp device and stream state are isolated from the
@@ -108,8 +113,15 @@ boundary, the editor constructs a candidate Model, States, Control,
 collision pipeline, and XPBD solver before adopting them. Failed compilation
 keeps the previous simulation available and displays the error. Stable authored
 IDs identify objects across model replacement; compiled body indices must be
-resolved again after a commit.
+resolved again after a commit. Matching bodies retain live state. Joint controls
+are preserved only when the source, joint type, and coordinate layout remain
+compatible; changed joints retain their imported defaults.
 The current simulation continues during downloads and background preparation.
+Cached templates track local referenced layers and asset files, including
+missing optional assets. Reimporting, previewing, or reopening an authored
+document refreshes templates when those files change. Changes during preparation
+reject the result and retain the previous runtime; retry after the source files
+are stable. Dependency checks do not add a file scan to normal physics stepping.
 
 Interactive additions and duplicates aim at the surface under the cursor.
 The bottom of the placement outline stays above the highest collider under its
@@ -150,6 +162,10 @@ recompilation found in
 also shows why replacing simulation arrays requires an owner that can refresh
 dependent bridges, sensors, and graphs. Newton's editor owns its full runtime
 and makes no assumptions about another application's graph lifecycle.
+The authored records remain independent of OpenUSD so primitive-only editing
+does not require a persistent USD stage. USD provides interchange, while live
+poses remain in Newton State. Preallocated body slots would constrain arbitrary
+USD topology without eliminating these ownership requirements.
 
 USD interchange and limits
 --------------------------
@@ -174,8 +190,11 @@ planes and heightfields are unsupported.
 
 Export uses standard OpenUSD geometry and physics schemas, with editor metadata
 for stable IDs and authored values. USD assets remain references to their
-source packages, so retain those packages when moving a saved scene. White
-asset tint preserves source materials. Exporting a nonwhite tint supports
+source packages, so retain those packages when moving a saved scene.
+Save rejects destinations that alias an imported source or any of its local
+dependencies, preventing self-references
+and accidental source-file replacement. White asset tint preserves source
+materials. Exporting a nonwhite tint supports
 ``displayColor`` and scalar ``UsdPreviewSurface`` color; connected color
 textures and other shader graphs require white tint and otherwise raise an
 error. The native viewer remains subject to its existing material and texture
@@ -249,8 +268,8 @@ quaternions. Read the observed scene revision before submitting mutations:
    * - Tool
      - Behavior
    * - ``get_scene``
-     - Paginated authored objects and live poses, revision, model generation,
-       camera, playback state, and pending/busy/error status.
+     - Paginated authored objects, root poses and their ``pose_kind``, revision,
+       model generation, camera, playback state, and pending/busy/error status.
    * - ``get_viewport``
      - A PNG cropped to the scene viewport, with frame, time, and scene metadata.
        ``include_ui`` returns the whole workspace instead; ``max_size`` bounds
@@ -269,6 +288,12 @@ quaternions. Read the observed scene revision before submitting mutations:
    * - ``save_scene``
      - Save the authored USD document. Replacing an existing file requires
        ``overwrite=True``.
+
+``pose_kind=live_root`` means ``live_position`` and ``live_rotation`` follow one
+free physical root. Assemblies with independent or world-fixed roots return
+``pose_kind=authored_root`` and their authored placement instead. Their component
+motion remains visible in the viewport; the fallback does not describe each
+body's current pose.
 
 For example, the following SDK client inspects the current scene and stages one
 box. It runs in another process while the viewer remains open:

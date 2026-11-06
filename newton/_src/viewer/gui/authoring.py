@@ -57,7 +57,7 @@ class AuthoringPanel:
         self._query_time = 0.0
         self._submitted_query = ""
         self._selected_asset: AssetRecord | None = None
-        self._pending_imports: list[tuple[AssetRecord, tuple[float, float, float]]] = []
+        self._pending_imports: list[tuple[AssetRecord, tuple[float, float, float], int]] = []
         self._textures: OrderedDict[Path, tuple[Texture, int]] = OrderedDict()
         self._bad_thumbnails: set[Path] = set()
         self._thumbnail_frame = -1
@@ -137,14 +137,20 @@ class AuthoringPanel:
             self.assets.poll()
             if self._pending_imports:
                 waiting = []
-                for record, position in self._pending_imports:
+                can_import = self.editable and not self.interacting and self.editor._edit_before is None
+                for record, position, epoch in self._pending_imports:
+                    if epoch != self.editor._document_epoch:
+                        continue
                     path = self.assets.ready(record)
                     if path is not None:
-                        self._import_path(path, position)
+                        if can_import:
+                            self._import_path(path, position)
+                        else:
+                            waiting.append((record, position, epoch))
                     elif error := self.assets.download_error(record):
                         self.message = error
                     else:
-                        waiting.append((record, position))
+                        waiting.append((record, position, epoch))
                 self._pending_imports = waiting
         if self._dialog_action:
             path = self.workspace.gui.ui.consume_file_dialog_result()
@@ -264,7 +270,7 @@ class AuthoringPanel:
             self._import_path(path, position)
         else:
             self.assets.download(record)
-            self._pending_imports.append((record, position))
+            self._pending_imports.append((record, position, self.editor._document_epoch))
             self.message = f"Downloading {record.name}…"
 
     def _open_dialog(self, action: str) -> None:

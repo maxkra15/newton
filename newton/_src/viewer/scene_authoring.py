@@ -35,6 +35,7 @@ from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
 from .authoring_usd import (
     NotAuthoringSceneError,
+    _asset_dependencies,
     _validate_definition,
     load_scene,
     prepare_usd,
@@ -117,6 +118,22 @@ def _placement_surface(
 class _AssetTemplate:
     builder: ModelBuilder
     bounds: tuple[np.ndarray, np.ndarray] | None
+    dependencies: tuple[tuple[str, int | None, int | None], ...]
+
+
+def _dependency_snapshot(paths):
+    result = []
+    for path in paths:
+        try:
+            stat = Path(path).stat()
+            result.append((path, stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            result.append((path, None, None))
+    return tuple(result)
+
+
+def _template_is_current(template: _AssetTemplate) -> bool:
+    return template.dependencies == _dependency_snapshot(path for path, _, _ in template.dependencies)
 
 
 def _restore_template_dtype(constructor: str, arguments: dict):
@@ -143,10 +160,21 @@ def _init_asset_worker() -> None:
 
 
 def _prepare_asset_payload(source: str, size: tuple) -> bytes:
-    template = SceneEditor._prepare_template(source, size)
-    buffer = io.BytesIO()
-    _TemplatePickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(template)
-    return buffer.getvalue()
+    try:
+        from pxr import Sdf
+
+        # Native layer caches belong to this CPU child, never the UI process.
+        for path in _asset_dependencies(source):
+            layer = Sdf.Layer.Find(path)
+            if layer is not None:
+                layer.Reload()
+        template = SceneEditor._prepare_template(source, size)
+        buffer = io.BytesIO()
+        _TemplatePickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(template)
+        return buffer.getvalue()
+    except Exception as error:
+        # Tf.ErrorException contains unpickleable native diagnostics.
+        raise ValueError(str(error)) from None
 
 
 def _pose_delta(target: wp.transform, current: wp.transform) -> wp.transform:
@@ -357,6 +385,7 @@ class SceneEditor:
         self.selected_id: str | None = None
         self.auto_apply = True
         self.revision = 0
+        self._document_epoch = 0
         self.rebuild_count = 0
         self.last_build_ms = 0.0
         self.error: str | None = None
@@ -661,19 +690,40 @@ class SceneEditor:
     def _template_key(self, obj: Object) -> tuple:
         path = Path(obj.source)
         stat = path.stat()
-        return str(path), obj.size, stat.st_mtime_ns, stat.st_size
+        key = str(path), obj.size, stat.st_mtime_ns, stat.st_size
+        if key in self._templates and not _template_is_current(self._templates[key]):
+            del self._templates[key]
+        return key
 
     @staticmethod
     def _prepare_template(source: str, size: tuple) -> _AssetTemplate:
         logger.info("Preparing USD asset %s", source)
         with wp.ScopedDevice("cpu"):
+            dependencies = _dependency_snapshot(_asset_dependencies(source))
             builder = prepare_usd(source, scale=size)
-            return _AssetTemplate(builder, template_bounds(builder))
+            template = _AssetTemplate(builder, template_bounds(builder), dependencies)
+            if not _template_is_current(template):
+                raise ValueError("USD dependencies changed during preparation; retry the import")
+            return template
 
-    def _schedule_template(self, obj: Object) -> None:
+    def _adopt_template(self, key: tuple, template: _AssetTemplate) -> tuple:
+        if not _template_is_current(template):
+            raise ValueError("USD dependencies changed after preparation; retry the import")
+        stat = Path(key[0]).stat()
+        key = (*key[:2], stat.st_mtime_ns, stat.st_size)
+        for previous in list(self._templates):
+            if previous[:2] == key[:2] and previous != key:
+                del self._templates[previous]
+        self._templates[key] = template
+        return key
+
+    def _schedule_template(self, obj: Object) -> tuple:
         key = self._template_key(obj)
+        for previous in list(self._preparing):
+            if previous[:2] == key[:2] and previous != key:
+                self._preparing.pop(previous).cancel()
         if key in self._templates or key in self._preparing:
-            return
+            return key
         if self._executor is None:
             self._executor = self._create_preparation_executor()
         try:
@@ -682,6 +732,7 @@ class SceneEditor:
             self._close_preparation_executor()
             self._executor = self._create_preparation_executor()
             self._preparing[key] = self._executor.submit(_prepare_asset_payload, obj.source, obj.size)
+        return key
 
     @staticmethod
     def _create_preparation_executor() -> ProcessPoolExecutor:
@@ -743,9 +794,8 @@ class SceneEditor:
                 continue
             try:
                 # Only our trusted CPU child produces this private host payload.
-                self._templates[key] = pickle.loads(future.result())
+                self._adopt_template(key, pickle.loads(future.result()))
                 self._trim_templates()
-                self._objects = self._resolved_defaults(self._objects)
             except Exception as exc:
                 message = f"Could not prepare USD asset {Path(key[0]).name}: {exc}"
                 if key[:2] in document_sources:
@@ -778,13 +828,10 @@ class SceneEditor:
                 logger.error("Could not compile authored scene: %s", exc)
 
     def _template(self, obj: Object) -> ModelBuilder:
-        key = self._template_key(obj)
+        key = self._schedule_template(obj)
         if key not in self._templates:
-            future = self._preparing.pop(key, None)
-            self._templates[key] = (
-                pickle.loads(future.result()) if future is not None else self._prepare_template(obj.source, obj.size)
-            )
-            self._objects = self._resolved_defaults(self._objects)
+            future = self._preparing.pop(key)
+            key = self._adopt_template(key, pickle.loads(future.result()))
         return self._templates[key].builder
 
     def _resolved_defaults(self, objects: tuple[Object, ...]) -> tuple[Object, ...]:
@@ -841,9 +888,9 @@ class SceneEditor:
         else:
             builder.add_shape_capsule(body, radius=radius, half_height=(z - x) * 0.5, **common)
 
-    def _add_asset(self, builder: ModelBuilder, obj: Object) -> None:
+    def _add_asset(self, builder: ModelBuilder, obj: Object) -> Object:
         template = self._template(obj)
-        obj = self.get_object(obj.id)
+        obj = self._resolved_defaults((obj,))[0]
         if template.particle_count:
             raise ValueError("Scene authoring currently supports rigid USD assets, not particles or deformables")
         start = builder.body_count
@@ -879,12 +926,12 @@ class SceneEditor:
             mass = builder.body_mass[body]
             if mass <= 0:
                 if not obj.dynamic:
-                    return
+                    return obj
                 raise ValueError("The USD asset has no finite-volume collision geometry for a rigid prop")
             ratio = obj.mass / mass
             builder.body_mass[body] *= ratio
             builder.body_inertia[body] = np.asarray(builder.body_inertia[body]) * ratio
-            return
+            return obj
         builder.add_builder(template, xform=wp.transform(obj.position, obj.rotation), label_prefix=f"objects/{obj.id}/")
         for index in range(start, builder.body_count):
             if "dynamic" in obj.overrides:
@@ -897,17 +944,21 @@ class SceneEditor:
             for index in range(start, builder.body_count):
                 builder.body_mass[index] *= ratio
                 builder.body_inertia[index] = np.asarray(builder.body_inertia[index]) * ratio
+        return obj
 
     def _build(self) -> _Runtime:
         builder = ModelBuilder()
         builder.add_ground_plane(cfg=ModelBuilder.ShapeConfig(mu=0.7), color=(0.28, 0.31, 0.34))
         bindings = {}
-        for obj in self._objects:
+        objects = {}
+        for authored in self._objects:
+            obj = authored
             b, s, j = builder.body_count, builder.shape_count, builder.joint_count
             if obj.kind == self.Shape.USD:
-                self._add_asset(builder, obj)
+                obj = self._add_asset(builder, obj)
             else:
                 self._add_primitive(builder, obj)
+            objects[obj.id] = obj
             reference = None
             follows = False
             if builder.body_count > b:
@@ -929,14 +980,14 @@ class SceneEditor:
             None,
             None,
             bindings,
-            {obj.id: obj for obj in self._objects},
+            objects,
             wp.clone(model.shape_color),
             wp.clone(model.shape_opacity),
             wp.clone(model.shape_material_mu),
         )
         runtime.pipeline = CollisionPipeline(model)
         runtime.contacts = runtime.pipeline.contacts()
-        for obj in self._objects:
+        for obj in objects.values():
             self._apply_appearance(runtime, obj)
         return runtime
 
@@ -993,14 +1044,22 @@ class SceneEditor:
             )
             self._sync_coordinates(new)
         previous_joints = {name: index for index, name in enumerate(old.model.joint_label)}
+        old_types, new_types = old.model.joint_type.numpy(), new.model.joint_type.numpy()
         old_q, old_d = old.model.joint_q_start.numpy(), old.model.joint_qd_start.numpy()
         new_q, new_d = new.model.joint_q_start.numpy(), new.model.joint_qd_start.numpy()
-        for object_id in new.objects:
-            if object_id not in old.objects:
+        for object_id, obj in new.objects.items():
+            previous_obj = old.objects.get(object_id)
+            if previous_obj is None or (obj.kind, obj.source) != (previous_obj.kind, previous_obj.source):
                 continue
             for joint in range(*new.bindings[object_id].joints):
                 previous = previous_joints.get(new.model.joint_label[joint])
                 if previous is None:
+                    continue
+                if (
+                    old_types[previous] != new_types[joint]
+                    or old_q[previous + 1] - old_q[previous] != new_q[joint + 1] - new_q[joint]
+                    or old_d[previous + 1] - old_d[previous] != new_d[joint + 1] - new_d[joint]
+                ):
                     continue
                 for field in ("joint_f", "joint_act", "joint_target_q", "joint_target_qd"):
                     source, target = getattr(old.control, field, None), getattr(new.control, field, None)
@@ -1009,8 +1068,6 @@ class SceneEditor:
                     coordinate = field == "joint_target_q"
                     starts_old, starts_new = (old_q, new_q) if coordinate else (old_d, new_d)
                     count = int(starts_new[joint + 1] - starts_new[joint])
-                    if count != int(starts_old[previous + 1] - starts_old[previous]):
-                        raise ValueError("An unchanged joint changed control layout during compilation")
                     if count == 0:
                         continue
                     wp.copy(
@@ -1055,6 +1112,8 @@ class SceneEditor:
                     model.shape_gap,
                     model.shape_collision_aabb_lower,
                     model.shape_collision_aabb_upper,
+                    model.shape_flags,
+                    pipeline._shape_variant_row,
                     contacts.contact_counters,
                     contacts.contact_generation,
                     pipeline.broad_phase_pair_count,
@@ -1594,6 +1653,7 @@ class SceneEditor:
         """Hide the transient placement outline on the next render."""
         self._preview = None
         self._preview_source = None
+        self._preview_error = None
 
     def _draw_preview(self) -> None:
         name = "__scene_authoring/placement"
@@ -1640,6 +1700,9 @@ class SceneEditor:
             raise ValueError("Scene document contains duplicate object IDs")
         self._remember()
         self._restore_document(objects)
+        # Explicit Open refreshes dependencies even when authored records match.
+        self._topology_dirty = True
+        self._document_epoch += 1
         for obj in objects:
             if obj.kind == self.Shape.USD:
                 self._schedule_template(obj)

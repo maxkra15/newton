@@ -4,6 +4,7 @@
 """Exercise scene document interchange through actual USD composition/import."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ import warp as wp
 import newton
 from newton._src.viewer.authoring_usd import (
     NotAuthoringSceneError,
+    _asset_dependencies,
     load_scene,
     prepare_usd,
     save_scene,
@@ -474,7 +476,7 @@ class TestAuthoringUsd(unittest.TestCase):
 
     def test_failed_save_preserves_destination_and_external_detection(self):
         """Keep valid files intact and reject malformed authored metadata on load."""
-        from pxr import Usd
+        from pxr import Sdf, Usd, UsdUtils
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scene.usda"
@@ -483,7 +485,14 @@ class TestAuthoringUsd(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 save_scene(path, [self.object("usd", source=str(Path(directory) / "missing.usda"))])
             self.assertEqual(path.read_bytes(), previous)
-            for changes in ({"name": " "}, {"visible": 1}):
+            for changes in (
+                {"name": " "},
+                {"visible": 1},
+                {"position": (1e100, 0, 0)},
+                {"mass": 1e100},
+                {"size": (1e-100,) * 3},
+                {"mass": 1e-100},
+            ):
                 with self.subTest(save=changes):
                     with self.assertRaises(ValueError):
                         save_scene(path, [self.object(**changes)])
@@ -503,9 +512,61 @@ class TestAuthoringUsd(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_scene(path)
             external = Path(directory) / "external.usda"
-            self.asset(external)
+            source_stage = self.asset(external)
             with self.assertRaises(NotAuthoringSceneError):
                 load_scene(external)
+            nested = Path(directory) / "nested"
+            nested.mkdir()
+            dependency = nested / "dependency.usda"
+            dependency_stage = Usd.Stage.CreateNew(str(dependency))
+            dependency_prim = dependency_stage.DefinePrim("/Dependency", "Scope")
+            dependency_stage.SetDefaultPrim(dependency_prim)
+            texture = nested / "texture.png"
+            texture.write_bytes(b"Dependency scanner does not decode the image")
+            dependency_prim.CreateAttribute("asset:texture", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath("texture.png"))
+            dependency_prim.CreateAttribute("asset:optional", Sdf.ValueTypeNames.Asset).Set(
+                Sdf.AssetPath("missing.usda")
+            )
+            dependency_stage.GetRootLayer().Save()
+            source_stage.DefinePrim("/Dependency", "Scope").GetReferences().AddReference(
+                "nested/dependency.usda", "/Dependency"
+            )
+            source_stage.GetRootLayer().Save()
+            self.assertEqual(
+                set(_asset_dependencies(external)),
+                {str(external), str(dependency), str(texture), str(nested / "missing.usda")},
+            )
+            # The same package-member references watch the archive, not fictitious filesystem members.
+            dependency_prim.RemoveProperty("asset:optional")
+            dependency_stage.GetRootLayer().Save()
+            package = Path(directory) / "asset.usdz"
+            self.assertTrue(UsdUtils.CreateNewUsdzPackage(str(external), str(package)))
+            self.assertEqual(_asset_dependencies(package), (str(package),))
+            dependency_prim.CreateAttribute("asset:optional", Sdf.ValueTypeNames.Asset).Set(
+                Sdf.AssetPath("missing.usda")
+            )
+            dependency_stage.GetRootLayer().Save()
+            imported = self.object("usd", source=external, color=(1.0, 1.0, 1.0))
+            targets = [external, dependency, nested / "missing.usda"]
+            if os.name == "posix":
+                for name, original in (("root-alias.usda", external), ("texture-alias.usda", texture)):
+                    alias = Path(directory) / name
+                    alias.hardlink_to(original)
+                    targets.append(alias)
+                alias = Path(directory) / "root-symlink.usda"
+                alias.symlink_to(external)
+                targets.append(alias)
+            contents = {item: item.read_bytes() for item in (external, dependency, texture)}
+            for target in targets:
+                with self.subTest(destination=target.name):
+                    with self.assertRaisesRegex(ValueError, "dependency"):
+                        save_scene(target, [imported])
+                    for item, data in contents.items():
+                        self.assertEqual(item.read_bytes(), data)
+            self.assertFalse((nested / "missing.usda").exists())
+            # Existing authored documents remain ordinary overwrite destinations.
+            save_scene(path, [self.object(name="Replacement")])
+            self.assertIn(b"Replacement", path.read_bytes())
 
 
 if __name__ == "__main__":

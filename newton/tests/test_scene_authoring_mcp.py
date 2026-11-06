@@ -169,6 +169,7 @@ class TestSceneAuthoringMCP(unittest.TestCase):
             initial = scene.data("get_scene")
             revision, generation = initial["revision"], initial["model_generation"]
             self.assertEqual(len(initial["objects"]), 1)
+            self.assertEqual(initial["objects"][0]["pose_kind"], "live_root")
             batch = scene.data(
                 "apply_edits",
                 {
@@ -218,6 +219,10 @@ class TestSceneAuthoringMCP(unittest.TestCase):
                     ],
                     state["revision"],
                 ),
+                (
+                    [{"operation": "update", "object_id": first, "properties": {"position": [1e100, 0, 2]}}],
+                    state["revision"],
+                ),
             ):
                 self.assertTrue(
                     scene.call("apply_edits", {"edits": edits, "expected_revision": expected_revision}).is_error
@@ -225,6 +230,7 @@ class TestSceneAuthoringMCP(unittest.TestCase):
                 self.assertEqual(scene.editor.objects, before)
                 self.assertEqual(scene.editor.revision, state["revision"])
                 self.assertEqual(scene.editor.rebuild_count, generation + 1)
+                self.assertTrue(np.isfinite(scene.editor.state_0.body_q.numpy()).all())
             scene.editor.begin_edit()
             try:
                 self.assertTrue(
@@ -325,6 +331,49 @@ class TestSceneAuthoringMCP(unittest.TestCase):
                 scene.data("undo_redo", {"direction": "undo", "expected_revision": pending["revision"]})
                 self.assertFalse(scene.editor.pending)
                 self.assertEqual(scene.editor.model.body_count, 2)
+                from pxr import Usd, UsdGeom, UsdPhysics
+
+                assembly = Path(scene.directory.name) / "independent.usda"
+                stage = Usd.Stage.CreateNew(str(assembly))
+                UsdGeom.SetStageMetersPerUnit(stage, 1)
+                UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+                for index in range(2):
+                    cube = UsdGeom.Cube.Define(stage, f"/Body_{index}")
+                    cube.CreateSizeAttr(0.2)
+                    cube.AddTranslateOp().Set((6 + index, 0, 0))
+                    UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+                    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+                    UsdPhysics.MassAPI.Apply(cube.GetPrim()).CreateMassAttr(1)
+                stage.GetRootLayer().Save()
+                state = scene.data("get_scene")
+                added = scene.data(
+                    "apply_edits",
+                    {
+                        "expected_revision": state["revision"],
+                        "edits": [
+                            {
+                                "operation": "add_usd",
+                                "source": str(assembly),
+                                "properties": {"position": [0, 0, 2]},
+                                "place": False,
+                            }
+                        ],
+                    },
+                )
+                deadline = time.monotonic() + 10
+                while scene.editor.pending and time.monotonic() < deadline:
+                    scene.pump()
+                self.assertFalse(scene.editor.pending, scene.editor.error)
+                object_id = added["changed_object_ids"][0]
+                bodies = list(scene.editor.body_indices(object_id))
+                self.assertEqual(len(bodies), 2)
+                previous_height = scene.editor.state_0.body_q.numpy()[bodies, 2].copy()
+                scene.editor.step()
+                self.assertTrue((scene.editor.state_0.body_q.numpy()[bodies, 2] < previous_height).all())
+                state = scene.data("get_scene")
+                row = next(obj for obj in state["objects"] if obj["id"] == object_id)
+                self.assertEqual(row["pose_kind"], "authored_root")
+                self.assertEqual(row["live_position"], [0, 0, 2])
             scene.client.close()
             address = urlsplit(scene.bridge.url)
             scene.bridge.close()
