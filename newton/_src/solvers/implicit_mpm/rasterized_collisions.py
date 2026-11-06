@@ -14,6 +14,7 @@ __all__ = [
     "build_rigidity_operator",
     "interpolate_collider_normals",
     "project_outside_collider",
+    "project_swept_collider",
     "rasterize_collider",
 ]
 
@@ -53,6 +54,14 @@ _NULL_COLLIDER_ID = -1
 
 _ALL_COLLIDER_WORLDS = -2
 """Environment sentinel that queries every collider in stable order."""
+
+
+@wp.func
+def _speculative_contact_gap(sdf: float, recovery_fraction: float):
+    gap = wp.max(sdf, 0.0)
+    if recovery_fraction > 0.0 and sdf < 0.0:
+        gap = recovery_fraction * sdf
+    return gap
 
 
 @wp.struct
@@ -496,6 +505,145 @@ def project_outside_collider(
     velocity_gradients_out[i] = vel_grad
 
 
+@wp.func
+def _swept_collider_contact(
+    start_world: wp.vec3,
+    end_world: wp.vec3,
+    environment: int,
+    collider: Collider,
+    body_q_prev: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    dt: float,
+    sweep_motion: bool,
+):
+    """Find the first entering face, repairing a start point just inside a wall."""
+    begin = int(0)
+    count = collider.collider_mesh.shape[0]
+    if environment != _ALL_COLLIDER_WORLDS:
+        begin = collider.world_collider_offsets[environment]
+        count = collider.world_collider_offsets[environment + 1] - begin
+
+    first_hit = float(1.0)
+    hit_id = int(-1)
+    hit_material = int(0)
+    hit_position = wp.vec3(0.0)
+    hit_normal = wp.vec3(0.0)
+    hit_velocity = wp.vec3(0.0)
+    for offset in range(count):
+        cid = offset
+        if environment != _ALL_COLLIDER_WORLDS:
+            cid = collider.world_collider_ids[begin + offset]
+        body = collider.collider_body_index[cid]
+        start_transform = wp.transform_identity()
+        end_transform = wp.transform_identity()
+        if body >= 0:
+            end_transform = body_q[body]
+            start_transform = end_transform
+            if sweep_motion:
+                start_transform = body_q_prev[body]
+        start = wp.transform_point(wp.transform_inverse(start_transform), start_world)
+        end = wp.transform_point(wp.transform_inverse(end_transform), end_world)
+        direction = end - start
+        if wp.length_sq(direction) > 1.0e-20:
+            mesh = collider.collider_mesh[cid]
+            hit = wp.mesh_query_ray(mesh, start, direction, first_hit)
+            if hit.result and hit.sign < 0.0:
+                query_poses = body_q
+                if sweep_motion:
+                    query_poses = body_q_prev
+                found, sdf, normal, _velocity, _point, material = _query_collider_sdf(
+                    start_world, collider, query_poses, cid
+                )
+                distance = sdf + collider.material_projection_threshold[material]
+                if found and distance < 0.0:
+                    start -= (distance - 1.0e-6) * normal
+                    direction = end - start
+                    hit = wp.mesh_query_ray(mesh, start, direction, first_hit)
+            # Only entry faces constrain a particle that starts in free space.
+            if hit.result and hit.sign > 0.0 and hit.t <= first_hit:
+                first_hit = hit.t
+                hit_id = cid
+                local_material = collider.face_material_index[collider.collider_face_offset[cid] + hit.face]
+                local_material = wp.clamp(local_material, 0, collider.collider_material_count[cid] - 1)
+                hit_material = collider.collider_material_offset[cid] + local_material
+                point = start + hit.t * direction
+                hit_position = wp.transform_point(end_transform, point)
+                hit_normal = wp.transform_vector(end_transform, hit.normal)
+                previous_transform = wp.transform_identity()
+                if body >= 0:
+                    previous_transform = body_q_prev[body]
+                hit_velocity = (hit_position - wp.transform_point(previous_transform, point)) / dt
+                hit_velocity += wp.transform_vector(end_transform, wp.mesh_eval_velocity(mesh, hit.face, hit.u, hit.v))
+
+    return hit_id, hit_material, hit_position, hit_normal, hit_velocity
+
+
+@wp.kernel(enable_backward=False)
+def project_swept_collider(
+    positions_prev: wp.array[wp.vec3],
+    positions: wp.array[wp.vec3],
+    velocities: wp.array[wp.vec3],
+    velocity_gradients: wp.array[wp.mat33],
+    particle_flags: wp.array[wp.int32],
+    particle_mass: wp.array[float],
+    particle_environment: wp.array[int],
+    collider: Collider,
+    body_q_prev: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    dt: float,
+    positions_out: wp.array[wp.vec3],
+    velocities_out: wp.array[wp.vec3],
+    velocity_gradients_out: wp.array[wp.mat33],
+):
+    """Project swept particle centers against rigid collider meshes."""
+    i = wp.tid()
+    pos = positions[i]
+    vel = velocities[i]
+    vel_grad = velocity_gradients[i]
+    if (~particle_flags[i] & newton.ParticleFlags.ACTIVE) or particle_mass[i] == 0.0:
+        positions_out[i] = pos
+        velocities_out[i] = vel
+        velocity_gradients_out[i] = vel_grad
+        return
+
+    environment = int(_ALL_COLLIDER_WORLDS)
+    if particle_environment:
+        environment = particle_environment[i]
+
+    sweep_start = positions_prev[i]
+    for contact_pass in range(4):
+        hit_id, hit_material, hit_position, hit_normal, hit_velocity = _swept_collider_contact(
+            sweep_start, pos, environment, collider, body_q_prev, body_q, dt, contact_pass == 0
+        )
+        if hit_id < 0:
+            break
+        friction = collider.material_friction[hit_material]
+        margin = collider.material_thickness[hit_material] - collider.material_projection_threshold[hit_material]
+        # Carry the contact point with the collider while allowing tangential slip.
+        sweep_start = hit_position + wp.max(1.0e-6, margin) * hit_normal
+        pos = sweep_start + solve_coulomb_isotropic(friction, hit_normal, pos - hit_position)
+        vel = hit_velocity + solve_coulomb_isotropic(friction, hit_normal, vel - hit_velocity)
+        vel_grad = 0.5 * (vel_grad - wp.transpose(vel_grad))
+        if contact_pass == 3:
+            # Exhausting the contact budget discards the remaining displacement.
+            pos = sweep_start
+
+    # Handle initial penetration and the offset surface around the center sweep.
+    sdf, normal, surface_vel, cid, material = collision_sdf(
+        pos, environment, collider, body_q, body_qd, body_q_prev, dt
+    )
+    distance = sdf + collider.material_projection_threshold[material]
+    if cid >= 0 and distance < 0.0:
+        pos -= distance * normal
+        vel = surface_vel + solve_coulomb_isotropic(collider.material_friction[material], normal, vel - surface_vel)
+        vel_grad = 0.5 * (vel_grad - wp.transpose(vel_grad))
+
+    positions_out[i] = pos
+    velocities_out[i] = vel
+    velocity_gradients_out[i] = vel_grad
+
+
 @wp.kernel
 def rasterize_collider_kernel(
     collider: Collider,
@@ -506,6 +654,7 @@ def rasterize_collider_kernel(
     activation_distance: float,
     speculative: bool,
     dt: float,
+    recovery_fraction: float,
     node_positions: wp.array[wp.vec3],
     node_environment_offsets: wp.array[int],
     node_volumes: wp.array[float],
@@ -533,6 +682,7 @@ def rasterize_collider_kernel(
         activation_distance: Distance (in voxels) below which to activate the collider.
         speculative: Whether to offset the collider velocity so a positive gap can close within the step.
         dt: Timestep length (used to scale adhesion and finite-difference velocity).
+        recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
         node_positions: Grid node positions to sample at.
         node_environment_offsets: Packed node offsets by world, or null to query every collider.
         node_volumes: Per-node integration volumes.
@@ -578,9 +728,9 @@ def rasterize_collider_kernel(
         adhesion = collider.material_adhesion[material_id] * dt * node_volumes[i] / voxel_size
     collider_adhesion[i] = adhesion
 
-    # Allow approach until the end-of-step gap closes; penetrating nodes keep the collider velocity.
+    # Close positive gaps over the step and optionally recover negative gaps through the contact solve.
     if speculative and dt > 0.0:
-        sdf_vel -= (wp.max(sdf, 0.0) / dt) * sdf_gradient
+        sdf_vel -= (_speculative_contact_gap(sdf, recovery_fraction) / dt) * sdf_gradient
     collider_velocity[i] = sdf_vel
 
 
@@ -745,12 +895,13 @@ def normalize_gradient(
     sdf: wp.array[float],
     velocity: wp.array[wp.vec3],
     dt: float,
+    recovery_fraction: float,
 ):
     i = wp.tid()
     previous_normal = normal[i]
     corrected_normal = wp.normalize(gradient[i])
     if wp.length_sq(previous_normal) > 0.0 and dt > 0.0:
-        velocity[i] += (wp.max(sdf[i], 0.0) / dt) * (previous_normal - corrected_normal)
+        velocity[i] += (_speculative_contact_gap(sdf[i], recovery_fraction) / dt) * (previous_normal - corrected_normal)
     normal[i] = corrected_normal
 
 
@@ -777,6 +928,8 @@ def rasterize_collider(
     collider_ids: wp.array[int],
     temporary_store: fem.TemporaryStore,
     node_environment_offsets: wp.array | None = None,
+    *,
+    contact_recovery_fraction: float = 0.0,
 ):
     """Rasterize collider signed-distance, normals, velocity, and material onto grid nodes.
 
@@ -803,6 +956,7 @@ def rasterize_collider(
         temporary_store: Temporary storage for intermediate buffers.
         node_environment_offsets: Packed collision-node offsets by world. If ``None``, every node
             queries every collider in stable order.
+        contact_recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
     """
     collision_node_count = collider_position_field.dof_values.shape[0]
 
@@ -833,6 +987,7 @@ def rasterize_collider(
             activation_distance,
             _is_speculative(collider_position_field),
             dt,
+            contact_recovery_fraction,
             collider_position_field.dof_values,
             node_environment_offsets,
             collider_node_volume,
@@ -854,6 +1009,7 @@ def interpolate_collider_normals(
     *,
     collider_velocity: wp.array[wp.vec3],
     dt: float,
+    contact_recovery_fraction: float = 0.0,
 ):
     """Smooth collider normals by computing the gradient of the distance field.
 
@@ -868,6 +1024,7 @@ def interpolate_collider_normals(
         temporary_store: Temporary storage for intermediate buffers.
         collider_velocity: Collider constraint velocities, updated for the corrected normals [m/s].
         dt: Timestep length [s].
+        contact_recovery_fraction: Fraction of negative particle-contact gaps to recover within the step.
     """
     corrected_normal = wp.empty_like(collider_normal_field.dof_values)
     fem.interpolate(
@@ -889,6 +1046,7 @@ def interpolate_collider_normals(
             collider_distance_field.dof_values,
             collider_velocity,
             dt if _is_speculative(collider_normal_field) else 0.0,
+            contact_recovery_fraction,
         ],
     )
 

@@ -1377,6 +1377,15 @@ class TestMPMExamples(unittest.TestCase):
 
 add_example_test(
     TestMPMExamples,
+    name="mpm.example_mpm_bowl",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 12, "resize-time": 0.1},
+    use_viewer=True,
+)
+
+
+add_example_test(
+    TestMPMExamples,
     name="mpm.example_mpm_granular",
     devices=cuda_test_devices,
     test_options={"num-frames": 100},

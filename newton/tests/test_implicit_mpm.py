@@ -1311,6 +1311,11 @@ def test_multiworld_sparse_gs_identical_worlds(test, device):
             np.testing.assert_allclose(q[starts[0] : starts[1]], q[starts[1] : starts[2]], atol=1.0e-6)
 
 
+@wp.kernel
+def _count_nonlinear_iteration(counter: wp.array[int]):
+    counter[0] += 1
+
+
 def test_small_iteration_budget_holds_ground(test, device):
     """Run every requested iteration, including budgets below one residual-check batch."""
     spacing = 0.025
@@ -1334,10 +1339,39 @@ def test_small_iteration_budget_holds_ground(test, device):
     builder.add_ground_plane()
     model = builder.finalize(device=device)
     config = SolverImplicitMPM.Config(
-        grid_type="dense", voxel_size=2.0 * spacing, solver="jacobi", max_iterations=10, tolerance=0.0
+        grid_type="fixed" if device.is_cuda else "dense",
+        voxel_size=2.0 * spacing,
+        max_active_cell_count=512 if device.is_cuda else -1,
+        solver="jacobi",
+        max_iterations=10,
+        tolerance=0.0,
     )
-    _, state = _step_mpm(model, config, step_count=20, dt=1.0 / 120.0)
+    solver, state = _step_mpm(model, config, step_count=20, dt=1.0 / 120.0)
     test.assertGreater(state.particle_q.numpy()[:, 2].min(), -0.5 * spacing)
+
+    counter = wp.zeros(1, dtype=int, device=device)
+    real_solve = solve_module._JacobiSolver.solve
+
+    def count_real_solve(instance):
+        wp.launch(_count_nonlinear_iteration, dim=1, inputs=[counter], device=device)
+        return real_solve(instance)
+
+    # Count the actual native sweeps without replacing the constitutive solve.
+    with patch.object(solve_module._JacobiSolver, "solve", count_real_solve):
+        for budget in (0, 1, 5, 6):
+            with test.subTest(budget=budget):
+                solver.max_iterations = budget
+                counter.zero_()
+                solver.step(state, state, None, None, 0.001)
+                test.assertEqual(int(counter.numpy()[0]), budget)
+                if device.is_cuda and wp.is_conditional_graph_supported():
+                    counter.zero_()
+                    with wp.ScopedCapture(device=device) as capture:
+                        solver.step(state, state, None, None, 0.001)
+                    for replay in range(1, 3):
+                        wp.capture_launch(capture.graph)
+                        test.assertEqual(int(counter.numpy()[0]), replay * budget)
+                test.assertTrue(np.isfinite(state.particle_q.numpy()).all())
 
 
 def test_unbinned_particles_keep_state(test, device):
@@ -1994,6 +2028,7 @@ def test_multiworld_rasterize_collider_node_environments(test, device):
             0.0,
             False,
             0.01,
+            0.0,
             node_positions,
             node_environment_offsets,
             node_volumes,
@@ -3205,8 +3240,7 @@ add_function_test(
     TestImplicitMPM,
     "test_small_iteration_budget_holds_ground",
     test_small_iteration_budget_holds_ground,
-    # CUDA runs this budget through the captured-graph path, which already rounds up.
-    devices=["cpu"],
+    devices=devices,
 )
 
 add_function_test(
