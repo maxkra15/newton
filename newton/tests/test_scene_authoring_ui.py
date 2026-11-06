@@ -91,6 +91,36 @@ class TestSceneAuthoringUI(unittest.TestCase):
             panel = workspace.authoring
             self.assertIsNotNone(panel)
             self.assertIsNone(panel.assets)
+
+            def scene_pixel(point):
+                clip = (
+                    viewer.camera.get_projection_matrix().reshape(4, 4).T
+                    @ viewer.camera.get_view_matrix().reshape(4, 4).T
+                    @ np.array((*point, 1.0))
+                )
+                ndc = clip[:3] / clip[3]
+                x, y, width, height = workspace.rect
+                return x + (ndc[0] + 1) * width / 2, y + (1 - ndc[1]) * height / 2
+
+            def click_scene_point(point):
+                pixel = scene_pixel(point)
+                native_mouse(*pixel)
+                native_mouse(*pixel, True)
+                native_mouse(*pixel, False)
+                render(2)
+
+            # Deliver actual viewport clicks through the native release handler,
+            # including the raycast used before authoring handles become active.
+            click_scene_point((0, 0, 0))
+            self.assertEqual(workspace.selected, ("shape", 0))
+            obj = editor.objects[0]
+            click_scene_point(obj.position)
+            self.assertEqual(workspace.selected, ("body", editor.body_indices(obj.id)[0]))
+            viewer.show_ground = False
+            click_scene_point((0, 0, 0))
+            self.assertIsNone(workspace.selected)
+            viewer.show_ground = True
+
             initial_count, initial_builds, initial_model = len(editor.objects), editor.rebuild_count, editor.model
             # Fixed window dimensions and a fresh ImGui context make the first
             # palette card stable. All input goes through ImGui's real queue.
@@ -157,14 +187,8 @@ class TestSceneAuthoringUI(unittest.TestCase):
             render(simulate=True)
             self.assertTrue(workspace.history.frames)
             original = editor.get_object(edited.id)
-            clip = (
-                viewer.camera.get_projection_matrix().reshape(4, 4).T
-                @ viewer.camera.get_view_matrix().reshape(4, 4).T
-                @ np.array((*editor.get_pose(edited.id)[0], 1.0))
-            )
-            ndc = clip[:3] / clip[3]
-            vx, vy, width, height = workspace.rect
-            gx, gy = vx + (ndc[0] + 1) * width / 2, vy + (1 - ndc[1]) * height / 2 - 20
+            gx, gy = scene_pixel(editor.get_pose(edited.id)[0])
+            gy -= 20
             sim_time = editor.sim_time
             viewer._paused = False
             native_mouse(gx, gy, simulate=True)
@@ -385,14 +409,8 @@ class TestSceneAuthoringUI(unittest.TestCase):
                 queue_download()
                 editor.select(edited.id)
                 render(3)
-                clip = (
-                    viewer.camera.get_projection_matrix().reshape(4, 4).T
-                    @ viewer.camera.get_view_matrix().reshape(4, 4).T
-                    @ np.array((*editor.get_pose(edited.id)[0], 1.0))
-                )
-                ndc = clip[:3] / clip[3]
-                vx, vy, width, height = workspace.rect
-                gx, gy = vx + (ndc[0] + 1) * width / 2, vy + (1 - ndc[1]) * height / 2 - 20
+                gx, gy = scene_pixel(editor.get_pose(edited.id)[0])
+                gy -= 20
                 native_mouse(gx, gy, simulate=True)
                 native_mouse(gx, gy, True, simulate=True)
                 native_mouse(gx, gy - 4, simulate=True)
