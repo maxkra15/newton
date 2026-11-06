@@ -89,26 +89,33 @@ class TestSceneAuthoring(unittest.TestCase):
                 self.assertIs(source.body_q, body_q)
                 self.assertIs(source.joint_q, joint_q)
                 self.assertIs(source.joint_qd, joint_qd)
-                np.testing.assert_allclose(source.body_q.numpy(), expected, atol=1e-6)
+                poses = source.body_q.numpy()
+                np.testing.assert_allclose(np.linalg.norm(poses[:, 3:], axis=1), 1, atol=1e-6)
+                np.testing.assert_allclose(poses, expected, atol=1e-6)
                 np.testing.assert_allclose(source.joint_q.numpy(), expected.reshape(-1), atol=1e-6)
                 np.testing.assert_allclose(source.joint_qd.numpy(), 0, atol=1e-6)
 
         editor.begin_edit()
-        rotations = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0))
-        for sample in range(8):
+        rotations = tuple(
+            tuple(wp.quat_from_axis_angle(wp.normalize(wp.vec3(0.3, 0.4, 0.5)), 0.7 * (index + 1)))
+            for index in range(3)
+        )
+        for sample in range(48):
             expected = []
             for index, object_id in enumerate(object_ids):
-                position = (2 * index + sample * 0.1, 0, 2)
-                rotation = rotations[index] if sample == 7 else (0, 0, 0, 1)
+                position = (2 * index + sample * 0.01, 0, 2)
+                rotation = rotations[index]
                 expected.append((*position, *rotation))
                 editor.update_object(
                     object_id, position=position, rotation=rotation, color=(0.2, 0.4, 0.6), friction=0.8
                 )
             editor.before_frame()
+            if sample == 0:
+                assert_poses(np.asarray(expected))
         editor.end_edit()
         expected = np.asarray(expected)
         assert_poses(expected)
-        np.testing.assert_allclose(editor.get_pose(object_ids[0])[0], (0.7, 0, 2), atol=1e-6)
+        np.testing.assert_allclose(editor.get_pose(object_ids[0])[0], (0.47, 0, 2), atol=1e-6)
         np.testing.assert_allclose(editor.model.shape_color.numpy()[1], (0.2, 0.4, 0.6))
         self.assertAlmostEqual(editor.model.shape_material_mu.numpy()[1], 0.8, places=6)
         editor.undo()

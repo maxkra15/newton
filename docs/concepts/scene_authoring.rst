@@ -85,7 +85,8 @@ Fast edits and structural changes
 
 Pose, color, visibility, and friction edits update existing Model and State
 buffers. Moving several objects in one frame synchronizes joint coordinates
-once after all poses have been updated. Primitive dimensions, USD scale, mass,
+once after all poses have been updated. Composed rotations stay normalized
+during paused drags. Primitive dimensions, USD scale, mass,
 motion type, and object additions or removals require a replacement runtime.
 A drag groups these structural edits into one commit on release. Its outline is
 transient viewer geometry and does not rerun ``ModelBuilder`` for each pointer movement.

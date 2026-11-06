@@ -149,6 +149,24 @@ def _prepare_asset_payload(source: str, size: tuple) -> bytes:
     return buffer.getvalue()
 
 
+def _pose_delta(target: wp.transform, current: wp.transform) -> wp.transform:
+    if tuple(target.q) == tuple(current.q):
+        return wp.transform(target.p - current.p, wp.quat_identity())
+    rotation = wp.normalize(wp.mul(target.q, wp.quat_inverse(current.q)))
+    # Use the kernel's same float32 rotation when cancelling the current
+    # position; two successive rotations otherwise accumulate translation bias.
+    translation = target.p - wp.quat_rotate(rotation, current.p)
+    return wp.transform(translation, rotation)
+
+
+@wp.func
+def _compose_pose(parent: wp.transform, local: wp.transform) -> wp.transform:
+    pose = wp.transform_multiply(parent, local)
+    # Subsequent inverse transforms assume unit quaternions; repeated edits
+    # otherwise amplify float32 roundoff into invalid orientations.
+    return wp.transform(wp.transform_get_translation(pose), wp.normalize(wp.transform_get_rotation(pose)))
+
+
 @wp.kernel
 def _move_bodies(
     start: int,
@@ -162,13 +180,13 @@ def _move_bodies(
     clear_velocity: bool,
 ):
     index = start + wp.tid()
-    pose = wp.transform_multiply(delta, poses[index])
+    pose = _compose_pose(delta, poses[index])
     poses[index] = pose
     other[index] = pose
     if clear_velocity:
         velocity[index] = wp.spatial_vector()
         other_velocity[index] = wp.spatial_vector()
-    initial[index] = wp.transform_multiply(initial_delta, initial[index])
+    initial[index] = _compose_pose(initial_delta, initial[index])
 
 
 @wp.kernel
@@ -180,7 +198,7 @@ def _move_world_shapes(
 ):
     index = start + wp.tid()
     if bodies[index] == -1:
-        transforms[index] = wp.transform_multiply(delta, transforms[index])
+        transforms[index] = _compose_pose(delta, transforms[index])
 
 
 @wp.kernel
@@ -193,7 +211,7 @@ def _move_world_anchors(
 ):
     index = start + wp.tid()
     if parents[index] == -1 and kinds[index] != int(JointType.FREE):
-        anchors[index] = wp.transform_multiply(delta, anchors[index])
+        anchors[index] = _compose_pose(delta, anchors[index])
 
 
 @wp.kernel
@@ -946,7 +964,7 @@ class SceneEditor:
                     current = wp.transform_multiply(
                         current, wp.transform(old_binding.reference[:3], old_binding.reference[3:])
                     )
-                delta = wp.transform_multiply(target, wp.transform_inverse(current))
+                delta = _pose_delta(target, current)
             start, end = new.bindings[object_id].bodies
             for index in range(start, end):
                 previous = labels.get(new.model.body_label[index])
@@ -1294,10 +1312,8 @@ class SceneEditor:
                 if not binding.follows_body:
                     live_position, live_rotation = previous.position, previous.rotation
                 target = wp.transform(obj.position, obj.rotation)
-                delta = wp.transform_multiply(target, wp.transform_inverse(wp.transform(live_position, live_rotation)))
-                initial_delta = wp.transform_multiply(
-                    target, wp.transform_inverse(wp.transform(previous.position, previous.rotation))
-                )
+                delta = _pose_delta(target, wp.transform(live_position, live_rotation))
+                initial_delta = _pose_delta(target, wp.transform(previous.position, previous.rotation))
                 start, end = binding.bodies
                 if end > start:
                     wp.launch(
