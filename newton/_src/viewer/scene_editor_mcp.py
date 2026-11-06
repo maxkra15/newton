@@ -62,6 +62,7 @@ class SceneEditorMCP:
     thread may call :meth:`before_frame` before the editor's update, and
     :meth:`after_frame` after rendering. Network handlers never access Newton,
     Warp, or OpenGL state directly. Images are captured only on request.
+    Viewport observations require the native OpenGL viewer.
 
     Args:
         editor: Application-owned scene and runtime.
@@ -348,6 +349,10 @@ class SceneEditorMCP:
         operation, arguments = request.operation, request.arguments
         editor, viewer = self.editor, self.editor.viewer
         if operation in ("scene", "viewport"):
+            if operation == "viewport" and not callable(
+                getattr(getattr(viewer, "renderer", None), "_get_scene_viewport", None)
+            ):
+                raise ValueError("Viewport observations require the native OpenGL viewer")
             return {}
         if operation == "edits":
             result = self._edit(**arguments)
@@ -462,7 +467,15 @@ class SceneEditorMCP:
                 elif request.operation == "viewport":
                     include_ui = request.arguments["include_ui"]
                     if include_ui not in captures:
-                        captures[include_ui] = self.editor.viewer.get_frame(render_ui=include_ui).numpy().copy()
+                        viewer = self.editor.viewer
+                        pixels = viewer.get_frame(render_ui=include_ui).numpy()
+                        if not include_ui:
+                            # The renderer already owns DPI, docking and hidden-panel
+                            # geometry. Its rectangle uses OpenGL's bottom-left origin.
+                            x, y, width, height = viewer.renderer._get_scene_viewport()
+                            top = pixels.shape[0] - y - height
+                            pixels = pixels[top : top + height, x : x + width]
+                        captures[include_ui] = pixels.copy()
                     result = captures[include_ui], stamp
                 else:
                     result = {**stamp, **payload}

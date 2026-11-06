@@ -237,8 +237,9 @@ quaternions. Read the observed scene revision before submitting mutations:
      - Paginated authored objects and live poses, revision, model generation,
        camera, playback state, and pending/busy/error status.
    * - ``get_viewport``
-     - A PNG image with frame, time, and scene metadata. ``include_ui`` includes
-       the workspace; ``max_size`` bounds the image's longest edge. During replay,
+     - A PNG cropped to the scene viewport, with frame, time, and scene metadata.
+       ``include_ui`` returns the whole workspace instead; ``max_size`` bounds
+       the image's longest edge. During replay,
        ``display_time`` identifies the selected frame and ``sim_time`` remains live.
    * - ``apply_edits``
      - A typed batch of ``add_primitive``, ``add_usd``, ``update``, and ``remove``

@@ -385,27 +385,44 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
             def capture(*args, **kwargs):
                 self.assertEqual(threading.get_ident(), owner)
                 frame = get_frame(*args, **kwargs)
-                captures.append(frame.numpy().copy())
+                captures.append(
+                    (
+                        frame.numpy().copy(),
+                        tuple(viewer.gui.workspace.rect),
+                        tuple(viewer.gui.ui.io.display_size),
+                    )
+                )
                 return frame
 
             revision = scene.editor.revision
             with mock.patch.object(viewer, "get_frame", side_effect=capture):
-                result = scene.call("get_viewport", {"max_size": 640, "include_ui": False})
-                self.assertFalse(result.is_error, str(result.content))
-                self.assertEqual(len(captures), 1)
-                image = next(content for content in result.content if content.type == "image")
-                self.assertEqual(image.mime_type, "image/png")
                 from pyglet import image as pyglet_image
 
-                decoded = pyglet_image.load("viewport.png", file=BytesIO(base64.b64decode(image.data)))
-                pixels = np.frombuffer(decoded.get_data("RGB", -decoded.width * 3), dtype=np.uint8).reshape(
-                    decoded.height, decoded.width, 3
-                )
-                np.testing.assert_array_equal(pixels, captures[0])
-                self.assertGreater(np.ptp(pixels), 0)
-                self.assertEqual((result.structured_content["width"], result.structured_content["height"]), (640, 480))
-                self.assertAlmostEqual(result.structured_content["sim_time"], live_time)
-                self.assertAlmostEqual(result.structured_content["display_time"], history.frames[0].time)
-                self.assertEqual(scene.editor.revision, revision)
-                self.assertAlmostEqual(scene.editor.sim_time, live_time)
+                for count, include_ui in enumerate((False, True), start=1):
+                    result = scene.call("get_viewport", {"max_size": 640, "include_ui": include_ui})
+                    self.assertFalse(result.is_error, str(result.content))
+                    self.assertEqual(len(captures), count)
+                    image = next(content for content in result.content if content.type == "image")
+                    self.assertEqual(image.mime_type, "image/png")
+                    decoded = pyglet_image.load("viewport.png", file=BytesIO(base64.b64decode(image.data)))
+                    pixels = np.frombuffer(decoded.get_data("RGB", -decoded.width * 3), dtype=np.uint8).reshape(
+                        decoded.height, decoded.width, 3
+                    )
+                    expected, rect, display = captures[-1]
+                    if not include_ui:
+                        x, y, width, height = rect
+                        sx, sy = expected.shape[1] / display[0], expected.shape[0] / display[1]
+                        left, top = round(x * sx), round(y * sy)
+                        right, bottom = round((x + width) * sx), round((y + height) * sy)
+                        expected = expected[top:bottom, left:right]
+                    np.testing.assert_array_equal(pixels, expected)
+                    self.assertGreater(np.ptp(pixels), 0)
+                    self.assertEqual(
+                        (result.structured_content["width"], result.structured_content["height"]),
+                        (expected.shape[1], expected.shape[0]),
+                    )
+                    self.assertAlmostEqual(result.structured_content["sim_time"], live_time)
+                    self.assertAlmostEqual(result.structured_content["display_time"], history.frames[0].time)
+                    self.assertEqual(scene.editor.revision, revision)
+                    self.assertAlmostEqual(scene.editor.sim_time, live_time)
             history.select(len(history.frames) - 1)
