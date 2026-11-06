@@ -16,6 +16,7 @@ newton.viewer
    Layer
    Picking
    SceneEditor
+   SceneEditorMCP
    ViewerBase
    ViewerFile
    ViewerGL

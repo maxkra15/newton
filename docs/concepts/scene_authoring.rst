@@ -200,3 +200,115 @@ it automatically for an example exposing ``scene_editor``. Use
 ``auto_apply`` and call :meth:`~newton.viewer.SceneEditor.request_commit` for an
 explicit structural commit. Call :meth:`~newton.viewer.SceneEditor.close` when
 the application is disposed to stop queued preparation.
+
+Agent access over MCP
+---------------------
+
+.. experimental::
+
+   :class:`newton.viewer.SceneEditorMCP` exposes this owned scene editor to local
+   agents. It does not attach to arbitrary examples or control physical robots.
+
+Install the optional MCP dependencies and enable the server explicitly:
+
+.. code-block:: console
+
+   uv run --extra examples --extra mcp -m newton.examples scene_editor \
+       --mcp-port 0 --mcp-info /tmp/newton-scene-mcp.json
+
+Port zero selects an available localhost port. The connection-settings file
+contains ``url``, ``token``, ``session_id``, and ``pid``. It is created with mode
+0600 and removed when the editor closes. Existing files are never overwritten.
+Without ``--mcp-info``, the application logs the generated temporary file's path.
+Configure an MCP client with that URL and an ``Authorization: Bearer <token>``
+header. The token changes on each launch. Only loopback connections and local
+Host/Origin headers are accepted. The optional SDK uses the MIT license.
+
+Tools use stable object IDs, world Z-up metres, kilograms, seconds, and XYZW
+quaternions. Read the observed scene revision before submitting mutations:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Tool
+     - Behavior
+   * - ``get_scene``
+     - Paginated authored objects and live poses, revision, model generation,
+       camera, playback state, and pending/busy/error status.
+   * - ``get_viewport``
+     - A PNG image with frame, time, and scene metadata. ``include_ui`` includes
+       the workspace; ``max_size`` bounds the image's longest edge. During replay,
+       ``display_time`` identifies the selected frame and ``sim_time`` remains live.
+   * - ``apply_edits``
+     - A typed batch of ``add_primitive``, ``add_usd``, ``update``, and ``remove``
+       operations, with the observed ``expected_revision``. Adds use safe
+       placement by default; ``place=False`` retains exact coordinates.
+   * - ``undo_redo``
+     - Undo or redo one authored batch, including recovery from failed imports.
+   * - ``set_camera``
+     - Set world camera position and pitch/yaw in degrees.
+   * - ``set_playing`` / ``step_simulation``
+     - Pause/resume, or advance a paused scene by at most 120 frames.
+   * - ``save_scene``
+     - Save the authored USD document. Replacing an existing file requires
+       ``overwrite=True``.
+
+For example, the following SDK client inspects the current scene and stages one
+box. It runs in another process while the viewer remains open:
+
+.. code-block:: python
+
+   import asyncio
+   import json
+   from pathlib import Path
+
+   import httpx2
+   from mcp.client import ClientSession
+   from mcp.client.streamable_http import streamable_http_client
+
+   async def edit_scene():
+       settings = json.loads(Path("/tmp/newton-scene-mcp.json").read_text())
+       headers = {"Authorization": "Bearer " + settings["token"]}
+       async with httpx2.AsyncClient(headers=headers, timeout=90) as http:
+           async with streamable_http_client(settings["url"], http_client=http) as (read, write):
+               async with ClientSession(read, write) as client:
+                   await client.initialize()
+                   observed = await client.call_tool("get_scene", {})
+                   result = await client.call_tool("apply_edits", {
+                       "expected_revision": observed.structured_content["revision"],
+                       "edits": [{
+                           "operation": "add_primitive",
+                           "kind": "box",
+                           "properties": {"name": "Agent box", "position": [0, 0, 1]},
+                       }],
+                   })
+                   assert not result.is_error, result.content
+
+   asyncio.run(edit_scene())
+
+The full batch is validated before changing the document. Successful batches
+create one undo entry and at most one structural commit. Pose and material edits
+retain the existing Model. USD preparation remains asynchronous: ``pending``
+means the authored document is not yet fully published. A later import or
+compilation error retains the previous runtime and is reported by ``get_scene``;
+it does not roll back the authored document. Inspect the error and use
+``undo_redo`` to recover. Stale revisions, active human gestures, and history
+replay reject mutations instead of overwriting another interaction.
+
+Commands use a bounded queue and execute on the viewer thread before the editor
+update. Pixels are copied after rendering on that same thread; resizing and PNG
+encoding run in a worker. There is no continuous screenshot stream. Cancellation
+withdraws requests that have not started. A running native operation finishes
+safely; after a timeout, inspect the scene before retrying a mutation.
+
+The design uses the official SDK's
+`Streamable HTTP transport <https://py.sdk.modelcontextprotocol.io/run/>`_
+and `image results <https://py.sdk.modelcontextprotocol.io/servers/media/>`_.
+Its owner-thread queue follows the same simulation boundary as
+`RoboSimStudio's SimBus <https://github.com/robosimstudio/robosimstudio/blob/013b7181d3f5810cd29f954e00131bf6d7b97b61/robosimstudio/core/bus.py>`_.
+
+For embedding, construct ``SceneEditorMCP(editor)`` on the viewer thread. Call
+``bridge.before_frame()`` before ``editor.before_frame()`` and
+``bridge.after_frame()`` after rendering, then close the bridge before disposing
+the editor. The normal scene-editor launcher already supplies these hooks.

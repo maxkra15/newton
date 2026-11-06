@@ -22,10 +22,15 @@ class Example(SceneEditor):
         parser = newton.examples.create_parser()
         parser.add_argument("--scene", help="Open an authored USD scene or import a USD asset.")
         parser.add_argument("--empty", action="store_true", help="Start with only the ground plane.")
+        parser.add_argument("--mcp-port", type=int, help="Enable local MCP access; zero chooses an available port.")
+        parser.add_argument("--mcp-info", help="Write private MCP connection settings to this new file.")
         return parser
 
     def __init__(self, viewer, args):
         super().__init__(viewer)
+        self._mcp = None
+        if args.mcp_info is not None and args.mcp_port is None:
+            raise ValueError("--mcp-info requires --mcp-port")
         if args.scene:
             self.load_usd(args.scene)
         elif not args.empty:
@@ -55,6 +60,28 @@ class Example(SceneEditor):
                 except (OSError, subprocess.SubprocessError):
                     pass
             window.set_caption(f"Newton Scene Editor [{revision}]")
+        if args.mcp_port is not None:
+            from newton.viewer import SceneEditorMCP  # noqa: PLC0415
+
+            self._mcp = SceneEditorMCP(self, port=args.mcp_port, info_file=args.mcp_info)
+
+    def before_frame(self) -> None:
+        """Apply queued agent commands before publishing document changes."""
+        if self._mcp is not None:
+            self._mcp.before_frame()
+        super().before_frame()
+
+    def render(self) -> None:
+        """Complete agent observations after the current scene has rendered."""
+        super().render()
+        if self._mcp is not None:
+            self._mcp.after_frame()
+
+    def close(self) -> None:
+        """Stop optional agent access before releasing the scene."""
+        if self._mcp is not None:
+            self._mcp.close()
+        super().close()
 
 
 if __name__ == "__main__":

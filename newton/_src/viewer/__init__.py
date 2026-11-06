@@ -47,6 +47,7 @@ from .viewer import Layer, ViewerBase
 if TYPE_CHECKING:
     from .picking import Picking
     from .scene_authoring import SceneEditor
+    from .scene_editor_mcp import SceneEditorMCP
     from .viewer_file import ViewerFile
     from .viewer_gl import ViewerGL
     from .viewer_null import ViewerNull
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SceneEditor": (".scene_authoring", "SceneEditor"),
+    "SceneEditorMCP": (".scene_editor_mcp", "SceneEditorMCP"),
     "Picking": (".picking", "Picking"),
     "ViewerFile": (".viewer_file", "ViewerFile"),
     "ViewerGL": (".viewer_gl", "ViewerGL"),
@@ -71,6 +73,7 @@ __all__ = [
     "Layer",
     "Picking",
     "SceneEditor",
+    "SceneEditorMCP",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",
