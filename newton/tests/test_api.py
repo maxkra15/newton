@@ -105,8 +105,10 @@ class TestApi(unittest.TestCase):
 
             class UnavailableBackend(importlib.abc.MetaPathFinder):
                 def find_spec(self, fullname, path=None, target=None):
-                    if fullname == "rerun":
-                        raise RuntimeError("The unused Rerun backend cannot initialize")
+                    if fullname.split(".")[0] in (
+                        "rerun", "mcp", "uvicorn", "httpx2", "huggingface_hub", "pyglet", "imgui_bundle"
+                    ):
+                        raise RuntimeError(f"The unused {fullname} dependency cannot initialize")
 
             sys.meta_path.insert(0, UnavailableBackend())
             from newton.viewer import ViewerNull
@@ -119,9 +121,13 @@ class TestApi(unittest.TestCase):
             assert not any(name in sys.modules for name in (
                 "newton._src.viewer.scene_authoring",
                 "newton._src.viewer.authoring_usd",
+                "newton._src.viewer.scene_editor_mcp",
                 "newton._src.viewer.viewer_assets",
                 "newton._src.viewer.gui.authoring",
             ))
+            from newton.viewer import SceneEditor, SceneEditorMCP
+            assert SceneEditor.__name__ == "SceneEditor"
+            assert SceneEditorMCP.__name__ == "SceneEditorMCP"
         """)
         result = subprocess.run(
             [sys.executable, "-c", script],

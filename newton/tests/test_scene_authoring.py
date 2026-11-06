@@ -69,32 +69,56 @@ class TestSceneAuthoring(unittest.TestCase):
         stage.GetRootLayer().Save()
 
     def test_fast_edits_preserve_storage_and_gesture_undo(self):
-        """Apply pose and appearance edits without recompiling or replacing arrays."""
+        """Batch poses into both states and reset coordinates without replacing storage."""
         editor = self.make_editor()
-        object_id = editor.add_primitive("box", position=(0, 0, 2))
+        object_ids = tuple(editor.add_primitive("box", position=(2 * index, 0, 2)) for index in range(3))
         editor.commit()
-        model, state, poses = editor.model, editor.state_0, editor.state_0.body_q
+        editor.step()
+        model = editor.model
+        storage = tuple(
+            (source, source.body_q, source.joint_q, source.joint_qd)
+            for source in (editor.state_0, editor.state_1, model)
+        )
+
+        def assert_poses(expected):
+            self.assertIs(editor.model, model)
+            self.assertEqual(editor.rebuild_count, 1)
+            self.assertIs(editor.state_0, storage[0][0])
+            self.assertIs(editor.state_1, storage[1][0])
+            for source, body_q, joint_q, joint_qd in storage:
+                self.assertIs(source.body_q, body_q)
+                self.assertIs(source.joint_q, joint_q)
+                self.assertIs(source.joint_qd, joint_qd)
+                np.testing.assert_allclose(source.body_q.numpy(), expected, atol=1e-6)
+                np.testing.assert_allclose(source.joint_q.numpy(), expected.reshape(-1), atol=1e-6)
+                np.testing.assert_allclose(source.joint_qd.numpy(), 0, atol=1e-6)
+
         editor.begin_edit()
-        for index in range(8):
-            editor.update_object(object_id, position=(index * 0.1, 0, 2), color=(0.2, 0.4, 0.6), friction=0.8)
+        rotations = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0))
+        for sample in range(8):
+            expected = []
+            for index, object_id in enumerate(object_ids):
+                position = (2 * index + sample * 0.1, 0, 2)
+                rotation = rotations[index] if sample == 7 else (0, 0, 0, 1)
+                expected.append((*position, *rotation))
+                editor.update_object(
+                    object_id, position=position, rotation=rotation, color=(0.2, 0.4, 0.6), friction=0.8
+                )
             editor.before_frame()
         editor.end_edit()
-        self.assertIs(editor.model, model)
-        self.assertIs(editor.state_0, state)
-        self.assertIs(editor.state_0.body_q, poses)
-        self.assertEqual(editor.rebuild_count, 1)
-        np.testing.assert_allclose(editor.get_pose(object_id)[0], (0.7, 0, 2), atol=1e-6)
+        expected = np.asarray(expected)
+        assert_poses(expected)
+        np.testing.assert_allclose(editor.get_pose(object_ids[0])[0], (0.7, 0, 2), atol=1e-6)
         np.testing.assert_allclose(editor.model.shape_color.numpy()[1], (0.2, 0.4, 0.6))
         self.assertAlmostEqual(editor.model.shape_material_mu.numpy()[1], 0.8, places=6)
         editor.undo()
         editor.before_frame()
-        np.testing.assert_allclose(editor.get_pose(object_id)[0], (0, 0, 2))
+        assert_poses(np.asarray([(2 * index, 0, 2, 0, 0, 0, 1) for index in range(3)]))
         editor.redo()
         editor.before_frame()
-        np.testing.assert_allclose(editor.get_pose(object_id)[0], (0.7, 0, 2), atol=1e-6)
+        assert_poses(expected)
         editor.reset_scene()
-        np.testing.assert_allclose(editor.get_pose(object_id)[0], (0.7, 0, 2), atol=1e-6)
-        self.assertEqual(editor.rebuild_count, 1)
+        assert_poses(expected)
 
     def test_batched_topology_preserves_unedited_physical_state(self):
         """Add and remove objects once while retaining an existing falling body's state."""
@@ -612,11 +636,21 @@ class TestSceneAuthoring(unittest.TestCase):
         editor.step()
         editor.reset_scene()
         self.assertEqual(editor.model.body_count, 0)
-        for kind, size in (("sphere", (1, 2, 1)), ("capsule", (1, 1, 0.5)), ("box", (-1, 1, 1))):
+        for kind, size in (
+            ("sphere", (1, 2, 1)),
+            ("sphere", (1, 1.000001, 1)),
+            ("capsule", (1, 1, 0.5)),
+            ("box", (-1, 1, 1)),
+        ):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 editor.add_primitive(kind, size=size)
         self.assertFalse(editor.objects)
         self.assertEqual(editor.rebuild_count, 1)
+        normalized = editor.add_primitive("box")
+        with self.assertRaises(ValueError):
+            editor.update_object(normalized, rotation=(0, 0, 0, 0))
+        editor.update_object(normalized, rotation=(0, 0, 1.0e300, 1.0e300))
+        np.testing.assert_allclose(editor.get_object(normalized).rotation, (0, 0, np.sqrt(0.5), np.sqrt(0.5)))
 
 
 if __name__ == "__main__":

@@ -84,12 +84,18 @@ Fast edits and structural changes
 ---------------------------------
 
 Pose, color, visibility, and friction edits update existing Model and State
-buffers. Primitive dimensions, USD scale, mass, motion type, and object
-additions or removals require a replacement runtime. A drag groups these
-structural edits into one commit on release. Its outline is transient viewer
-geometry and does not rerun ``ModelBuilder`` for each pointer movement.
+buffers. Moving several objects in one frame synchronizes joint coordinates
+once after all poses have been updated. Primitive dimensions, USD scale, mass,
+motion type, and object additions or removals require a replacement runtime.
+A drag groups these structural edits into one commit on release. Its outline is
+transient viewer geometry and does not rerun ``ModelBuilder`` for each pointer movement.
 During a USD scale gesture, the outline scales its cached envelope; the updated
 USD template is prepared once after release.
+
+Direct edits, MCP edits, and saved USD metadata share the same geometry and
+physics validation. Sphere diameters must agree on all axes; capsules and
+cylinders require equal X and Y diameters. Direct edits normalize nonzero
+quaternions; saved metadata must already contain unit quaternions.
 
 USD preparation runs in one reusable, spawned CPU process and caches read-only
 builder templates. Its Warp device and stream state are isolated from the

@@ -207,6 +207,17 @@ class TestSceneAuthoringMCP(unittest.TestCase):
                     ],
                     state["revision"],
                 ),
+                (
+                    [
+                        {"operation": "update", "object_id": first, "properties": {"name": "Must roll back"}},
+                        {
+                            "operation": "add_primitive",
+                            "kind": "sphere",
+                            "properties": {"size": [1.0, 1.000001, 1.0]},
+                        },
+                    ],
+                    state["revision"],
+                ),
             ):
                 self.assertTrue(
                     scene.call("apply_edits", {"edits": edits, "expected_revision": expected_revision}).is_error

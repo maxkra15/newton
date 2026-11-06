@@ -33,7 +33,14 @@ from ..geometry.bvh import (
 from ..sim import BodyFlags, CollisionPipeline, JointType, ModelBuilder, eval_ik
 from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
-from .authoring_usd import NotAuthoringSceneError, load_scene, prepare_usd, save_scene, template_bounds
+from .authoring_usd import (
+    NotAuthoringSceneError,
+    _validate_definition,
+    load_scene,
+    prepare_usd,
+    save_scene,
+    template_bounds,
+)
 
 if TYPE_CHECKING:
     from ..sim import Contacts, Control, Model, State
@@ -398,39 +405,13 @@ class SceneEditor:
             self.get_object(object_id)
         self.selected_id = object_id
 
-    @classmethod
-    def _validate(cls, obj: Object) -> Object:
-        position = cls._vector(obj.position, 3, "position")
-        rotation = cls._vector(obj.rotation, 4, "rotation")
-        norm = math.sqrt(sum(value * value for value in rotation))
-        if norm < 1.0e-8:
-            raise ValueError("Rotation must be a nonzero XYZW quaternion")
-        rotation = tuple(value / norm for value in rotation)
-        size = cls._vector(obj.size, 3, "size")
-        color = cls._vector(obj.color, 3, "color")
-        if any(value <= 0 for value in size):
-            raise ValueError("Dimensions must be positive")
-        if any(value < 0 or value > 1 for value in color):
-            raise ValueError("Color components must be between zero and one")
-        if not math.isfinite(obj.mass) or obj.mass <= 0:
-            raise ValueError("Mass must be finite and positive")
-        if not math.isfinite(obj.friction) or obj.friction < 0:
-            raise ValueError("Friction must be finite and nonnegative")
-        if obj.kind == cls.Shape.SPHERE and not np.allclose(size, size[0]):
-            raise ValueError("A sphere requires equal X, Y, and Z diameters")
-        if obj.kind in (cls.Shape.CAPSULE, cls.Shape.CYLINDER) and not math.isclose(size[0], size[1]):
-            raise ValueError("Capsules and cylinders require equal X and Y diameters")
-        if obj.kind == cls.Shape.CAPSULE and size[2] < size[0]:
-            raise ValueError("Capsule total height must be at least its diameter")
-        if not obj.name.strip():
-            raise ValueError("Object name cannot be empty")
-        overrides = tuple(sorted(set(obj.overrides)))
-        if set(overrides) - {"mass", "friction", "dynamic"}:
-            raise ValueError("Unknown USD physics override")
-        if not isinstance(obj.dynamic, bool) or not isinstance(obj.visible, bool):
-            raise ValueError("Dynamic and visible flags must be booleans")
+    @staticmethod
+    def _validate(obj: Object) -> Object:
+        definition = vars(obj).copy()
+        definition["kind"] = obj.kind.value
+        _validate_definition(definition, normalize_rotation=True)
         return dataclasses.replace(
-            obj, position=position, rotation=rotation, size=size, color=color, overrides=overrides
+            obj, **{name: definition[name] for name in ("position", "rotation", "size", "color", "overrides")}
         )
 
     @staticmethod
@@ -1357,8 +1338,6 @@ class SceneEditor:
                         ],
                         device=self.device,
                     )
-                self._sync_coordinates(runtime)
-                eval_ik(runtime.model, runtime.model, runtime.model.joint_q, runtime.model.joint_qd)
             if (obj.color, obj.visible, obj.friction, obj.overrides) != (
                 previous.color,
                 previous.visible,
@@ -1368,6 +1347,8 @@ class SceneEditor:
                 self._apply_appearance(runtime, obj)
             runtime.objects[object_id] = obj
         if moved:
+            self._sync_coordinates(runtime)
+            eval_ik(runtime.model, runtime.model, runtime.model.joint_q, runtime.model.joint_qd)
             self._collide(runtime)
         self._fast_pending.clear()
         # Previous snapshots use the old authored poses and materials. Drop

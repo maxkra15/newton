@@ -3,6 +3,7 @@
 
 """Exercise scene document interchange through actual USD composition/import."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,7 +81,7 @@ class TestAuthoringUsd(unittest.TestCase):
         from pxr import Usd, UsdGeom
 
         objects = [
-            self.object(),
+            self.object(position=np.array((1.0, 2.0, 3.0), dtype=np.float32), overrides=("mass", "dynamic", "mass")),
             self.object("sphere", id="sphere", size=(2.0, 2.0, 2.0), position=(4.0, 0.0, 0.0)),
             self.object("capsule", id="capsule"),
             self.object("cylinder", id="cylinder", dynamic=False, visible=False),
@@ -93,6 +94,7 @@ class TestAuthoringUsd(unittest.TestCase):
             self.assertEqual(definitions[2]["kind"], "capsule")
             self.assertEqual(definitions[2]["size"], [2.0, 2.0, 4.0])
             self.assertFalse(definitions[3]["visible"])
+            self.assertEqual(definitions[0]["overrides"], ["dynamic", "mass"])
             stage = Usd.Stage.Open(str(path))
             capsule = UsdGeom.Capsule(stage.GetPrimAtPath("/World/Object_2/Geometry"))
             self.assertEqual(capsule.GetHeightAttr().Get(), 2.0)
@@ -218,7 +220,7 @@ class TestAuthoringUsd(unittest.TestCase):
             np.testing.assert_allclose(lower, (-1, -1, 1), atol=1e-6)
             np.testing.assert_allclose(upper, (1, 1, 3), atol=1e-6)
             path = Path(directory) / "scene.usda"
-            save_scene(path, [self.object("usd", source=str(source), size=(2.0, 2.0, 2.0), color=(1.0, 1.0, 1.0))])
+            save_scene(path, [self.object("usd", source=source, size=(2.0, 2.0, 2.0), color=(1.0, 1.0, 1.0))])
             definition = load_scene(path)[0]
             self.assertEqual(definition["source"], str(source))
             stage = Usd.Stage.Open(str(path))
@@ -471,7 +473,9 @@ class TestAuthoringUsd(unittest.TestCase):
                 prepare_usd(str(path))
 
     def test_failed_save_preserves_destination_and_external_detection(self):
-        """Leave saved scenes intact when a referenced asset cannot be prepared."""
+        """Keep valid files intact and reject malformed authored metadata on load."""
+        from pxr import Usd
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scene.usda"
             save_scene(path, [self.object()])
@@ -479,6 +483,25 @@ class TestAuthoringUsd(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 save_scene(path, [self.object("usd", source=str(Path(directory) / "missing.usda"))])
             self.assertEqual(path.read_bytes(), previous)
+            for changes in ({"name": " "}, {"visible": 1}):
+                with self.subTest(save=changes):
+                    with self.assertRaises(ValueError):
+                        save_scene(path, [self.object(**changes)])
+                    self.assertEqual(path.read_bytes(), previous)
+            stage = Usd.Stage.Open(str(path))
+            prim = stage.GetPrimAtPath("/World/Object_0")
+            definition = json.loads(prim.GetCustomDataByKey("newtonSceneAuthoring"))
+            for changes in (
+                {"name": " "},
+                {"dynamic": "false"},
+                {"kind": "sphere", "size": [2.0, 2.00001, 2.0]},
+                {"rotation": [0.0, 0.0, 0.0, 2.0]},
+            ):
+                with self.subTest(load=changes):
+                    prim.SetCustomDataByKey("newtonSceneAuthoring", json.dumps({**definition, **changes}))
+                    stage.GetRootLayer().Save()
+                    with self.assertRaises(ValueError):
+                        load_scene(path)
             external = Path(directory) / "external.usda"
             self.asset(external)
             with self.assertRaises(NotAuthoringSceneError):

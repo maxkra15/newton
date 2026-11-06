@@ -298,29 +298,35 @@ def template_bounds(builder: ModelBuilder) -> tuple[np.ndarray, np.ndarray] | No
 
 
 def _definition(obj) -> dict[str, Any]:
-    kind = obj.kind.value
-    if kind not in {"box", "sphere", "capsule", "cylinder", "usd"}:
-        raise ValueError(f"Unsupported scene object kind: {kind}")
     definition = {
         "id": obj.id,
         "name": obj.name,
-        "kind": kind,
-        "position": list(obj.position),
-        "rotation": list(obj.rotation),
-        "size": list(obj.size),
-        "color": list(obj.color),
-        "mass": float(obj.mass),
-        "friction": float(obj.friction),
-        "dynamic": bool(obj.dynamic),
-        "source": str(Path(obj.source).expanduser().resolve()) if obj.source else None,
-        "visible": bool(obj.visible),
-        "overrides": list(getattr(obj, "overrides", ("mass", "friction", "dynamic"))),
+        "kind": obj.kind.value,
+        "position": obj.position,
+        "rotation": obj.rotation,
+        "size": obj.size,
+        "color": obj.color,
+        "mass": obj.mass,
+        "friction": obj.friction,
+        "dynamic": obj.dynamic,
+        "source": obj.source,
+        "visible": obj.visible,
+        "overrides": getattr(obj, "overrides", ("mass", "friction", "dynamic")),
     }
     _validate_definition(definition)
-    return definition
+    definition["source"] = str(Path(obj.source).expanduser().resolve()) if obj.source else None
+    definition["mass"], definition["friction"] = float(obj.mass), float(obj.friction)
+    return {key: list(value) if isinstance(value, tuple) else value for key, value in definition.items()}
 
 
-def _validate_definition(definition):
+def _validate_definition(definition: dict[str, Any], *, normalize_rotation: bool = False) -> dict[str, Any]:
+    """Validate a fresh object dictionary without accessing files or importing USD.
+
+    Canonicalize vectors and explicit overrides to tuples. Editor inputs may
+    request quaternion normalization; saved metadata must already be unit length.
+    """
+    if not isinstance(definition, dict):
+        raise ValueError("Scene object metadata must be a dictionary")
     for field in (
         "id",
         "name",
@@ -337,10 +343,22 @@ def _validate_definition(definition):
     ):
         if field not in definition:
             raise ValueError(f"Scene object is missing {field}")
+    for field in ("id", "name"):
+        if not isinstance(definition[field], str) or not definition[field].strip():
+            raise ValueError(f"Scene object {field} must be a nonempty string")
+    kind = definition["kind"]
+    if not isinstance(kind, str) or kind not in {"box", "sphere", "capsule", "cylinder", "usd"}:
+        raise ValueError(f"Unsupported scene object kind: {kind}")
+    if not all(isinstance(definition[field], bool) for field in ("dynamic", "visible")):
+        raise ValueError("Dynamic and visible flags must be booleans")
     for field, length in (("position", 3), ("rotation", 4), ("size", 3), ("color", 3)):
-        values = definition[field]
-        if len(values) != length or any(not math.isfinite(float(value)) for value in values):
+        try:
+            values = tuple(float(value) for value in definition[field])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid {field} in authoring object") from exc
+        if len(values) != length or not all(math.isfinite(value) for value in values):
             raise ValueError(f"Invalid {field} in authoring object")
+        definition[field] = values
     size = definition["size"]
     if min(size) <= 0 or not math.isfinite(definition["mass"]) or definition["mass"] <= 0:
         raise ValueError("Scene object dimensions and mass must be positive")
@@ -348,18 +366,30 @@ def _validate_definition(definition):
         raise ValueError("Scene object friction must be finite and nonnegative")
     if any(value < 0 or value > 1 for value in definition["color"]):
         raise ValueError("Scene object color must lie between zero and one")
-    if not math.isclose(sum(value * value for value in definition["rotation"]), 1.0, abs_tol=1.0e-5):
+    rotation = definition["rotation"]
+    norm = math.hypot(*rotation)
+    if normalize_rotation:
+        if norm < 1.0e-8:
+            raise ValueError("Rotation must be a nonzero XYZW quaternion")
+        scale = max(abs(value) for value in rotation)
+        rotation = tuple(value / scale for value in rotation)
+        norm = math.hypot(*rotation)
+        definition["rotation"] = tuple(value / norm for value in rotation)
+    elif not math.isclose(norm * norm, 1.0, abs_tol=1.0e-5):
         raise ValueError("Scene object rotation must be a unit quaternion")
-    if definition["kind"] == "sphere" and not all(math.isclose(value, size[0]) for value in size):
+    if kind == "sphere" and not all(math.isclose(value, size[0]) for value in size):
         raise ValueError("Sphere dimensions must be equal")
-    if definition["kind"] in {"capsule", "cylinder"} and not math.isclose(size[0], size[1]):
+    if kind in {"capsule", "cylinder"} and not math.isclose(size[0], size[1]):
         raise ValueError("Capsule and cylinder radial dimensions must be equal")
-    if definition["kind"] == "capsule" and size[2] < size[0]:
+    if kind == "capsule" and size[2] < size[0]:
         raise ValueError("Capsule total height must be at least its diameter")
-    if definition["kind"] == "usd" and not definition["source"]:
+    if kind == "usd" and (not isinstance(definition["source"], (str, os.PathLike)) or not str(definition["source"])):
         raise ValueError("USD scene objects require a source asset")
-    if any(value not in {"mass", "friction", "dynamic"} for value in definition.get("overrides", ())):
+    overrides = definition.get("overrides", ("mass", "friction", "dynamic"))
+    if any(value not in {"mass", "friction", "dynamic"} for value in overrides):
         raise ValueError("Unknown USD physical property override")
+    definition["overrides"] = tuple(sorted(set(overrides)))
+    return definition
 
 
 def _write_references(stage, path, definition):
@@ -605,11 +635,10 @@ def load_scene(path: str | os.PathLike) -> list[dict[str, Any]]:
         if encoded is not None:
             try:
                 definition = json.loads(encoded)
-                definition.setdefault("overrides", ["mass", "friction", "dynamic"])
-                if definition["kind"] not in {"box", "sphere", "capsule", "cylinder", "usd"}:
-                    raise ValueError("Unknown shape kind")
                 _validate_definition(definition)
-                definitions.append(definition)
+                definitions.append(
+                    {key: list(value) if isinstance(value, tuple) else value for key, value in definition.items()}
+                )
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
                 raise ValueError(f"Invalid authoring metadata at {prim.GetPath()}") from exc
     ids = [definition["id"] for definition in definitions]
