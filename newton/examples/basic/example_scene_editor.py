@@ -22,6 +22,7 @@ class Example(SceneEditor):
     def create_parser():
         """Expose the same scene options to the CLI and workspace example browser."""
         parser = newton.examples.create_parser()
+        parser.set_defaults(paused=True)
         parser.add_argument(
             "--solver",
             choices=[solver.value for solver in SceneEditor.Solver],

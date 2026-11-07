@@ -356,21 +356,33 @@ class ViewerWorkspace:
         if self.model is None:
             return
         bindings = self.bindings
+        selection = None
         if self.tree is not None and self.tree.bindings is not bindings:
             previous = self.tree.bindings
             if previous.solver is not bindings.solver or previous.collision_pipelines(
                 self.model
             ) != bindings.collision_pipelines(self.model):
+                selection = sorted(
+                    (
+                        key
+                        for key in self.selection
+                        if key[0] in (*self.tree.kinds, "root", "group", "particle", "tri", "tet")
+                    ),
+                    key=lambda key: (key == self.selected, key[0], repr(key[1])),
+                )
                 self.tree.resources.bvhs.close(self.viewer)
                 self.tree = None
-                self.select(None)
             else:
                 self.tree.bindings = self.tree.resources.bvhs.bindings = bindings
         if self.tree is None:
-            self.tree = ModelTree(self.model, example=self.example, bindings=bindings)
+            self.tree = ModelTree(self.model, world=getattr(self, "world", 0), example=self.example, bindings=bindings)
             for name, value in getattr(self, "_bvh_options", {}).items():
                 setattr(self.tree.resources.bvhs, name, value)
         self.collision.attach(self.tree)
+        if selection is not None:
+            self.select(selection[0] if selection else None)
+            for key in selection[1:]:
+                self.select(key, toggle=True)
 
     def select(self, key: TreeKey | None, *, toggle: bool = False, extend: bool = False) -> None:
         """Replace, toggle, extend, or clear selection and invalidate selection-dependent state.

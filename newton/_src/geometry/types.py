@@ -261,6 +261,7 @@ class Mesh:
         self._canonical_ids = None
         self._collision_edges: np.ndarray | None = None
         self._is_watertight: bool | None = None
+        self._boundary_flags: tuple[tuple[int, int], np.ndarray] | None = None
         self.sdf = sdf
 
         if compute_inertia:
@@ -1196,6 +1197,7 @@ class Mesh:
         self._canonical_ids = None
         self._collision_edges = None
         self._is_watertight = None
+        self._boundary_flags = None
         self._finalized_meshes = {}
 
     @property
@@ -1683,6 +1685,18 @@ class Mesh:
 
         self.mesh = mesh
         return mesh.id
+
+    def _get_boundary_flags(self, mesh: wp.Mesh) -> np.ndarray:
+        """Reuse topology while tracking edits to finalized device-side geometry."""
+        # Native Warp points may be edited and refitted independently of the
+        # host geometry. Reading their contents is much cheaper than repeating
+        # boundary/seam discovery, and also detects per-device divergence.
+        signature = hash(mesh.points.numpy().tobytes()), hash(mesh.indices.numpy().tobytes())
+        if self._boundary_flags is None or self._boundary_flags[0] != signature:
+            from .sdf_contact import compute_mesh_boundary_flags  # noqa: PLC0415
+
+            self._boundary_flags = signature, compute_mesh_boundary_flags(mesh)
+        return self._boundary_flags[1]
 
     def compute_convex_hull(self, replace: bool = False) -> "Mesh":
         """

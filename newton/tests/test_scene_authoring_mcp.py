@@ -178,6 +178,7 @@ class TestSceneAuthoringMCP(unittest.TestCase):
             )
             initial = scene.data("get_scene")
             self.assertEqual(initial["solver"], "xpbd")
+            self.assertTrue(initial["physics_ready"])
             revision, generation = initial["revision"], initial["model_generation"]
             self.assertEqual(len(initial["objects"]), 1)
             self.assertEqual(initial["objects"][0]["pose_kind"], "live_root")
@@ -423,7 +424,12 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
             viewer.gui.ui.io.set_ini_filename("")
             viewer._paused = True
             scene = _SceneSession(self, viewer, native=True, solver=solver)
-            self.assertEqual(scene.data("get_scene")["solver"], solver)
+            initial = scene.data("get_scene")
+            self.assertEqual(initial["solver"], solver)
+            self.assertEqual(initial["physics_ready"], not use_mujoco)
+            if use_mujoco:
+                self.assertIsNone(scene.editor.solver)
+                self.assertFalse(scene.editor._runtime.solver_graphs)
             history = viewer.gui.workspace.history
             history.set_recording(True)
             scene.pump()
@@ -431,6 +437,7 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
             np.testing.assert_allclose(viewer.camera.pos, (3, -4, 2))
             scene.data("set_playing", {"playing": True})
             self.assertFalse(viewer.is_paused())
+            self.assertTrue(scene.data("get_scene")["physics_ready"])
             self.assertTrue(scene.call("step_simulation", {"frames": 1}).is_error)
             scene.data("set_playing", {"playing": False})
             before = scene.editor.sim_time

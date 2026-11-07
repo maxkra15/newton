@@ -37,6 +37,8 @@ from ..sim.builder import ModelBuilder
 from ..utils.color import color_srgb_to_linear
 
 _MARKER = "newtonSceneAuthoring"
+_GROUND_FRICTION = 0.8
+_SPHERE_ROLLING_FRICTION = 0.005
 
 
 class NotAuthoringSceneError(ValueError):
@@ -597,7 +599,7 @@ def save_scene(path: str | os.PathLike, objects: Iterable) -> None:
     Nonwhite asset tint supports displayColor and scalar UsdPreviewSurface;
     connected textures and other shader graphs require white tint.
     """
-    from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
     destination = Path(path).expanduser().resolve()
     if destination.suffix.lower() not in {".usd", ".usda", ".usdc"}:
@@ -631,8 +633,8 @@ def save_scene(path: str | os.PathLike, objects: Iterable) -> None:
     UsdPhysics.CollisionAPI.Apply(floor.GetPrim())
     floor_material = UsdShade.Material.Define(stage, "/World/GroundMaterial")
     floor_physics = UsdPhysics.MaterialAPI.Apply(floor_material.GetPrim())
-    floor_physics.CreateStaticFrictionAttr(0.7)
-    floor_physics.CreateDynamicFrictionAttr(0.7)
+    floor_physics.CreateStaticFrictionAttr(_GROUND_FRICTION)
+    floor_physics.CreateDynamicFrictionAttr(_GROUND_FRICTION)
     UsdShade.MaterialBindingAPI.Apply(floor.GetPrim()).Bind(floor_material, materialPurpose="physics")
     for index, definition in enumerate(definitions):
         object_path = f"/World/Object_{index}"
@@ -670,6 +672,12 @@ def save_scene(path: str | os.PathLike, objects: Iterable) -> None:
         physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
         physics_material.CreateStaticFrictionAttr(definition["friction"])
         physics_material.CreateDynamicFrictionAttr(definition["friction"])
+        if kind == "sphere":
+            material.GetPrim().AddAppliedSchema("NewtonMaterialAPI")
+            material.GetPrim().CreateAttribute("newton:rollingFriction", Sdf.ValueTypeNames.Float).Set(
+                _SPHERE_ROLLING_FRICTION
+            )
+            prim.CreateAttribute("mjc:condim", Sdf.ValueTypeNames.Int).Set(6)
         UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, materialPurpose="physics")
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{destination.stem}-", suffix=destination.suffix, dir=destination.parent

@@ -21,6 +21,7 @@ import warp as wp
 import newton
 import newton.utils
 from newton import ModelBuilder
+from newton._src.geometry.sdf_contact import compute_mesh_boundary_flags
 from newton._src.geometry.utils import transform_points
 from newton._src.solvers.coupled.model_view import ModelView
 from newton._src.solvers.mujoco.equality import _add_equality_constraint
@@ -414,6 +415,41 @@ class TestModelMesh(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "exceeds vertex count 3"):
             mesh.finalize(device="cpu")
+
+    def test_repeated_finalization_reuses_open_mesh_topology(self):
+        """Cook shared collision topology once, and refresh it after geometry changes."""
+        mesh = newton.Mesh(
+            [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 0, 0), (1, 1, 0), (0, 1, 0)],
+            [0, 1, 2, 3, 4, 5],
+            compute_inertia=False,
+        )
+        source = ModelBuilder()
+        source.add_shape_mesh(body=-1, mesh=mesh)
+        with mock.patch(
+            "newton._src.geometry.sdf_contact.compute_mesh_boundary_flags", wraps=compute_mesh_boundary_flags
+        ) as cook:
+            first = source.finalize(device="cpu")
+            combined = ModelBuilder()
+            combined.add_builder(source)
+            combined.add_shape_sphere(body=-1, radius=0.2)
+            second = combined.finalize(device="cpu")
+            self.assertEqual(cook.call_count, 1)
+            np.testing.assert_array_equal(first._mesh_boundary_flags.numpy(), [61, 59])
+            np.testing.assert_array_equal(second._mesh_boundary_flags.numpy(), [61, 59])
+            np.testing.assert_array_equal(second._shape_mesh_boundary_start.numpy(), [0, -1])
+            points = mesh.mesh.points.numpy().copy()
+            points[3:, 0] += 10
+            mesh.mesh.points.assign(points)
+            mesh.mesh.refit()
+            moved = source.finalize(device="cpu")
+            np.testing.assert_array_equal(moved._mesh_boundary_flags.numpy(), [63, 63])
+            self.assertEqual(cook.call_count, 2)
+            np.testing.assert_array_equal(first._mesh_boundary_flags.numpy(), [61, 59])
+            mesh.indices = [0, 1, 2]
+            changed = source.finalize(device="cpu")
+            self.assertEqual(cook.call_count, 3)
+            np.testing.assert_array_equal(changed._mesh_boundary_flags.numpy(), [63])
+            np.testing.assert_array_equal(first._mesh_boundary_flags.numpy(), [61, 59])
 
     def test_compute_convex_hull_replaces_geometry_atomically(self):
         """Replace hull vertices and indices as one validated geometry update."""

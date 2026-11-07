@@ -3,8 +3,10 @@
 
 import ctypes
 import sys
+import tempfile
 import unittest
 from importlib import import_module
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -188,6 +190,97 @@ class _FakeGL:
 
 
 class TestViewerGLGetFrame(unittest.TestCase):
+    def test_model_replacement_retains_only_unchanged_geometry(self) -> None:
+        """Reuse immutable prototypes while replacing instances and release stale GL resources."""
+        try:
+            from PIL import Image
+        except ImportError as error:
+            self.skipTest(f"Texture dependency not available: {error}")
+        with wp.ScopedDevice("cpu"), tempfile.TemporaryDirectory() as directory:
+            viewer = _make_headless_viewer_gl_or_skip(self)
+            try:
+                gl = viewer.renderer.gl
+                path = Path(directory) / "color.png"
+                Image.new("RGBA", (4, 4), "red").save(path)
+                source = newton.Mesh.create_box(0.25, 0.25, 0.25, compute_inertia=False)
+                source.texture = str(path)
+
+                def model(*, sphere=False):
+                    builder = newton.ModelBuilder()
+                    builder.add_shape_mesh(-1, mesh=source)
+                    if sphere:
+                        builder.add_shape_sphere(-1, radius=0.2)
+                    return builder.finalize(device="cpu")
+
+                def prototypes():
+                    return [viewer.objects[name] for name in viewer._geometry_cache.values()]
+
+                def replace_and_release(resource):
+                    destroy = resource.destroy
+                    deleted = []
+
+                    def check_destroy():
+                        destroy()
+                        deleted.append(
+                            (
+                                bool(gl.glIsBuffer(resource.vbo)),
+                                bool(gl.glIsTexture(resource.texture_id)) if resource.texture_id is not None else False,
+                            )
+                        )
+
+                    with mock.patch.object(resource, "destroy", side_effect=check_destroy):
+                        viewer.set_model(model())
+                    self.assertEqual(deleted, [(False, False)])
+
+                viewer.set_model(model(sphere=True))
+                textured = next(mesh for mesh in prototypes() if mesh.texture_id is not None)
+                sphere = next(mesh for mesh in prototypes() if mesh.texture_id is None)
+                old_instances = tuple(viewer._shape_instances.values())
+                viewer.set_model(model(sphere=True))
+                self.assertIn(textured, prototypes())
+                self.assertIn(sphere, prototypes())
+                self.assertFalse(any(batch in old_instances for batch in viewer._shape_instances.values()))
+                self.assertTrue(gl.glIsBuffer(textured.vbo))
+                self.assertTrue(gl.glIsTexture(textured.texture_id))
+
+                replace_and_release(sphere)
+                self.assertIn(textured, prototypes())
+                # The native texture hash uses its path; changing bytes at that path must still upload.
+                Image.new("RGBA", (8, 4), "blue").save(path)
+                replace_and_release(textured)
+                replacement = prototypes()[0]
+                self.assertIsNot(replacement, textured)
+                self.assertTrue(gl.glIsTexture(replacement.texture_id))
+
+                # A new source and mutable image arrays are outside immutable-identity reuse.
+                source = source.copy()
+                replace_and_release(replacement)
+                self.assertIsNot(prototypes()[0], replacement)
+                source.texture = np.full((4, 4, 4), 255, dtype=np.uint8)
+                viewer.set_model(model())
+                mutable = prototypes()[0]
+                replace_and_release(mutable)
+                self.assertIsNot(prototypes()[0], mutable)
+                resource = prototypes()[0]
+                viewer.clear_model()
+                self.assertFalse(gl.glIsBuffer(resource.vbo))
+                self.assertFalse(gl.glIsTexture(resource.texture_id))
+                viewer.set_model(model())
+                resource = prototypes()[0]
+                close_renderer = viewer.renderer.close
+
+                def close_after_resources():
+                    self.assertFalse(gl.glIsBuffer(resource.vbo))
+                    self.assertFalse(gl.glIsTexture(resource.texture_id))
+                    close_renderer()
+
+                with mock.patch.object(viewer.renderer, "close", side_effect=close_after_resources):
+                    viewer.close()
+                viewer = None
+            finally:
+                if viewer is not None:
+                    viewer.close()
+
     def test_contact_label_leaders_ignore_pixel_rounding(self) -> None:
         """Only displaced labels add leader geometry at integer or fractional DPI."""
         with wp.ScopedDevice("cpu"):

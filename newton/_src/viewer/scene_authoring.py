@@ -34,6 +34,8 @@ from ..sim import BodyFlags, CollisionPipeline, JointType, Model, ModelBuilder, 
 from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
 from .authoring_usd import (
+    _GROUND_FRICTION,
+    _SPHERE_ROLLING_FRICTION,
     NotAuthoringSceneError,
     _asset_dependencies,
     _validate_definition,
@@ -319,6 +321,8 @@ class _Runtime:
     base_opacity: wp.array[float]
     base_friction: wp.array[float]
     observables: SolverBase.Observables | None = None
+    solver_graphs: dict[tuple, tuple[Any, tuple]] = dataclasses.field(default_factory=dict)
+    solver_warm_binding: tuple | None = None
 
 
 class SceneEditor:
@@ -923,6 +927,9 @@ class SceneEditor:
         if obj.kind == self.Shape.BOX:
             builder.add_shape_box(body, hx=x * 0.5, hy=y * 0.5, hz=z * 0.5, **common)
         elif obj.kind == self.Shape.SPHERE:
+            cfg.mu_rolling = _SPHERE_ROLLING_FRICTION
+            if self.solver_type == self.Solver.MUJOCO:
+                common["custom_attributes"] = {"mujoco:condim": 6}
             builder.add_shape_sphere(body, radius=radius, **common)
         elif obj.kind == self.Shape.CYLINDER:
             builder.add_shape_cylinder(body, radius=radius, half_height=z * 0.5, **common)
@@ -1006,7 +1013,7 @@ class SceneEditor:
             from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
 
             SolverMuJoCo.register_custom_attributes(builder)
-        builder.add_ground_plane(cfg=ModelBuilder.ShapeConfig(mu=0.7), color=(0.28, 0.31, 0.34))
+        builder.add_ground_plane(cfg=ModelBuilder.ShapeConfig(mu=_GROUND_FRICTION), color=(0.28, 0.31, 0.34))
         bindings = {}
         objects = {}
         for authored in self._objects:
@@ -1351,9 +1358,10 @@ class SceneEditor:
             self._preserve_state(old, candidate)
         self._place_candidate(candidate)
         self._collide(candidate)
-        candidate.solver, candidate.observables = self._create_solver(
-            candidate.model, candidate.contacts.rigid_contact_max
-        )
+        if self.solver_type == self.Solver.XPBD:
+            candidate.solver, candidate.observables = self._create_solver(
+                candidate.model, candidate.contacts.rigid_contact_max
+            )
         # Surface asynchronous build errors before replacing the displayed scene.
         wp.synchronize_device(self.device)
         try:
@@ -1540,19 +1548,16 @@ class SceneEditor:
                     raise RuntimeError("Rigid contact count exceeded supported indexing")
                 if count <= contacts.rigid_contact_max and not counters[2:].any():
                     if pipeline is not runtime.pipeline:
-                        replacement = (
-                            self._create_solver(runtime.model, contacts.rigid_contact_max)
-                            if self.solver_type == self.Solver.MUJOCO and runtime.solver is not None
-                            else None
-                        )
                         if runtime is self._runtime:
                             self.viewer.set_collision_pipeline(pipeline)
-                            if replacement is not None:
-                                self.viewer.set_solver(replacement[0])
+                            if self.solver_type == self.Solver.MUJOCO:
+                                self.viewer.set_solver(None)
                         previous = runtime.contacts.rigid_contact_max
                         runtime.pipeline, runtime.contacts = pipeline, contacts
-                        if replacement is not None:
-                            runtime.solver, runtime.observables = replacement
+                        if self.solver_type == self.Solver.MUJOCO:
+                            runtime.solver = runtime.observables = None
+                            runtime.solver_graphs.clear()
+                            runtime.solver_warm_binding = None
                         runtime.model.rigid_contact_max = contacts.rigid_contact_max
                         runtime.model.soft_contact_max = contacts.soft_contact_max
                         runtime.model._contact_capacity_initialized = True
@@ -1594,6 +1599,62 @@ class SceneEditor:
             raise RuntimeError(message)
         self.viewer._paused = True
 
+    def _step_solver(self, runtime: _Runtime, dt: float) -> None:
+        """Capture only the solver; validate collision and overflow outside graphs."""
+        solver = runtime.solver
+
+        def solve():
+            solver.step(
+                runtime.state_0,
+                runtime.state_1,
+                runtime.control,
+                runtime.contacts,
+                dt,
+                observables=runtime.observables,
+            )
+
+        if self.solver_type != self.Solver.MUJOCO:
+            solve()
+            return
+        arrays = tuple(
+            getattr(state, field)
+            for state in sorted((runtime.state_0, runtime.state_1), key=id)
+            for field in ("body_q", "body_qd", "body_f", "joint_q", "joint_qd")
+        ) + tuple(
+            getattr(runtime.control, field, None)
+            for field in ("joint_f", "joint_act", "joint_target_q", "joint_target_qd")
+        )
+        arrays += (
+            getattr(getattr(runtime.control, "mujoco", None), "ctrl", None),
+            getattr(runtime.observables, "overflow", None),
+        )
+        signature = (
+            id(solver),
+            id(runtime.contacts),
+            id(runtime.control),
+            id(runtime.observables),
+            dt,
+            *((id(array), array.ptr, array.shape) if array is not None else None for array in arrays),
+        )
+        references = (solver, runtime.contacts, runtime.control, runtime.observables, *arrays)
+        if runtime.solver_warm_binding is None or runtime.solver_warm_binding[0] != signature:
+            runtime.solver_graphs.clear()
+            # Warm changed bindings on one real substep before capture. Keep
+            # buffers alive and ignore the normal A/B State alternation.
+            solve()
+            runtime.solver_warm_binding = signature, references
+            return
+        key = id(runtime.state_0), id(runtime.state_1)
+        entry = runtime.solver_graphs.get(key)
+        if entry is None:
+            with wp.ScopedCapture(device=self.device, force_module_load=False) as capture:
+                solve()
+            entry = capture.graph, references
+            if len(runtime.solver_graphs) == 2:
+                del runtime.solver_graphs[next(iter(runtime.solver_graphs))]
+            runtime.solver_graphs[key] = entry
+        wp.capture_launch(entry[0])
+
     def reset_scene(self) -> None:
         """Restore the authored reset poses without rebuilding model or solver."""
         self._placement_cache = None
@@ -1621,7 +1682,7 @@ class SceneEditor:
             runtime = self._runtime
         if runtime is None:
             return
-        if runtime.solver is None:
+        if runtime.solver is None and not runtime.model.joint_count:
             self.sim_time += self.frame_dt
             return
         dt = self.frame_dt / self.sim_substeps
@@ -1633,14 +1694,17 @@ class SceneEditor:
                 self._publish(runtime)
                 self.sim_time += substep * dt
                 return
-            runtime.solver.step(
-                runtime.state_0,
-                runtime.state_1,
-                runtime.control,
-                runtime.contacts,
-                dt,
-                observables=runtime.observables,
-            )
+            if runtime.solver is None:
+                try:
+                    solver, observables = self._create_solver(runtime.model, runtime.contacts.rigid_contact_max)
+                    self.viewer.set_solver(solver)
+                except (ImportError, MemoryError, OSError, RuntimeError, TypeError, ValueError) as error:
+                    self.sim_time += substep * dt
+                    self._pause_physics(runtime, f"MuJoCo Warp could not start: {error}")
+                    return
+                runtime.solver, runtime.observables = solver, observables
+                self.solver = solver
+            self._step_solver(runtime, dt)
             if runtime.observables is not None:
                 overflow = runtime.observables.overflow.numpy()
                 if overflow.any():
@@ -1651,7 +1715,8 @@ class SceneEditor:
                     self._pause_physics(runtime, f"MuJoCo Warp capacity overflow: {overflow.tolist()}")
                     return
             runtime.state_0, runtime.state_1 = runtime.state_1, runtime.state_0
-        self._sync_coordinates(runtime)
+        if self.solver_type == self.Solver.XPBD:
+            self._sync_coordinates(runtime)
         self._publish(runtime)
         self.sim_time += self.frame_dt
 

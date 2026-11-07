@@ -14,7 +14,7 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline, JointType, Mesh, ModelBuilder, ShapeFlags
+from newton import CollisionPipeline, JointType, Mesh, ModelBuilder, ShapeFlags, eval_ik
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, ViewerNull
@@ -839,7 +839,9 @@ class TestSceneAuthoring(unittest.TestCase):
         editor.commit()
         builds = editor.rebuild_count
         self.assertEqual(editor.solver_type, SceneEditor.Solver.MUJOCO)
-        model, solver, control = editor.model, editor.solver, editor.control
+        self.assertIsNone(editor.solver)
+        self.assertFalse(editor._runtime.solver_graphs)
+        model, control = editor.model, editor.control
         states = {id(editor.state_0), id(editor.state_1)}
         arrays = {editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}
         rotation = tuple(wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.4))
@@ -847,6 +849,36 @@ class TestSceneAuthoring(unittest.TestCase):
         if plane is not None:
             editor.update_object(plane, position=(4, 0, -2), friction=0.6)
         editor.before_frame()
+        self.assertIsNone(editor.solver)
+        self.assertFalse(editor._runtime.solver_graphs)
+        # Compare the first captured frame against four real eager native substeps.
+        reference = [model.state(), model.state()]
+        for field in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(reference[0], field), getattr(editor.state_0, field))
+        reference_solver, reference_observables = editor._create_solver(model, editor.contacts.rigid_contact_max)
+        reference_pipeline = CollisionPipeline(model)
+        reference_contacts = reference_pipeline.contacts()
+        for _ in range(editor.sim_substeps):
+            reference[0].clear_forces()
+            reference_pipeline.collide(reference[0], reference_contacts)
+            reference_solver.step(
+                reference[0],
+                reference[1],
+                editor.control,
+                reference_contacts,
+                editor.frame_dt / editor.sim_substeps,
+                observables=reference_observables,
+            )
+            reference.reverse()
+        editor.step()
+        solver = editor.solver
+        self.assertIsInstance(solver, SolverMuJoCo)
+        self.assertEqual(len(editor._runtime.solver_graphs), 2)
+        for field in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            np.testing.assert_allclose(
+                getattr(editor.state_0, field).numpy(), getattr(reference[0], field).numpy(), atol=1e-6
+            )
+        graphs = {id(entry[0]) for entry in editor._runtime.solver_graphs.values()}
         body = editor.body_indices(box)[0]
         shape = np.flatnonzero(model.shape_body.numpy() == body)[0]
         geoms = solver.mjc_geom_to_newton_shape.numpy() == shape
@@ -865,7 +897,6 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertEqual({id(editor.state_0), id(editor.state_1)}, states)
         self.assertEqual({editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}, arrays)
         self.assertEqual(editor.rebuild_count, builds)
-        editor.step()
         np.testing.assert_allclose(editor.get_pose(box)[0][:2], (0.2, 0), atol=1e-6)
         self.assertGreater(editor.get_pose(box)[0][2], 2.19)
         np.testing.assert_allclose(editor.get_pose(box)[1], rotation, atol=1e-6)
@@ -888,7 +919,11 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertEqual(editor.rebuild_count, builds + 2)
         np.testing.assert_array_equal(editor.state_0.body_q.numpy()[editor.body_indices(box)[0]], before_q)
         np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[editor.body_indices(box)[0]], before_qd)
+        self.assertIsNone(editor.solver)
+        self.assertFalse(editor._runtime.solver_graphs)
+        editor.step()
         solver = editor.solver
+        graphs = {id(entry[0]) for entry in editor._runtime.solver_graphs.values()}
         solver.mjw_data.qacc_warmstart.fill_(123)
         editor.reset_scene()
         self.assertIs(editor.solver, solver)
@@ -897,6 +932,7 @@ class TestSceneAuthoring(unittest.TestCase):
         np.testing.assert_array_equal(editor.state_0.body_qd.numpy(), 0)
         editor.step()
         self.assertGreater(editor.get_pose(box)[0][2], 2.19)
+        self.assertEqual({id(entry[0]) for entry in editor._runtime.solver_graphs.values()}, graphs)
 
         # Both native contact buffers must grow while physical storage remains owned and stable.
         editor.update_object(box, position=(0, 0, 0.74), rotation=(0, 0, 0, 1))
@@ -966,11 +1002,19 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertIsNone(editor.solver)
         self.assertEqual(editor.solver_type, SceneEditor.Solver.MUJOCO)
         editor.step()
-        editor.add_primitive("box", position=(0, 0, 1))
+        sphere = editor.add_primitive("sphere", position=(0, 0, 0.25), size=(0.5, 0.5, 0.5))
         editor.before_frame()
-        editor.step()
+        self.assertIsNone(editor.solver)
+        body = editor.body_indices(sphere)[0]
+        editor.state_0.body_qd.assign(np.array([[1, 0, 0, 0, 4, 0]], dtype=np.float32))
+        eval_ik(editor.model, editor.state_0, editor.state_0.joint_q, editor.state_0.joint_qd)
+        for _ in range(240):
+            editor.step()
         self.assertIsInstance(editor.solver, SolverMuJoCo)
         self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
+        self.assertLess(editor.state_0.body_qd.numpy()[body, 0], 0.7)
+        self.assertGreater(editor.state_0.body_qd.numpy()[body, 0], 0)
+        np.testing.assert_array_equal(editor._runtime.observables.overflow.numpy(), 0)
 
     def test_empty_scene_and_invalid_values(self):
         """Keep an empty ground usable and reject invalid edits before changing the document."""

@@ -15107,15 +15107,18 @@ class ModelBuilder:
 
             # Open-boundary bits for collision meshes queried with pseudo-normal
             # signs, packed once per unique finalized mesh.
-            from ..geometry.sdf_contact import compute_mesh_boundary_flags  # noqa: PLC0415
-
             finalized_meshes = {mesh.id: mesh for mesh in mesh_keep_alive}
             boundary_chunks = []
             boundary_offset = 0
             boundary_starts = {}
             shape_mesh_boundary_start = []
-            for shape_type, source, shape_flags, mesh_properties in zip(
-                self.shape_type, geo_sources, shape_flags_list, shape_mesh_properties, strict=True
+            for shape_type, source, geo, shape_flags, mesh_properties in zip(
+                self.shape_type,
+                geo_sources,
+                generated_shape_sources,
+                shape_flags_list,
+                shape_mesh_properties,
+                strict=True,
             ):
                 start = -1
                 if (
@@ -15126,7 +15129,7 @@ class ModelBuilder:
                 ):
                     start = boundary_starts.get(source)
                     if start is None:
-                        flags = compute_mesh_boundary_flags(finalized_meshes[source])
+                        flags = geo._get_boundary_flags(finalized_meshes[source])
                         start = boundary_starts[source] = boundary_offset
                         boundary_chunks.append(flags)
                         boundary_offset += len(flags)

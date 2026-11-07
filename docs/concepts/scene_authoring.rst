@@ -34,14 +34,20 @@ choice is fixed for the editor session. The window title and authoring header
 identify the active solver. When constructing :class:`~newton.viewer.SceneEditor`
 directly, pass ``solver="mujoco"`` to select it; the class retains XPBD as its
 default for existing CPU callers. An empty or static world with no joints needs
-no solver; MuJoCo Warp is constructed when the first jointed body is committed.
+no solver. The example opens paused. MuJoCo Warp is constructed on the first
+Play or single-step after a topology commit; browsing and placement do not
+compile it. Use ``--no-paused`` to start playback at launch.
 
 MuJoCo Warp uses Newton's collision pipeline, retaining the imported mesh
 geometry instead of replacing concave meshes with MuJoCo convex hulls. Imported
 ``mjc:`` properties are registered before USD parsing. A topology commit replaces
-the owned solver alongside its model; it preserves Newton body state and
-compatible controls, while MuJoCo's warm-start and actuator activation history
-start fresh. A large asset can still pause during compilation.
+the owned model and invalidates its solver. It preserves Newton body state and
+compatible controls; the next simulation step creates a solver with fresh
+warm-start and actuator activation history. Large assets can still pause
+placement while their model and new render geometry are prepared. Unchanged
+mesh boundary topology is cached with its source geometry, and matching GL
+geometry is retained across model replacement. Geometry edits invalidate those
+caches; removing an object releases render resources no longer used.
 
 The window title identifies the source commit at launch, with ``-dirty`` for
 tracked local edits. Installed wheels show the package version. Restart the
@@ -127,8 +133,10 @@ no simulation Model is built for a preview. A native preparation failure is
 reported without terminating the viewer, and a later request can start a fresh
 worker. Closing the editor stops its owned preparation process. At a safe frame
 boundary, the editor constructs a candidate Model, States, Control,
-collision pipeline, and selected solver before adopting them. Failed compilation
-keeps the previous simulation available and displays the error. Stable authored
+and collision pipeline before adopting them. Failed model preparation keeps the
+previous simulation available and displays the error. MuJoCo compilation is
+deferred until playback; a solver failure pauses the newly authored scene and
+displays the error without replacing its visible state. Stable authored
 IDs identify objects across model replacement; compiled body indices must be
 resolved again after a commit. Matching bodies retain live state. Joint controls
 are preserved only when the source, joint type, and coordinate layout remain
@@ -165,11 +173,23 @@ to return a safe pivot position for a subsequent add. USD preview returns
 The owned runtime checks contact capacity before solving and expands collision
 buffers when dense mesh contacts exceed the initial estimate. This does not
 rebuild the model or reset Newton state. With MuJoCo Warp, contact growth also
-recreates the solver at the larger capacity. Solver overflow pauses physics
+invalidates the solver, which is recreated at the larger capacity on the next
+physics substep. Solver overflow pauses physics
 before publishing the failed step. These checks read collision counters and,
 for MuJoCo Warp, its overflow mask from the device on each substep. Pose edits
 and Reset clear solver warm-start history; friction edits notify the solver
 without rebuilding the model.
+
+MuJoCo Warp captures solver work into two CUDA graphs on the first simulated
+frame, after one real warm-up substep. Collision detection and overflow checks
+remain outside those graphs. Subsequent frames reuse the graphs; pose,
+appearance, friction and Reset edits retain them. Replacing a model, solver,
+contact buffer, control or state storage, or changing the timestep invalidates
+the captures. Graph capture never advances an extra simulation step.
+The editor ground uses sliding friction 0.8. Authored spheres also have a small
+rolling-friction length of 0.005 m; MuJoCo's six-dimensional sphere contacts
+apply this resistance without adding rolling constraints to every mesh contact.
+XPBD continues to use its native contact model.
 
 This ownership boundary is deliberate. The editor does not mutate arbitrary
 examples' private solvers or captured CUDA graphs. Solvers beyond XPBD and
@@ -292,6 +312,8 @@ quaternions. Read the observed scene revision before submitting mutations:
    * - ``get_scene``
      - Active ``solver``, paginated authored objects, root poses and their ``pose_kind``, revision,
        model generation, camera, playback state, and pending/busy/error status.
+       ``physics_ready`` indicates whether physics has been initialized for the
+       current model; a deferred solver becomes ready on Play or single-step.
    * - ``get_viewport``
      - A PNG cropped to the scene viewport, with frame, time, and scene metadata.
        ``include_ui`` returns the whole workspace instead; ``max_size`` bounds

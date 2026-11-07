@@ -94,6 +94,7 @@ class SceneEditorMCP:
             instructions=(
                 "Inspect get_scene and get_viewport before editing. Object IDs are stable; body indices are not. "
                 "get_scene identifies the selected solver: mujoco is MuJoCo Warp on CUDA; xpbd is XPBD. "
+                "physics_ready distinguishes a published scene from physics initialized by Play or an explicit step. "
                 "Positions and sizes are world Z-up metres, rotations are XYZW quaternions, mass is kilograms. "
                 "Use the observed revision for apply_edits and undo_redo. Batch edits into one request. "
                 "A pending document is not yet a compiled scene: inspect pending, busy and error until ready. "
@@ -404,11 +405,15 @@ class SceneEditorMCP:
         history = getattr(workspace, "history", None)
         camera = getattr(viewer, "camera", None)
         replaying = bool(history is not None and history.replaying)
+        runtime = editor._runtime
         return {
             "session_id": self.session_id,
             "revision": editor.revision,
             "model_generation": editor.rebuild_count,
             "solver": editor.solver_type.value,
+            "physics_ready": bool(
+                runtime is not None and (runtime.solver is not None or not runtime.model.joint_count)
+            ),
             "frame": self._frame,
             "sim_time": self._live_time if replaying else editor.sim_time,
             "display_time": history.frames[history.index].time if replaying else editor.sim_time,

@@ -20,6 +20,7 @@ from newton._src.viewer.gui.viewer_gui import ViewerGui
 from newton.examples.basic.example_scene_editor import Example
 from newton.tests import test_viewer_assets
 from newton.tests.test_viewer_get_frame import _make_headless_viewer_gl_or_skip
+from newton.tests.unittest_utils import get_cuda_test_devices
 
 
 class TestSceneAuthoringUI(unittest.TestCase):
@@ -32,6 +33,7 @@ class TestSceneAuthoringUI(unittest.TestCase):
 
         previous_context = imgui.get_current_context()
         context = imgui.create_context()
+        imgui.set_current_context(context)
 
         def restore_context():
             imgui.destroy_context(context)
@@ -39,13 +41,18 @@ class TestSceneAuthoringUI(unittest.TestCase):
                 imgui.set_current_context(previous_context)
 
         self.addCleanup(restore_context)
-        with wp.ScopedDevice("cpu"):
+        devices = get_cuda_test_devices()[:1]
+        mujoco = bool(devices) and all(importlib.util.find_spec(name) for name in ("mujoco", "mujoco_warp"))
+        with wp.ScopedDevice(devices[0] if mujoco else "cpu"):
             viewer = _make_headless_viewer_gl_or_skip(self, width=1280, height=900)
             self.addCleanup(viewer.close)
+            viewer._paused = True
             viewer.gui = ViewerGui(viewer, viewer.renderer.window, workspace_enabled=True)
             self.assertTrue(viewer.gui.is_available)
             viewer.gui.ui.io.set_ini_filename("")
-            editor = Example(viewer, Example.create_parser().parse_args(["--empty", "--solver", "xpbd"]))
+            editor = Example(
+                viewer, Example.create_parser().parse_args(["--empty", "--solver", "mujoco" if mujoco else "xpbd"])
+            )
             self.addCleanup(editor.close)
             editor.add_primitive("box", position=(-1, 0, 1))
             editor.commit()
@@ -122,11 +129,12 @@ class TestSceneAuthoringUI(unittest.TestCase):
             viewer.show_ground = True
 
             initial_count, initial_builds, initial_model = len(editor.objects), editor.rebuild_count, editor.model
-            # Fixed window dimensions and a fresh ImGui context make the first
-            # palette card stable. All input goes through ImGui's real queue.
-            mouse(74, 210)
-            mouse(74, 210, True)
-            mouse(90, 215)
+            # Fixed dimensions keep the sphere card stable. A held preview
+            # must not compile the physical scene or its solver.
+            solver = editor.solver
+            mouse(210, 210)
+            mouse(210, 210, True)
+            mouse(225, 215)
             x, y, width, height = workspace.rect
             target = x + width * 0.45, y + height * 0.5
             mouse(*target)
@@ -134,11 +142,40 @@ class TestSceneAuthoringUI(unittest.TestCase):
             self.assertEqual(len(editor.objects), initial_count)
             self.assertEqual(editor.rebuild_count, initial_builds)
             self.assertIs(editor.model, initial_model)
+            self.assertIs(editor.solver, solver)
+            self.assertFalse(editor._runtime.solver_graphs)
             mouse(*target, False)
             render(4)
             self.assertEqual(len(editor.objects), initial_count + 1)
             self.assertEqual(editor.rebuild_count, initial_builds + 1)
             self.assertIs(workspace.authoring, panel)
+            self.assertEqual(editor.objects[-1].kind, editor.Shape.SPHERE)
+            self.assertFalse(editor._runtime.solver_graphs)
+            if mujoco:
+                self.assertIsNone(editor.solver)
+
+            # Next is an explicit physics request while paused. Its first
+            # solver binding refresh must keep the selected authored object.
+            selected_id, selected_key = editor.selected_id, workspace.selected
+            before = editor.sim_time
+            viewer._step_requested = True
+            render(simulate=True)
+            workspace._ensure_tree()
+            render(2)
+            self.assertTrue(viewer.is_paused())
+            self.assertAlmostEqual(editor.sim_time - before, editor.frame_dt)
+            self.assertIsNotNone(editor.solver)
+            self.assertIs(workspace.tree.bindings.solver, editor.solver)
+            self.assertEqual(editor.selected_id, selected_id)
+            self.assertEqual(workspace.selected, selected_key)
+            if mujoco:
+                graphs = {key: id(value[0]) for key, value in editor._runtime.solver_graphs.items()}
+                self.assertTrue(graphs)
+                self.assertLessEqual(len(graphs), 2)
+                render(3)
+                viewer._step_requested = True
+                render(simulate=True)
+                self.assertEqual({key: id(value[0]) for key, value in editor._runtime.solver_graphs.items()}, graphs)
 
             click(94, 94)  # Undo from the authoring toolbar.
             self.assertEqual(len(editor.objects), initial_count)
@@ -165,9 +202,24 @@ class TestSceneAuthoringUI(unittest.TestCase):
             editor.select(edited.id)
             render(4)
             builds = editor.rebuild_count
-            mouse(1020, 358)
-            mouse(1020, 358, True)
-            mouse(1045, 358)
+            diameter_position = None
+            number = panel.widgets.number
+
+            def capture_diameter(label, *args, **kwargs):
+                nonlocal diameter_position
+                edit = number(label, *args, **kwargs)
+                if label == "Diameter":
+                    lo, hi = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+                    diameter_position = ((lo.x + hi.x) / 2, (lo.y + hi.y) / 2)
+                return edit
+
+            with mock.patch.object(panel.widgets, "number", capture_diameter):
+                render()
+            self.assertIsNotNone(diameter_position)
+            dx, dy = diameter_position
+            mouse(dx, dy)
+            mouse(dx, dy, True)
+            mouse(dx - 25, dy)
             render(2)
             self.assertNotEqual(editor.get_object(edited.id).size, edited.size)
             self.assertEqual(editor.rebuild_count, builds)
@@ -184,6 +236,7 @@ class TestSceneAuthoringUI(unittest.TestCase):
             # rather than publishing only one edit before releasing the mouse.
             workspace.history.set_recording(True)
             workspace.history.playback_speed = 2.0
+            viewer._step_requested = True
             render(simulate=True)
             self.assertTrue(workspace.history.frames)
             original = editor.get_object(edited.id)
@@ -197,7 +250,7 @@ class TestSceneAuthoringUI(unittest.TestCase):
             self.assertTrue(panel._gizmo_active)
             self.assertTrue(viewer.is_paused())
             model, builds = editor.model, editor.rebuild_count
-            last_z = original.position[2]
+            last_z = editor.get_pose(edited.id)[0][2]
             deadline = time.monotonic() + 2.1
             moved = 0
             while time.monotonic() < deadline:

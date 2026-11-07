@@ -11,6 +11,7 @@ import warnings
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from importlib import metadata
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -277,6 +278,7 @@ class ViewerGL(ViewerBase):
         self._displayed_frame = FrameCache()
         self._ui_capture_frame = FrameCache()
         self._has_rendered_frame = False
+        self._model_geometry_stash: dict[tuple, MeshGL] = {}
 
         super().__init__()
         self.show_contact_pairs = True
@@ -664,7 +666,20 @@ class ViewerGL(ViewerBase):
             # another device scope. Nothing is loaded from the per-frame path.
             self.gui.preload_kernels(model.device)
 
-        super().set_model(model)
+        retained = {}
+        if model is not None and self.model is not None and model.device == self.device:
+            for name in set(self._geometry_cache.values()):
+                mesh = self.objects.get(name)
+                token = getattr(mesh, "_model_geometry_token", None)
+                if isinstance(mesh, MeshGL) and not mesh.dynamic and token is not None:
+                    retained[token] = self.objects.pop(name)
+        self._model_geometry_stash = retained
+        try:
+            super().set_model(model)
+        finally:
+            self._model_geometry_stash = {}
+            for mesh in retained.values():
+                mesh.destroy()
 
         if self.gui is not None:
             # Reading shape_flags back from the device belongs here, not in the
@@ -965,6 +980,45 @@ class ViewerGL(ViewerBase):
         if yaw is not None:
             self.camera.yaw = (yaw + 180.0) % 360.0 - 180.0
         self.camera.sync_pivot_to_view()
+
+    @override
+    def log_geo(self, name, geo_type, geo_scale, geo_thickness, geo_is_solid, geo_src=None, hidden=False):
+        token = self._geometry_reuse_token(geo_type, geo_scale, geo_thickness, geo_is_solid, geo_src)
+        name = self._qualify(name)
+        mesh = getattr(self, "_model_geometry_stash", {}).pop(token, None) if token is not None else None
+        if mesh is not None:
+            mesh.hidden = hidden
+            self.objects[name] = mesh
+            return
+        super().log_geo(name, geo_type, geo_scale, geo_thickness, geo_is_solid, geo_src, hidden)
+        if token is not None and isinstance(self.objects.get(name), MeshGL):
+            self.objects[name]._model_geometry_token = token
+
+    def _geometry_reuse_token(self, geo_type, geo_scale, thickness, is_solid, source):
+        """Identify immutable prototypes; texture hashes alone do not track file changes."""
+        texture_stamp = None
+        if geo_type in (nt.GeoType.MESH, nt.GeoType.CONVEX_MESH) and isinstance(source, nt.Mesh):
+            texture = source.texture
+            if texture is not None:
+                if not isinstance(texture, str) or "://" in texture:
+                    return None
+                try:
+                    # USD package members share their containing archive's lifetime.
+                    stat = Path(texture.split("[", 1)[0]).stat()
+                except OSError:
+                    return None
+                texture_stamp = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+        elif geo_type not in (
+            nt.GeoType.PLANE,
+            nt.GeoType.SPHERE,
+            nt.GeoType.CAPSULE,
+            nt.GeoType.CYLINDER,
+            nt.GeoType.CONE,
+            nt.GeoType.BOX,
+            nt.GeoType.ELLIPSOID,
+        ):
+            return None
+        return self._hash_geometry(geo_type, geo_scale, thickness, is_solid, source), id(source), texture_stamp
 
     @override
     def log_mesh(
@@ -1558,6 +1612,10 @@ class ViewerGL(ViewerBase):
             if not isinstance(obj, MeshInstancerGL) and hasattr(obj, "destroy"):
                 destroy_once(obj)
         objects.clear()
+        stash = getattr(self, "_model_geometry_stash", {})
+        for mesh in stash.values():
+            destroy_once(mesh)
+        stash.clear()
 
         for collection_name in ("lines", "arrows"):
             collection = getattr(self, collection_name, {})

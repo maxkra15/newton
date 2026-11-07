@@ -113,7 +113,7 @@ class TestAuthoringUsd(unittest.TestCase):
             self.assertEqual(builder.shape_body[ground], -1)
             self.assertEqual(builder.shape_type[ground], newton.GeoType.PLANE)
             np.testing.assert_allclose(builder.shape_scale[ground], (0.0, 0.0, 0.0))
-            self.assertAlmostEqual(builder.shape_material_mu[ground], 0.7, places=6)
+            self.assertAlmostEqual(builder.shape_material_mu[ground], 0.8, places=6)
             np.testing.assert_allclose(
                 [value for index, value in enumerate(builder.shape_material_mu) if index != ground], [0.42] * 4
             )
@@ -126,6 +126,12 @@ class TestAuthoringUsd(unittest.TestCase):
             np.testing.assert_allclose(lower, (0, -1, -1), atol=1e-6)
             np.testing.assert_allclose(upper, (5, 3, 5), atol=1e-6)
             sphere_shape = builder.shape_label.index("/World/Object_1/Geometry")
+            self.assertAlmostEqual(builder.shape_material_mu_rolling[sphere_shape], 0.005, places=6)
+            self.assertEqual(stage.GetPrimAtPath("/World/Object_1/Geometry").GetAttribute("mjc:condim").Get(), 6)
+            mujoco = prepare_usd(str(path), mujoco=True)
+            sphere = mujoco.shape_label.index("/World/Object_1/Geometry")
+            self.assertEqual(mujoco.custom_attributes["mujoco:condim"].values[sphere], 6)
+            self.assertAlmostEqual(mujoco.shape_material_mu_rolling[sphere], 0.005, places=6)
             builder.shape_margin[sphere_shape] = 0.2
             lower, upper = template_bounds(builder)
             np.testing.assert_allclose(lower, (0, -1.2, -1.2), atol=1e-6)
