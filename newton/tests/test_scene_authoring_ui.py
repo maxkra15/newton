@@ -45,7 +45,7 @@ class TestSceneAuthoringUI(unittest.TestCase):
             viewer.gui = ViewerGui(viewer, viewer.renderer.window, workspace_enabled=True)
             self.assertTrue(viewer.gui.is_available)
             viewer.gui.ui.io.set_ini_filename("")
-            editor = Example(viewer, Example.create_parser().parse_args(["--empty"]))
+            editor = Example(viewer, Example.create_parser().parse_args(["--empty", "--solver", "xpbd"]))
             self.addCleanup(editor.close)
             editor.add_primitive("box", position=(-1, 0, 1))
             editor.commit()

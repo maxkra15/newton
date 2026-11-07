@@ -30,7 +30,7 @@ from ..geometry.bvh import (
     compute_shape_bounds,
     compute_sphere_bounds,
 )
-from ..sim import BodyFlags, CollisionPipeline, JointType, ModelBuilder, eval_ik
+from ..sim import BodyFlags, CollisionPipeline, JointType, Model, ModelBuilder, ModelFlags, eval_ik
 from ..sim.collide import compute_shape_aabbs
 from ..solvers.xpbd import SolverXPBD
 from .authoring_usd import (
@@ -44,7 +44,8 @@ from .authoring_usd import (
 )
 
 if TYPE_CHECKING:
-    from ..sim import Contacts, Control, Model, State
+    from ..sim import Contacts, Control, State
+    from ..solvers.solver import SolverBase
     from .viewer import ViewerBase
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ def _init_asset_worker() -> None:
     wp.set_device("cpu")
 
 
-def _prepare_asset_payload(source: str, size: tuple) -> bytes:
+def _prepare_asset_payload(source: str, size: tuple, mujoco: bool = False) -> bytes:
     try:
         from pxr import Sdf
 
@@ -168,7 +169,15 @@ def _prepare_asset_payload(source: str, size: tuple) -> bytes:
             layer = Sdf.Layer.Find(path)
             if layer is not None:
                 layer.Reload()
-        template = SceneEditor._prepare_template(source, size)
+        template = SceneEditor._prepare_template(source, size, mujoco=mujoco)
+        # Parsing is complete. Local importer callbacks are not pickleable;
+        # retain values and reference remappers needed by native add_builder.
+        template.builder.custom_attributes = {
+            key: dataclasses.replace(
+                attribute, usd_value_transformer=None, mjcf_value_transformer=None, urdf_value_transformer=None
+            )
+            for key, attribute in template.builder.custom_attributes.items()
+        }
         buffer = io.BytesIO()
         _TemplatePickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(template)
         return buffer.getvalue()
@@ -301,7 +310,7 @@ class _Runtime:
     state_0: State
     state_1: State
     control: Control
-    solver: SolverXPBD
+    solver: SolverBase | None
     pipeline: CollisionPipeline
     contacts: Contacts
     bindings: dict[str, _Binding]
@@ -309,13 +318,14 @@ class _Runtime:
     base_colors: wp.array[wp.vec3]
     base_opacity: wp.array[float]
     base_friction: wp.array[float]
+    observables: SolverBase.Observables | None = None
 
 
 class SceneEditor:
     """Author a rigid scene while owning its simulation and compiled resources.
 
-    This entire class is **experimental**. It is an opt-in XPBD scene host,
-    rather than a way to mutate another application's private solver or graphs.
+    This entire class is **experimental**. It owns an XPBD or CUDA-only MuJoCo
+    Warp scene, rather than mutating another application's solver or graphs.
     Positions and dimensions use metres, rotations use XYZW quaternions, and
     masses use kilograms. Pose, color, visibility, and friction edits retain
     Model/State storage. Add/remove, geometry, mass, and motion-type changes
@@ -326,6 +336,12 @@ class SceneEditor:
     standard OpenUSD geometry and physics schemas. USD conversion is optional
     and loaded only when importing/exporting an asset.
     """
+
+    class Solver(enum.Enum):
+        """Physics backends supported by the experimental authoring scene."""
+
+        XPBD = "xpbd"
+        MUJOCO = "mujoco"
 
     class Shape(enum.Enum):
         """Geometry categories supported by the experimental authoring scene."""
@@ -367,15 +383,25 @@ class SceneEditor:
         overrides: tuple[str, ...] = ()
         """Explicit USD mass, friction, or dynamic overrides; otherwise retain native values."""
 
-    def __init__(self, viewer: ViewerBase, *, device: str | wp.Device | None = None) -> None:
+    def __init__(
+        self,
+        viewer: ViewerBase,
+        *,
+        device: str | wp.Device | None = None,
+        solver: Solver | str = Solver.XPBD,
+    ) -> None:
         """Create an empty document without compiling a model or starting network work.
 
         Args:
             viewer: Viewer receiving the owned model, state, and interaction forces.
             device: Simulation device; defaults to the current Warp device.
+            solver: Fixed physics backend. MuJoCo Warp requires CUDA.
         """
         self.viewer = viewer
         self.device = wp.get_device(device)
+        self._solver_type = self.Solver(solver)
+        if self._solver_type == self.Solver.MUJOCO and not self.device.is_cuda:
+            raise ValueError("MuJoCo Warp scene authoring requires a CUDA device; use solver='xpbd' for CPU simulation")
         self.scene_editor = self
         self.frame_dt = 1.0 / 60.0
         self.sim_time = 0.0
@@ -411,6 +437,11 @@ class SceneEditor:
         self._preview_error: tuple | None = None
         self._placement_result = None
         self._placement_cache = None
+
+    @property
+    def solver_type(self) -> Solver:
+        """Return the fixed physics backend selected when the editor was created."""
+        return self._solver_type
 
     @property
     def objects(self) -> tuple[Object, ...]:
@@ -696,11 +727,11 @@ class SceneEditor:
         return key
 
     @staticmethod
-    def _prepare_template(source: str, size: tuple) -> _AssetTemplate:
+    def _prepare_template(source: str, size: tuple, *, mujoco: bool = False) -> _AssetTemplate:
         logger.info("Preparing USD asset %s", source)
         with wp.ScopedDevice("cpu"):
             dependencies = _dependency_snapshot(_asset_dependencies(source))
-            builder = prepare_usd(source, scale=size)
+            builder = prepare_usd(source, scale=size, mujoco=mujoco)
             template = _AssetTemplate(builder, template_bounds(builder), dependencies)
             if not _template_is_current(template):
                 raise ValueError("USD dependencies changed during preparation; retry the import")
@@ -727,11 +758,15 @@ class SceneEditor:
         if self._executor is None:
             self._executor = self._create_preparation_executor()
         try:
-            self._preparing[key] = self._executor.submit(_prepare_asset_payload, obj.source, obj.size)
+            self._preparing[key] = self._executor.submit(
+                _prepare_asset_payload, obj.source, obj.size, self.solver_type == self.Solver.MUJOCO
+            )
         except BrokenProcessPool:
             self._close_preparation_executor()
             self._executor = self._create_preparation_executor()
-            self._preparing[key] = self._executor.submit(_prepare_asset_payload, obj.source, obj.size)
+            self._preparing[key] = self._executor.submit(
+                _prepare_asset_payload, obj.source, obj.size, self.solver_type == self.Solver.MUJOCO
+            )
         return key
 
     @staticmethod
@@ -903,6 +938,14 @@ class SceneEditor:
         if not template.body_count:
             if not template.shape_count:
                 raise ValueError("The USD asset contains no supported rigid geometry")
+            if self.solver_type == self.Solver.MUJOCO and not obj.dynamic:
+                start_shape = builder.shape_count
+                builder.add_builder(
+                    template, xform=wp.transform(obj.position, obj.rotation), label_prefix=f"objects/{obj.id}/"
+                )
+                for index in range(start_shape, builder.shape_count):
+                    builder.shape_flags[index] |= int(ShapeFlags.COLLIDE_SHAPES)
+                return obj
             body = builder.add_body(
                 xform=wp.transform(obj.position, obj.rotation),
                 label=f"objects/{obj.id}/body",
@@ -928,6 +971,11 @@ class SceneEditor:
                     color=template.shape_color[index],
                     opacity=template.shape_opacity[index],
                     label=f"objects/{obj.id}/shape_{index}",
+                    custom_attributes={
+                        key: attribute.values[index]
+                        for key, attribute in template.custom_attributes.items()
+                        if attribute.frequency == Model.AttributeFrequency.SHAPE and index in attribute.values
+                    },
                 )
             mass = builder.body_mass[body]
             if mass <= 0:
@@ -954,6 +1002,10 @@ class SceneEditor:
 
     def _build(self) -> _Runtime:
         builder = ModelBuilder()
+        if self.solver_type == self.Solver.MUJOCO:
+            from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+            SolverMuJoCo.register_custom_attributes(builder)
         builder.add_ground_plane(cfg=ModelBuilder.ShapeConfig(mu=0.7), color=(0.28, 0.31, 0.34))
         bindings = {}
         objects = {}
@@ -982,7 +1034,7 @@ class SceneEditor:
             model.state(),
             model.state(),
             model.control(),
-            SolverXPBD(model, iterations=8),
+            None,
             None,
             None,
             bindings,
@@ -996,6 +1048,24 @@ class SceneEditor:
         for obj in objects.values():
             self._apply_appearance(runtime, obj)
         return runtime
+
+    def _create_solver(self, model: Model, contact_max: int) -> tuple[SolverBase | None, SolverBase.Observables | None]:
+        if self.solver_type == self.Solver.XPBD:
+            return SolverXPBD(model, iterations=8), None
+        # MuJoCo requires a joint; static-only scenes need no solver.
+        if not model.joint_count:
+            return None, None
+        from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        solver = SolverMuJoCo(
+            model,
+            use_mujoco_contacts=False,
+            integrator="implicitfast",
+            nconmax=contact_max,
+            strict_capacity=True,
+            kinematic_switchable_roots=False,
+        )
+        return solver, solver.observables({solver.ObservableKind.OVERFLOW})
 
     def _preserve_state(self, old: _Runtime, new: _Runtime) -> None:
         labels = {label: index for index, label in enumerate(old.model.body_label)}
@@ -1232,7 +1302,6 @@ class SceneEditor:
             occupied[rows] = colliding[rows]
         self._sync_coordinates(runtime)
         eval_ik(model, model, model.joint_q, model.joint_qd)
-        self._collide(runtime)
 
     def _resolve_placement_history(self, runtime: _Runtime) -> None:
         # Pending additions can appear in later undo snapshots before a batch
@@ -1281,6 +1350,10 @@ class SceneEditor:
         if old is not None:
             self._preserve_state(old, candidate)
         self._place_candidate(candidate)
+        self._collide(candidate)
+        candidate.solver, candidate.observables = self._create_solver(
+            candidate.model, candidate.contacts.rigid_contact_max
+        )
         # Surface asynchronous build errors before replacing the displayed scene.
         wp.synchronize_device(self.device)
         try:
@@ -1364,6 +1437,8 @@ class SceneEditor:
             return
         current = {obj.id: obj for obj in self._objects}
         moved = False
+        changed = 0
+        world_shapes = runtime.model.body_shapes.get(-1, ())
         for object_id, previous in list(self._fast_pending.items()):
             if object_id not in current or object_id not in runtime.bindings:
                 continue
@@ -1398,6 +1473,8 @@ class SceneEditor:
                         device=self.device,
                     )
                 start, end = binding.shapes
+                if any(start <= shape < end for shape in world_shapes):
+                    changed |= ModelFlags.SHAPE_PROPERTIES
                 if end > start:
                     wp.launch(
                         _move_world_shapes,
@@ -1407,6 +1484,8 @@ class SceneEditor:
                     )
                 start, end = binding.joints
                 if end > start:
+                    if not binding.follows_body:
+                        changed |= ModelFlags.JOINT_PROPERTIES
                     wp.launch(
                         _move_world_anchors,
                         end - start,
@@ -1426,11 +1505,21 @@ class SceneEditor:
                 previous.overrides,
             ):
                 self._apply_appearance(runtime, obj)
+                if (obj.friction, "friction" in obj.overrides) != (
+                    previous.friction,
+                    "friction" in previous.overrides,
+                ):
+                    changed |= ModelFlags.SHAPE_PROPERTIES
             runtime.objects[object_id] = obj
         if moved:
             self._sync_coordinates(runtime)
             eval_ik(runtime.model, runtime.model, runtime.model.joint_q, runtime.model.joint_qd)
+        if self.solver_type == self.Solver.MUJOCO and runtime.solver is not None and changed:
+            runtime.solver.notify_model_changed(changed)
+        if moved:
             self._collide(runtime)
+            if runtime.solver is not None:
+                runtime.solver.reset(runtime.state_0, flags=0)
         self._fast_pending.clear()
         # Previous snapshots use the old authored poses and materials. Drop
         # them without clearing the selection or interrupting a held gizmo.
@@ -1451,15 +1540,25 @@ class SceneEditor:
                     raise RuntimeError("Rigid contact count exceeded supported indexing")
                 if count <= contacts.rigid_contact_max and not counters[2:].any():
                     if pipeline is not runtime.pipeline:
+                        replacement = (
+                            self._create_solver(runtime.model, contacts.rigid_contact_max)
+                            if self.solver_type == self.Solver.MUJOCO and runtime.solver is not None
+                            else None
+                        )
                         if runtime is self._runtime:
                             self.viewer.set_collision_pipeline(pipeline)
+                            if replacement is not None:
+                                self.viewer.set_solver(replacement[0])
                         previous = runtime.contacts.rigid_contact_max
                         runtime.pipeline, runtime.contacts = pipeline, contacts
+                        if replacement is not None:
+                            runtime.solver, runtime.observables = replacement
                         runtime.model.rigid_contact_max = contacts.rigid_contact_max
                         runtime.model.soft_contact_max = contacts.soft_contact_max
                         runtime.model._contact_capacity_initialized = True
                         if runtime is self._runtime:
                             self.collision_pipeline, self.contacts = pipeline, contacts
+                            self.solver = runtime.solver
                         logger.warning(
                             "Expanded rigid contact capacity from %d to %d; retained all %d contacts",
                             previous,
@@ -1482,15 +1581,18 @@ class SceneEditor:
             message = f"Contact detection could not produce a complete buffer: {error}"
             if runtime is not self._runtime:
                 raise RuntimeError(message) from error
-            self.error = message
-            self.status = "Physics paused; the current scene is retained."
-            # An overflowing count must not reach display kernels either.
-            runtime.contacts.contact_counters.zero_()
-            logger.error(message)
-            if not hasattr(self.viewer, "_paused"):
-                raise RuntimeError(message) from error
-            self.viewer._paused = True
+            self._pause_physics(runtime, message)
         return False
+
+    def _pause_physics(self, runtime: _Runtime, message: str) -> None:
+        self.error = message
+        self.status = "Physics paused; the current scene is retained."
+        # An overflowing count must not reach display kernels either.
+        runtime.contacts.contact_counters.zero_()
+        logger.error("%s", message)
+        if not hasattr(self.viewer, "_paused"):
+            raise RuntimeError(message)
+        self.viewer._paused = True
 
     def reset_scene(self) -> None:
         """Restore the authored reset poses without rebuilding model or solver."""
@@ -1503,6 +1605,8 @@ class SceneEditor:
                     state.body_qd.zero_()
                     state.body_f.zero_()
             self._sync_coordinates(runtime)
+            if runtime.solver is not None:
+                runtime.solver.reset(runtime.state_0, flags=0)
             self._collide(runtime)
             self.sim_time = 0.0
             workspace = getattr(getattr(self.viewer, "gui", None), "workspace", None)
@@ -1510,12 +1614,15 @@ class SceneEditor:
                 workspace.reset_history()
 
     def step(self) -> None:
-        """Step owned XPBD physics; topology never changes during these launches."""
+        """Step owned physics; topology never changes during these launches."""
         runtime = self._runtime
         if runtime is None:
             self.before_frame()
             runtime = self._runtime
         if runtime is None:
+            return
+        if runtime.solver is None:
+            self.sim_time += self.frame_dt
             return
         dt = self.frame_dt / self.sim_substeps
         for substep in range(self.sim_substeps):
@@ -1526,7 +1633,23 @@ class SceneEditor:
                 self._publish(runtime)
                 self.sim_time += substep * dt
                 return
-            runtime.solver.step(runtime.state_0, runtime.state_1, runtime.control, runtime.contacts, dt)
+            runtime.solver.step(
+                runtime.state_0,
+                runtime.state_1,
+                runtime.control,
+                runtime.contacts,
+                dt,
+                observables=runtime.observables,
+            )
+            if runtime.observables is not None:
+                overflow = runtime.observables.overflow.numpy()
+                if overflow.any():
+                    runtime.solver.reset(runtime.state_0, flags=0)
+                    self._sync_coordinates(runtime)
+                    self._publish(runtime)
+                    self.sim_time += substep * dt
+                    self._pause_physics(runtime, f"MuJoCo Warp capacity overflow: {overflow.tolist()}")
+                    return
             runtime.state_0, runtime.state_1 = runtime.state_1, runtime.state_0
         self._sync_coordinates(runtime)
         self._publish(runtime)

@@ -11,8 +11,10 @@ Scene Authoring
    :class:`newton.viewer.SceneEditor` and the ``scene_editor`` application are
    experimental. Their authoring API and saved editor metadata may change.
 
-The scene editor combines the Newton workspace with an explicitly owned XPBD
-simulation. Added objects participate in physics. It supports rigid primitives
+The scene editor combines the Newton workspace with an explicitly owned
+simulation. The example uses MuJoCo Warp on CUDA by default; XPBD remains
+available on CPU and CUDA and remains the default on CPU. Added objects
+participate in physics. It supports rigid primitives
 and local USD assets, including packages browsed from NVIDIA's SimReady catalog.
 
 Launch and edit
@@ -25,6 +27,21 @@ The ``examples`` extra includes the native viewer and USD import dependencies:
    uv run --extra examples -m newton.examples scene_editor
    uv run --extra examples -m newton.examples scene_editor --empty
    uv run --extra examples -m newton.examples scene_editor --scene scene.usda
+   uv run --extra examples -m newton.examples scene_editor --solver xpbd --device cpu
+
+``--solver mujoco`` selects MuJoCo Warp and requires a CUDA device. The solver
+choice is fixed for the editor session. The window title and authoring header
+identify the active solver. When constructing :class:`~newton.viewer.SceneEditor`
+directly, pass ``solver="mujoco"`` to select it; the class retains XPBD as its
+default for existing CPU callers. An empty or static world with no joints needs
+no solver; MuJoCo Warp is constructed when the first jointed body is committed.
+
+MuJoCo Warp uses Newton's collision pipeline, retaining the imported mesh
+geometry instead of replacing concave meshes with MuJoCo convex hulls. Imported
+``mjc:`` properties are registered before USD parsing. A topology commit replaces
+the owned solver alongside its model; it preserves Newton body state and
+compatible controls, while MuJoCo's warm-start and actuator activation history
+start fresh. A large asset can still pause during compilation.
 
 The window title identifies the source commit at launch, with ``-dirty`` for
 tracked local edits. Installed wheels show the package version. Restart the
@@ -110,7 +127,7 @@ no simulation Model is built for a preview. A native preparation failure is
 reported without terminating the viewer, and a later request can start a fresh
 worker. Closing the editor stops its owned preparation process. At a safe frame
 boundary, the editor constructs a candidate Model, States, Control,
-collision pipeline, and XPBD solver before adopting them. Failed compilation
+collision pipeline, and selected solver before adopting them. Failed compilation
 keeps the previous simulation available and displays the error. Stable authored
 IDs identify objects across model replacement; compiled body indices must be
 resolved again after a commit. Matching bodies retain live state. Joint controls
@@ -147,11 +164,16 @@ to return a safe pivot position for a subsequent add. USD preview returns
 
 The owned runtime checks contact capacity before solving and expands collision
 buffers when dense mesh contacts exceed the initial estimate. This does not
-rebuild the model or reset physics. The check reads contact counters from the
-device on each collision pass.
+rebuild the model or reset Newton state. With MuJoCo Warp, contact growth also
+recreates the solver at the larger capacity. Solver overflow pauses physics
+before publishing the failed step. These checks read collision counters and,
+for MuJoCo Warp, its overflow mask from the device on each substep. Pose edits
+and Reset clear solver warm-start history; friction edits notify the solver
+without rebuilding the model.
 
 This ownership boundary is deliberate. The editor does not mutate arbitrary
-examples' private solvers or captured CUDA graphs. Other solvers, replicated
+examples' private solvers or captured CUDA graphs. Solvers beyond XPBD and
+MuJoCo Warp, replicated
 training environments, deformable authoring, and editing an existing Isaac Lab
 simulation are outside this application's supported scope.
 
@@ -268,7 +290,7 @@ quaternions. Read the observed scene revision before submitting mutations:
    * - Tool
      - Behavior
    * - ``get_scene``
-     - Paginated authored objects, root poses and their ``pose_kind``, revision,
+     - Active ``solver``, paginated authored objects, root poses and their ``pose_kind``, revision,
        model generation, camera, playback state, and pending/busy/error status.
    * - ``get_viewport``
      - A PNG cropped to the scene viewport, with frame, time, and scene metadata.

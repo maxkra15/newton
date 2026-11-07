@@ -228,7 +228,7 @@ def _source_scale(stage, scale, linear_unit):
     return tuple(value * linear_unit for value in values)
 
 
-def prepare_usd(source: str, *, scale=(1.0, 1.0, 1.0)) -> ModelBuilder:
+def prepare_usd(source: str, *, scale=(1.0, 1.0, 1.0), mujoco: bool = False) -> ModelBuilder:
     """Import a rigid USD asset as a caller-owned, read-only builder template.
 
     Preserve bodies, joints, colliders, and visuals through native USD import.
@@ -254,6 +254,10 @@ def prepare_usd(source: str, *, scale=(1.0, 1.0, 1.0)) -> ModelBuilder:
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
     builder = ModelBuilder()
+    if mujoco:
+        from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+        SolverMuJoCo.register_custom_attributes(builder)
     builder.add_usd(stage, collapse_fixed_joints=False)
     if builder.particle_count or builder.tri_count or builder.tet_count:
         raise ValueError("Scene authoring supports rigid USD assets only")

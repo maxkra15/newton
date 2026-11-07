@@ -14,7 +14,8 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline, JointType, Mesh, ModelBuilder
+from newton import CollisionPipeline, JointType, Mesh, ModelBuilder, ShapeFlags
+from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, ViewerNull
 
@@ -806,6 +807,170 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertEqual({id(editor.state_0.body_q), id(editor.state_1.body_q)}, poses)
         self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
         self.assertEqual(editor.rebuild_count, 1)
+
+    @unittest.skipUnless(importlib.util.find_spec("mujoco_warp"), "Requires MuJoCo Warp")
+    def test_mujoco_edits_preserve_state_and_handle_capacity(self):
+        """Keep CUDA authoring edits coherent with MuJoCo and stop before publishing incomplete physics."""
+        devices = get_cuda_test_devices()[:1]
+        if not devices:
+            self.skipTest("Requires a CUDA device")
+        plane_path = None
+        if importlib.util.find_spec("pxr"):
+            from pxr import Usd, UsdGeom
+
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            plane_path = Path(directory.name) / "plane.usda"
+            stage = Usd.Stage.CreateNew(str(plane_path))
+            UsdGeom.SetStageMetersPerUnit(stage, 1)
+            UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+            UsdGeom.Plane.Define(stage, "/Surface")
+            stage.GetRootLayer().Save()
+        editor = SceneEditor(ViewerNull(), device=devices[0], solver="mujoco")
+        self.addCleanup(editor.close)
+        editor.commit()
+        self.assertIsNone(editor.solver)
+        editor.step()
+        support = editor.add_primitive("box", position=(0, 0, 0.25), size=(2, 2, 0.5), dynamic=False)
+        box = editor.add_primitive("box", position=(0, 0, 2), size=(0.5, 0.5, 0.5))
+        plane = editor.add_usd(plane_path, position=(3, 0, -3)) if plane_path else None
+        if plane is not None:
+            editor.update_object(plane, dynamic=False)
+        editor.commit()
+        builds = editor.rebuild_count
+        self.assertEqual(editor.solver_type, SceneEditor.Solver.MUJOCO)
+        model, solver, control = editor.model, editor.solver, editor.control
+        states = {id(editor.state_0), id(editor.state_1)}
+        arrays = {editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}
+        rotation = tuple(wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.4))
+        editor.update_object(box, position=(0.2, 0, 2.2), rotation=rotation, friction=0.82)
+        if plane is not None:
+            editor.update_object(plane, position=(4, 0, -2), friction=0.6)
+        editor.before_frame()
+        body = editor.body_indices(box)[0]
+        shape = np.flatnonzero(model.shape_body.numpy() == body)[0]
+        geoms = solver.mjc_geom_to_newton_shape.numpy() == shape
+        self.assertTrue(geoms.any())
+        np.testing.assert_allclose(solver.mjw_model.geom_friction.numpy()[..., 0][geoms], 0.82)
+        if plane is not None:
+            shape = next(i for i, label in enumerate(model.shape_label) if label.startswith(f"objects/{plane}/"))
+            self.assertEqual(model.shape_body.numpy()[shape], -1)
+            self.assertTrue(model.shape_flags.numpy()[shape] & int(ShapeFlags.COLLIDE_SHAPES))
+            geoms = solver.mjc_geom_to_newton_shape.numpy() == shape
+            np.testing.assert_allclose(model.shape_transform.numpy()[shape, :3], (4, 0, -2))
+            np.testing.assert_allclose(solver.mjw_model.geom_pos.numpy()[geoms], ((4, 0, -2),))
+        self.assertIs(editor.model, model)
+        self.assertIs(editor.solver, solver)
+        self.assertIs(editor.control, control)
+        self.assertEqual({id(editor.state_0), id(editor.state_1)}, states)
+        self.assertEqual({editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}, arrays)
+        self.assertEqual(editor.rebuild_count, builds)
+        editor.step()
+        np.testing.assert_allclose(editor.get_pose(box)[0][:2], (0.2, 0), atol=1e-6)
+        self.assertGreater(editor.get_pose(box)[0][2], 2.19)
+        np.testing.assert_allclose(editor.get_pose(box)[1], rotation, atol=1e-6)
+        np.testing.assert_allclose(editor.get_pose(support)[0], (0, 0, 0.25), atol=1e-6)
+
+        # A placed addition and its Undo each rebuild once without rewinding the falling box.
+        before_q = editor.state_0.body_q.numpy()[body].copy()
+        before_qd = editor.state_0.body_qd.numpy()[body].copy()
+        editor.begin_edit()
+        added = editor.add_primitive("box", position=(0.2, 0, 2.2), size=(0.5, 0.5, 0.5))
+        editor.place_object(added)
+        editor.end_edit()
+        editor.before_frame()
+        self.assertEqual(editor.rebuild_count, builds + 1)
+        self.assertGreater(editor.get_pose(added)[0][2], 2.69)
+        np.testing.assert_array_equal(editor.state_0.body_q.numpy()[editor.body_indices(box)[0]], before_q)
+        np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[editor.body_indices(box)[0]], before_qd)
+        editor.undo()
+        editor.before_frame()
+        self.assertEqual(editor.rebuild_count, builds + 2)
+        np.testing.assert_array_equal(editor.state_0.body_q.numpy()[editor.body_indices(box)[0]], before_q)
+        np.testing.assert_array_equal(editor.state_0.body_qd.numpy()[editor.body_indices(box)[0]], before_qd)
+        solver = editor.solver
+        solver.mjw_data.qacc_warmstart.fill_(123)
+        editor.reset_scene()
+        self.assertIs(editor.solver, solver)
+        np.testing.assert_array_equal(solver.mjw_data.qacc_warmstart.numpy(), 0)
+        np.testing.assert_allclose(editor.get_pose(box)[0], (0.2, 0, 2.2), atol=1e-6)
+        np.testing.assert_array_equal(editor.state_0.body_qd.numpy(), 0)
+        editor.step()
+        self.assertGreater(editor.get_pose(box)[0][2], 2.19)
+
+        # Both native contact buffers must grow while physical storage remains owned and stable.
+        editor.update_object(box, position=(0, 0, 0.74), rotation=(0, 0, 0, 1))
+        editor.before_frame()
+        model, control = editor.model, editor.control
+        states = {id(editor.state_0), id(editor.state_1)}
+        arrays = {editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}
+        pipeline = CollisionPipeline(model, rigid_contact_max=1)
+        editor._runtime.pipeline = editor.collision_pipeline = pipeline
+        editor._runtime.contacts = editor.contacts = pipeline.contacts()
+        editor.viewer.set_collision_pipeline(pipeline)
+        limited = SolverMuJoCo(
+            model, use_mujoco_contacts=False, nconmax=1, strict_capacity=True, kinematic_switchable_roots=False
+        )
+        self.assertEqual(limited.get_max_contact_count(), 1)
+        editor._runtime.solver = editor.solver = limited
+        editor._runtime.observables = limited.observables({limited.ObservableKind.OVERFLOW})
+        editor.viewer.set_solver(limited)
+        editor.step()
+        self.assertIsNot(editor.solver, limited)
+        self.assertGreaterEqual(editor.contacts.rigid_contact_max, 4)
+        self.assertGreaterEqual(editor.solver.get_max_contact_count(), editor.contacts.rigid_contact_max)
+        np.testing.assert_array_equal(editor._runtime.observables.overflow.numpy(), 0)
+        self.assertIs(editor.model, model)
+        self.assertIs(editor.control, control)
+        self.assertEqual({id(editor.state_0), id(editor.state_1)}, states)
+        self.assertEqual({editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}, arrays)
+        self.assertEqual(editor.rebuild_count, builds + 2)
+
+        # Compile six weld rows without contacts, then exceed that real constraint capacity.
+        editor.update_object(box, position=(0, 0, 2.2))
+        editor.before_frame()
+        limited = SolverMuJoCo(
+            model,
+            use_mujoco_contacts=False,
+            nconmax=editor.contacts.rigid_contact_max,
+            njmax=6,
+            strict_capacity=True,
+            kinematic_switchable_roots=False,
+        )
+        self.assertEqual(limited.mjw_data.njmax, 6)
+        editor._runtime.solver = editor.solver = limited
+        editor._runtime.observables = limited.observables({limited.ObservableKind.OVERFLOW})
+        editor.viewer.set_solver(limited)
+        editor.update_object(box, position=(0, 0, 0.74))
+        editor.before_frame()
+        incoming = editor.state_0
+        before = [
+            array.numpy().copy() for array in (incoming.body_q, incoming.body_qd, incoming.joint_q, incoming.joint_qd)
+        ]
+        with self.assertLogs("newton", level="ERROR"), self.assertRaises(RuntimeError):
+            editor.step()
+        self.assertIn("overflow", editor.error.lower())
+        self.assertTrue(editor._runtime.observables.overflow.numpy().any())
+        self.assertIs(editor.state_0, incoming)
+        self.assertIs(editor._runtime.state_0, incoming)
+        for array, expected in zip(
+            (incoming.body_q, incoming.body_qd, incoming.joint_q, incoming.joint_qd), before, strict=True
+        ):
+            np.testing.assert_array_equal(array.numpy(), expected)
+        editor.begin_edit()
+        for obj in editor.objects:
+            editor.remove_object(obj.id)
+        editor.end_edit()
+        editor.before_frame()
+        self.assertEqual(editor.model.body_count, 0)
+        self.assertIsNone(editor.solver)
+        self.assertEqual(editor.solver_type, SceneEditor.Solver.MUJOCO)
+        editor.step()
+        editor.add_primitive("box", position=(0, 0, 1))
+        editor.before_frame()
+        editor.step()
+        self.assertIsInstance(editor.solver, SolverMuJoCo)
+        self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
 
     def test_empty_scene_and_invalid_values(self):
         """Keep an empty ground usable and reject invalid edits before changing the document."""

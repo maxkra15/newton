@@ -9,6 +9,8 @@ Command: python -m newton.examples scene_editor
 import subprocess
 from pathlib import Path
 
+import warp as wp
+
 import newton.examples
 from newton.viewer import SceneEditor
 
@@ -20,6 +22,12 @@ class Example(SceneEditor):
     def create_parser():
         """Expose the same scene options to the CLI and workspace example browser."""
         parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--solver",
+            choices=[solver.value for solver in SceneEditor.Solver],
+            default=None,
+            help="Simulation solver; defaults to MuJoCo Warp on CUDA and XPBD on CPU.",
+        )
         parser.add_argument("--scene", help="Open an authored USD scene or import a USD asset.")
         parser.add_argument("--empty", action="store_true", help="Start with only the ground plane.")
         parser.add_argument("--mcp-port", type=int, help="Enable local MCP access; zero chooses an available port.")
@@ -27,7 +35,8 @@ class Example(SceneEditor):
         return parser
 
     def __init__(self, viewer, args):
-        super().__init__(viewer)
+        solver = args.solver or ("mujoco" if wp.get_device().is_cuda else "xpbd")
+        super().__init__(viewer, solver=solver)
         self._mcp = None
         if args.mcp_info is not None and args.mcp_port is None:
             raise ValueError("--mcp-info requires --mcp-port")
@@ -59,7 +68,8 @@ class Example(SceneEditor):
                     ).strip()
                 except (OSError, subprocess.SubprocessError):
                     pass
-            window.set_caption(f"Newton Scene Editor [{revision}]")
+            engine = "MuJoCo Warp" if self.solver_type is self.Solver.MUJOCO else "XPBD"
+            window.set_caption(f"Newton Scene Editor · {engine} [{revision}]")
         if args.mcp_port is not None:
             from newton.viewer import SceneEditorMCP  # noqa: PLC0415
 

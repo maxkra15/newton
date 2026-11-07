@@ -87,6 +87,7 @@ class AuthoringPanel:
         self._placement_ray = None
         self._body_map_key = None
         self._body_objects = {}
+        self._shape_objects = {}
         self._last_selection = None
         self._last_editor_selection = None
         self._window = workspace.viewer.renderer.window
@@ -171,23 +172,36 @@ class AuthoringPanel:
 
     def _sync_selection(self) -> None:
         objects = self.editor.objects
+        runtime = self.editor._runtime
+        bindings = runtime.bindings if runtime is not None else {}
         key = (id(self.workspace.model), tuple(obj.id for obj in objects))
         rebuilt = key != self._body_map_key
         if rebuilt:
             self._body_objects = {body: obj.id for obj in objects for body in self.editor.body_indices(obj.id)}
+            self._shape_objects = {
+                shape: obj.id for obj in objects if obj.id in bindings for shape in range(*bindings[obj.id].shapes)
+            }
             self._body_map_key = key
         if rebuilt or self.editor.selected_id != self._last_editor_selection:
             indices = self.editor.body_indices(self.editor.selected_id) if self.editor.selected_id else ()
-            self.workspace.select(("body", indices[0]) if indices else None)
-            for index in indices[1:]:
-                self.workspace.select(("body", index), toggle=True)
+            keys = [("body", index) for index in indices]
+            if not keys and self.editor.selected_id in bindings:
+                keys = [("shape", index) for index in range(*bindings[self.editor.selected_id].shapes)]
+            self.workspace.select(keys[0] if keys else None)
+            for selected in keys[1:]:
+                self.workspace.select(selected, toggle=True)
             self._last_editor_selection = self.editor.selected_id
             self._last_selection = self.workspace.selected
         elif self.workspace.selected != self._last_selection:
             selected = self.workspace.selected
-            if selected is not None and selected[0] == "shape" and self.workspace.tree is not None:
-                selected = self.workspace.tree.parents.get(selected)
-            object_id = self._body_objects.get(selected[1]) if selected is not None and selected[0] == "body" else None
+            object_id = None
+            if selected is not None:
+                if selected[0] == "shape":
+                    object_id = self._shape_objects.get(selected[1])
+                    if object_id is None and self.workspace.tree is not None:
+                        selected = self.workspace.tree.parents.get(selected)
+                if object_id is None and selected is not None and selected[0] == "body":
+                    object_id = self._body_objects.get(selected[1])
             self.editor.select(object_id)
             self._last_editor_selection = object_id
             self._last_selection = self.workspace.selected
@@ -300,7 +314,7 @@ class AuthoringPanel:
         """Draw the asset palette in the existing left workspace panel."""
         ui, w, s = self.ui, self.widgets, self.widgets.scale
         ui.text_colored(ui.ImVec4(*theme.ACCENT), "SCENE AUTHORING")
-        ui.text_disabled("Create, place, and make it yours.")
+        ui.text_disabled("Solver: MuJoCo Warp" if self.editor.solver_type.value == "mujoco" else "Solver: XPBD")
         ui.spacing()
         if w.icon_button("##author_open", "folder", "Open authored scene", size=24):
             self._open_dialog("open")
@@ -792,11 +806,13 @@ class AuthoringPanel:
     def prepare_gizmo(self) -> None:
         """Log a persistent mutable transform through the existing gizmo integration."""
         object_id = self.editor.selected_id
+        runtime = self.editor._runtime
+        binding = runtime.bindings.get(object_id) if runtime is not None else None
         if (
             not self._show_gizmo
             or not self.editable
             or object_id is None
-            or not self.editor.body_indices(object_id)
+            or binding is None
             or self.ui.get_drag_drop_payload_py_id() is not None
         ):
             self._finish_gizmo()

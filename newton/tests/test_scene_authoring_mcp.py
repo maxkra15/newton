@@ -23,7 +23,9 @@ import warp as wp
 
 from newton._src.viewer.gui.viewer_gui import ViewerGui
 from newton.examples.basic.example_scene_editor import Example
+from newton.solvers import SolverMuJoCo
 from newton.tests.test_viewer_get_frame import _make_headless_viewer_gl_or_skip
+from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, SceneEditorMCP, ViewerNull
 
 _HAS_MCP = importlib.util.find_spec("mcp") is not None and importlib.util.find_spec("uvicorn") is not None
@@ -86,13 +88,21 @@ class _SDKClient:
 class _SceneSession:
     """Pump the same frame boundaries as the application while awaiting requests."""
 
-    def __init__(self, test, viewer, *, native=False):
+    def __init__(self, test, viewer, *, native=False, solver="xpbd"):
         self.test, self.viewer, self.native = test, viewer, native
         self.directory = tempfile.TemporaryDirectory()
         test.addCleanup(self.directory.cleanup)
         if native:
             args = Example.create_parser().parse_args(
-                ["--empty", "--mcp-port", "0", "--mcp-info", str(Path(self.directory.name) / "connection.json")]
+                [
+                    "--empty",
+                    "--solver",
+                    solver,
+                    "--mcp-port",
+                    "0",
+                    "--mcp-info",
+                    str(Path(self.directory.name) / "connection.json"),
+                ]
             )
             self.editor = Example(viewer, args)
         else:
@@ -167,6 +177,7 @@ class TestSceneAuthoringMCP(unittest.TestCase):
                 403,
             )
             initial = scene.data("get_scene")
+            self.assertEqual(initial["solver"], "xpbd")
             revision, generation = initial["revision"], initial["model_generation"]
             self.assertEqual(len(initial["objects"]), 1)
             self.assertEqual(initial["objects"][0]["pose_kind"], "live_root")
@@ -400,13 +411,19 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
                 imgui.set_current_context(previous_context)
 
         self.addCleanup(restore_context)
-        with wp.ScopedDevice("cpu"):
+        cuda = get_cuda_test_devices()
+        use_mujoco = bool(cuda) and all(
+            importlib.util.find_spec(module) is not None for module in ("mujoco", "mujoco_warp")
+        )
+        solver = "mujoco" if use_mujoco else "xpbd"
+        with wp.ScopedDevice(cuda[0] if use_mujoco else "cpu"):
             viewer = _make_headless_viewer_gl_or_skip(self, width=640, height=480)
             self.addCleanup(viewer.close)
             viewer.gui = ViewerGui(viewer, viewer.renderer.window, workspace_enabled=True)
             viewer.gui.ui.io.set_ini_filename("")
             viewer._paused = True
-            scene = _SceneSession(self, viewer, native=True)
+            scene = _SceneSession(self, viewer, native=True, solver=solver)
+            self.assertEqual(scene.data("get_scene")["solver"], solver)
             history = viewer.gui.workspace.history
             history.set_recording(True)
             scene.pump()
@@ -486,3 +503,62 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
                     self.assertEqual(scene.editor.revision, revision)
                     self.assertAlmostEqual(scene.editor.sim_time, live_time)
             history.select(len(history.frames) - 1)
+            if use_mujoco and importlib.util.find_spec("pxr") is not None:
+                from pxr import Usd, UsdGeom, UsdPhysics
+
+                path = Path(scene.directory.name) / "static-plane.usda"
+                stage = Usd.Stage.CreateNew(str(path))
+                UsdGeom.SetStageMetersPerUnit(stage, 1)
+                UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+                plane = UsdGeom.Plane.Define(stage, "/Plane")
+                plane.CreateAxisAttr(UsdGeom.Tokens.z)
+                UsdPhysics.CollisionAPI.Apply(plane.GetPrim())
+                stage.GetRootLayer().Save()
+                state = scene.data("get_scene")
+                added = scene.data(
+                    "apply_edits",
+                    {
+                        "expected_revision": state["revision"],
+                        "edits": [{"operation": "add_usd", "source": str(path), "place": False}],
+                    },
+                )
+                deadline = time.monotonic() + 30
+                while scene.editor.pending and time.monotonic() < deadline:
+                    scene.pump()
+                    if scene.editor.error:
+                        break
+                self.assertFalse(scene.editor.pending, scene.editor.error)
+                object_id = added["changed_object_ids"][0]
+                self.assertFalse(scene.editor.body_indices(object_id))
+                workspace = viewer.gui.workspace
+                panel = workspace.authoring
+                panel.select(object_id)
+                scene.pump()
+                shape = workspace.selected
+                self.assertEqual(shape[0], "shape")
+                self.assertIn(panel.gizmo_name, viewer._gizmo_log)
+                panel.select(None)
+                workspace.select(shape)
+                scene.pump()
+                self.assertEqual(scene.editor.selected_id, object_id)
+
+                scene.editor.update_object(scene.editor.objects[0].id, position=(0, 0, 0.25))
+                scene.editor.before_frame()
+                limited = SolverMuJoCo(
+                    scene.editor.model,
+                    use_mujoco_contacts=False,
+                    nconmax=scene.editor.contacts.rigid_contact_max,
+                    njmax=1,
+                    strict_capacity=True,
+                    kinematic_switchable_roots=False,
+                )
+                self.assertEqual(limited.mjw_data.njmax, 1)
+                scene.editor._runtime.solver = scene.editor.solver = limited
+                scene.editor._runtime.observables = limited.observables({limited.ObservableKind.OVERFLOW})
+                before = scene.editor.sim_time
+                with self.assertLogs("newton", level="ERROR") as errors:
+                    result = scene.call("step_simulation", {"frames": 3})
+                self.assertTrue(result.is_error)
+                self.assertEqual(len(errors.records), 1)
+                self.assertAlmostEqual(scene.editor.sim_time, before)
+                self.assertTrue(viewer.is_paused())
