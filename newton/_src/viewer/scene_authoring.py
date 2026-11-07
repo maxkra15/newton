@@ -742,22 +742,28 @@ class SceneEditor:
         executor, self._executor = self._executor, None
         if executor is None:
             return
+        processes = list((getattr(executor, "_processes", None) or {}).values())
+        manager = getattr(executor, "_executor_manager_thread", None)
+        result_queue = getattr(executor, "_result_queue", None)
         terminate = getattr(executor, "terminate_workers", None)
         if terminate is not None:
             terminate()
-            return
-        # Python <3.14 has no public process-pool termination API. The editor
-        # owns this one CPU worker and must not leave a native import running.
-        processes = list((getattr(executor, "_processes", None) or {}).values())
-        executor.shutdown(wait=False, cancel_futures=True)
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
+        else:
+            # Python <3.14 has no public process-pool termination API.
+            executor.shutdown(wait=False, cancel_futures=True)
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
         for process in processes:
             process.join(timeout=1)
             if process.is_alive():
                 process.kill()
                 process.join(timeout=1)
+        # Release partial result reads, then settle concurrent worker exit-code publication.
+        if result_queue is not None:
+            result_queue._writer.close()
+        if manager is not None:
+            manager.join(timeout=1)
 
     def _trim_templates(self) -> None:
         # Retain every active source, but bound old scale variants after gestures.

@@ -768,8 +768,10 @@ class TestSceneAuthoring(unittest.TestCase):
             editor.preview_usd(recovered_path, position=(0, 0, 0), scale=(2, 2, 2))
             self.assertTrue(editor._preparing)
             processes = list(editor._executor._processes.values())
+            manager = editor._executor._executor_manager_thread
             self.assertTrue(any(process.is_alive() for process in processes))
             editor.close()
+            self.assertFalse(manager.is_alive())
             for process in processes:
                 self.assertFalse(process.is_alive())
 
