@@ -15,6 +15,7 @@ import time
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1401,6 +1402,48 @@ class SceneEditor:
         if not self._topology_dirty:
             self._apply_fast_edits()
             return False
+        with self._loading("Building model…") as ready:
+            return self._commit_impl() if ready else False
+
+    @contextmanager
+    def _loading(self, text: str):
+        """Present native feedback before blocking work, retaining outer splash ownership."""
+        viewer = self.viewer
+        gui = getattr(viewer, "gui", None)
+        renderer = getattr(viewer, "renderer", None)
+        show = getattr(viewer, "show_loading_splash", None)
+        hide = getattr(viewer, "hide_loading_splash", None)
+        has_exit = getattr(renderer, "has_exit", None)
+        if (
+            gui is None
+            or getattr(viewer, "_headless", True)
+            or not getattr(gui, "is_available", False)
+            or not all(callable(method) for method in (show, hide, has_exit))
+        ):
+            yield True
+            return
+        if has_exit():
+            yield False
+            return
+        if getattr(gui, "_loading_splash_active", False):
+            yield True
+            return
+        paused = viewer.is_paused()
+        try:
+            show(text)
+            try:
+                for _ in range(2):
+                    viewer.begin_frame(self.sim_time)
+                    viewer.end_frame()
+                    if has_exit():
+                        break
+            finally:
+                viewer._paused = paused
+            yield not has_exit()
+        finally:
+            hide()
+
+    def _commit_impl(self) -> bool:
         started = time.perf_counter()
         old = self._runtime
         candidate = self._build()
@@ -1745,6 +1788,14 @@ class SceneEditor:
         if runtime.solver is None and not runtime.model.joint_count:
             self.sim_time += self.frame_dt
             return
+        if self.solver_type == self.Solver.MUJOCO and runtime.solver is None:
+            with self._loading("Starting physics…") as ready:
+                if ready:
+                    self._step_impl(runtime)
+        else:
+            self._step_impl(runtime)
+
+    def _step_impl(self, runtime: _Runtime) -> None:
         dt = self.frame_dt / self.sim_substeps
         for substep in range(self.sim_substeps):
             runtime.state_0.clear_forces()

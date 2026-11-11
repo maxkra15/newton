@@ -49,6 +49,20 @@ mesh boundary topology is cached with its source geometry, and matching GL
 geometry is retained across model replacement. Geometry edits invalidate those
 caches; removing an object releases render resources no longer used.
 
+In the visible native GL viewer, structural changes (including Delete and Undo)
+show **Building model…** before the blocking rebuild begins. First playback
+shows **Starting physics…** while collision kernels and the solver initialize.
+These indicators preserve the camera and playback setting. The indicator clears
+on success or failure: failed rebuilds retain the previous scene, while failed
+physics initialization pauses the current scene. Heavy compilation still runs
+on the viewer's owning thread.
+
+Dragging a SimReady asset displays a nonblocking activity card in the viewport,
+with the asset name and an animated download or preparation indicator. It stays
+visible after dropping until that object is published. Ready states use a static
+icon; package progress is indeterminate rather than an estimated percentage.
+The card does not capture input or cancel the held drag.
+
 The window title identifies the source commit at launch, with ``-dirty`` for
 tracked local edits. Installed wheels show the package version. Restart the
 application to load subsequent Python changes.

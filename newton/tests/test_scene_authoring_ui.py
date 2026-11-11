@@ -16,7 +16,7 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import ModelFlags
+from newton import ModelBuilder, ModelFlags
 from newton._src.viewer.gui.authoring import intersect_ray
 from newton._src.viewer.gui.viewer_gui import ViewerGui
 from newton.examples.basic.example_scene_editor import Example
@@ -242,7 +242,24 @@ class TestSceneAuthoringUI(unittest.TestCase):
             selected_id, selected_key = editor.selected_id, workspace.selected
             before = editor.sim_time
             viewer._step_requested = True
-            render(simulate=True)
+            if mujoco:
+                create_solver, frame = editor._create_solver, viewer._frame_count
+
+                def start_after_paint(*args, **kwargs):
+                    self.assertTrue(viewer.gui._loading_splash_active)
+                    self.assertEqual(viewer.gui._loading_splash_text, "Starting physics…")
+                    self.assertGreater(viewer._frame_count, frame)
+                    return create_solver(*args, **kwargs)
+
+                viewer._headless = False
+                try:
+                    with mock.patch.object(editor, "_create_solver", start_after_paint):
+                        render(simulate=True)
+                finally:
+                    viewer._headless = True
+                self.assertFalse(viewer.gui._loading_splash_active)
+            else:
+                render(simulate=True)
             workspace._ensure_tree()
             render(2)
             self.assertTrue(viewer.is_paused())
@@ -265,6 +282,84 @@ class TestSceneAuthoringUI(unittest.TestCase):
             click(122, 94)  # Redo from the same toolbar.
             self.assertEqual(len(editor.objects), initial_count + 1)
             self.assertIs(workspace.authoring, panel)
+
+            # Use the hidden native GL window, but exercise the application's
+            # interactive loading path before a real selected-object rebuild.
+            viewer._headless = False
+            try:
+                deleted = editor.objects[-1].id
+
+                def check_delete(fail):
+                    editor.select(deleted)
+                    render(2)
+                    delete_position = None
+                    button = panel.widgets.icon_button
+
+                    def locate_delete(item_id, *args, **kwargs):
+                        nonlocal delete_position
+                        clicked = button(item_id, *args, **kwargs)
+                        if item_id == "##delete_object":
+                            lo, hi = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+                            delete_position = ((lo.x + hi.x) / 2, (lo.y + hi.y) / 2)
+                        return clicked
+
+                    with mock.patch.object(panel.widgets, "icon_button", locate_delete):
+                        render()
+                    self.assertIsNotNone(delete_position)
+                    before_pixels = viewer.get_frame(render_ui=True).numpy().copy()
+                    height, width = before_pixels.shape[:2]
+                    crop = np.s_[height // 2 - 100 : height // 2 + 100, width // 2 - 160 : width // 2 + 160]
+                    model, paused, frame = editor.model, viewer.is_paused(), viewer._frame_count
+                    camera = tuple(viewer.camera.pos), viewer.camera.pitch, viewer.camera.yaw
+                    presented, loading_pixels = [], []
+                    present, finalize = viewer.renderer.present, ModelBuilder.finalize
+
+                    def present_loading():
+                        present()
+                        if viewer.gui._loading_splash_active:
+                            presented.append(viewer._frame_count)
+
+                    def finalize_after_paint(builder, *args, **kwargs):
+                        self.assertTrue(viewer.gui._loading_splash_active)
+                        self.assertTrue(presented)
+                        self.assertGreater(viewer._frame_count, frame)
+                        pixels = viewer.get_frame(render_ui=True).numpy().copy()
+                        self.assertFalse(np.array_equal(pixels[crop], before_pixels[crop]))
+                        loading_pixels.append(pixels[crop])
+                        candidate = finalize(builder, *args, **kwargs)
+                        if fail:
+                            raise MemoryError("Interrupted native scene rebuild")
+                        return candidate
+
+                    with (
+                        mock.patch.object(viewer.renderer, "present", present_loading),
+                        mock.patch.object(ModelBuilder, "finalize", finalize_after_paint),
+                    ):
+                        if fail:
+                            with self.assertLogs("newton", level="ERROR"):
+                                click(*delete_position)
+                        else:
+                            click(*delete_position)
+                    self.assertEqual(len(loading_pixels), 1)
+                    self.assertFalse(viewer.gui._loading_splash_active)
+                    self.assertEqual(viewer.is_paused(), paused)
+                    self.assertEqual((tuple(viewer.camera.pos), viewer.camera.pitch, viewer.camera.yaw), camera)
+                    self.assertEqual(len(editor.objects), initial_count)
+                    if fail:
+                        self.assertIs(editor.model, model)
+                        self.assertIn("Interrupted native scene rebuild", editor.error)
+                    else:
+                        self.assertIsNot(editor.model, model)
+                        self.assertEqual(editor.model.body_count, initial_count)
+                    click(94, 94)
+                    self.assertEqual(len(editor.objects), initial_count + 1)
+                    self.assertIsNone(editor.error)
+                    self.assertFalse(viewer.gui._loading_splash_active)
+
+                check_delete(False)
+                check_delete(True)
+            finally:
+                viewer._headless = True
 
             from pyglet.window import key
 
@@ -497,14 +592,17 @@ class TestSceneAuthoringUI(unittest.TestCase):
                     np.testing.assert_allclose(lower, np.asarray(center) - 0.01, atol=1e-5)
                     np.testing.assert_allclose(upper, np.asarray(center) + 0.01, atol=1e-5)
 
-                def queue_download():
-                    # Request the same real package with an incomplete cache;
-                    # hold its response until another interaction owns the UI.
+                def hold_download():
                     (assets.library._package(record) / "complete.json").unlink()
                     assets.library._verified.pop(record.id, None)
                     assets.requests.clear()
                     assets.hold.set()
                     assets.release.clear()
+
+                def queue_download():
+                    # Request the same real package with an incomplete cache;
+                    # hold its response until another interaction owns the UI.
+                    hold_download()
                     panel._place_asset(record, (-3, 0, 1))
                     assets.until(lambda: any(path.endswith("LICENSE.txt") for path in assets.requests))
                     self.assertEqual(len(panel._pending_imports), 1)
@@ -514,13 +612,68 @@ class TestSceneAuthoringUI(unittest.TestCase):
                     assets.until(lambda: assets.library.ready(record) is not None)
 
                 def await_import(count):
+                    phases = set()
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline and (len(editor.objects) != count or editor.pending):
                         render()
+                        phases.add(panel._asset_activity_phase)
                         time.sleep(0.01)
                     self.assertIsNone(editor.error)
                     self.assertEqual(len(editor.objects), count)
                     self.assertFalse(editor.pending)
+                    return phases
+
+                # A real held HTTP response keeps the named, nonmodal activity
+                # visible and animated before and after the pointer releases.
+                hold_download()
+                before, model, sim_time = len(editor.objects), editor.model, editor.sim_time
+                native_mouse(75, 290)
+                native_mouse(75, 290, True)
+                native_mouse(100, 295)
+                native_mouse(*target)
+                assets.until(lambda: any(path.endswith("LICENSE.txt") for path in assets.requests))
+                download = assets.library._jobs["download", record.id]
+                activity_pixels = []
+                clock = viewer.gui.ui._frame_time
+                with mock.patch(
+                    "newton._src.viewer.gui.imgui_backend.perf_counter", side_effect=(clock + 0.1, clock + 0.3)
+                ):
+                    for _ in range(2):
+                        render()
+                        self.assertFalse(download.done())
+                        self.assertEqual(panel._asset_activity[0].id, record.id)
+                        self.assertEqual(panel._asset_activity_phase, "Downloading")
+                        self.assertIsNotNone(imgui.get_drag_drop_payload_py_id())
+                        self.assertFalse(viewer.gui._loading_splash_active)
+                        self.assertEqual(editor.sim_time, sim_time)
+                        self.assertEqual(len(editor.objects), before)
+                        self.assertIs(editor.model, model)
+                        x, y, width, height = panel._asset_activity_rect
+                        pixels = viewer.get_frame(render_ui=True).numpy()
+                        sx, sy = (
+                            pixels.shape[1] / imgui.get_io().display_size.x,
+                            pixels.shape[0] / imgui.get_io().display_size.y,
+                        )
+                        crop = pixels[
+                            round(y * sy) : round((y + height) * sy), round(x * sx) : round((x + width) * sx)
+                        ].copy()
+                        self.assertGreater(np.ptp(crop[8:-8, round(48 * panel.widgets.scale * sx) : -8]), 50)
+                        activity_pixels.append(crop)
+                self.assertFalse(np.array_equal(*activity_pixels))
+                native_mouse(*target, False)
+                render(2)
+                self.assertFalse(download.done())
+                self.assertEqual(len(panel._pending_imports), 1)
+                self.assertEqual(panel._asset_activity[0].id, record.id)
+                self.assertEqual(panel._asset_activity_phase, "Downloading")
+                self.assertIsNotNone(panel._asset_activity_rect)
+                self.assertEqual(len(editor.objects), before)
+                complete_download()
+                phases = await_import(before + 1)
+                self.assertTrue(phases & {"Preparing geometry", "Adding to scene"})
+                render()
+                self.assertIsNone(panel._asset_activity)
+                self.assertIsNone(panel._asset_activity_rect)
 
                 # A finished transfer must not mutate a historical scene.
                 viewer._paused = True

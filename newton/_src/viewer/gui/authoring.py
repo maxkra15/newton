@@ -58,6 +58,9 @@ class AuthoringPanel:
         self._submitted_query = ""
         self._selected_asset: AssetRecord | None = None
         self._pending_imports: list[tuple[AssetRecord, tuple[float, float, float], int]] = []
+        self._asset_activity: tuple[AssetRecord, str | None, int] | None = None
+        self._asset_activity_rect: tuple[float, float, float, float] | None = None
+        self._asset_activity_phase = ""
         self._textures: OrderedDict[Path, tuple[Texture, int]] = OrderedDict()
         self._bad_thumbnails: set[Path] = set()
         self._thumbnail_frame = -1
@@ -108,7 +111,11 @@ class AuthoringPanel:
     @property
     def editable(self) -> bool:
         history = self.workspace.history
-        return not self.editor.busy and not (history is not None and history.replaying)
+        return (
+            not getattr(self.workspace.gui, "_loading_splash_active", False)
+            and not self.editor.busy
+            and not (history is not None and history.replaying)
+        )
 
     @property
     def interacting(self) -> bool:
@@ -146,7 +153,8 @@ class AuthoringPanel:
                     path = self.assets.ready(record)
                     if path is not None:
                         if can_import:
-                            self._import_path(path, position)
+                            object_id = self._import_path(path, position)
+                            self._asset_activity = (record, object_id, epoch) if object_id is not None else None
                         else:
                             waiting.append((record, position, epoch))
                     elif error := self.assets.download_error(record):
@@ -154,7 +162,7 @@ class AuthoringPanel:
                     else:
                         waiting.append((record, position, epoch))
                 self._pending_imports = waiting
-        if self._dialog_action:
+        if self._dialog_action and not getattr(self.workspace.gui, "_loading_splash_active", False):
             path = self.workspace.gui.ui.consume_file_dialog_result()
             if path:
                 action, self._dialog_action = self._dialog_action, None
@@ -287,22 +295,26 @@ class AuthoringPanel:
             self._run(self.editor.place_object, object_id)
             self.select(object_id)
 
-    def _import_path(self, path, position) -> None:
+    def _import_path(self, path, position) -> str | None:
         object_id = self._run(self.editor.add_usd, str(path), position=position)
         if object_id is not None:
             self._run(self.editor.place_object, object_id)
             self.select(object_id)
+        return object_id
 
     def _place_asset(self, record: AssetRecord, position=None) -> None:
         if not self.editable or self.assets is None:
             return
         position = position or self.world_position()
+        epoch = self.editor._document_epoch
         path = self.assets.ready(record)
         if path is not None:
-            self._import_path(path, position)
+            object_id = self._import_path(path, position)
+            self._asset_activity = (record, object_id, epoch) if object_id is not None else None
         else:
             self.assets.download(record)
-            self._pending_imports.append((record, position, self.editor._document_epoch))
+            self._pending_imports.append((record, position, epoch))
+            self._asset_activity = record, None, epoch
             self.message = f"Downloading {record.name}…"
 
     def _open_dialog(self, action: str) -> None:
@@ -768,6 +780,7 @@ class AuthoringPanel:
             if self._drag_preview:
                 self.editor.clear_preview()
                 self._drag_preview = False
+            self._draw_asset_activity()
             return
         kind, value = self._payloads[payload.data_id]
         mouse = ui.get_io().mouse_pos
@@ -782,6 +795,7 @@ class AuthoringPanel:
                     self.editor.preview_primitive, value, position=aim, size=size, color=self._color, placement=True
                 )
             else:
+                self._asset_activity = value, None, self.editor._document_epoch
                 path = self.assets.ready(value) if self.assets is not None else None
                 if path is not None:
                     point = self._run(
@@ -791,8 +805,11 @@ class AuthoringPanel:
                         color=theme.CONTACT_SOFT_RIGID[:3],
                         placement=True,
                     )
-                    if point is None and not self.message:
-                        ui.set_tooltip("Preparing collision preview…")
+                    if point is None:
+                        if self.message:
+                            self._asset_activity = None
+                        else:
+                            ui.set_tooltip("Preparing collision preview…")
                 else:
                     self.editor.clear_preview()
                     if self.assets is not None:
@@ -820,6 +837,76 @@ class AuthoringPanel:
                     self._drag_preview = False
             finally:
                 ui.end_drag_drop_target()
+        self._draw_asset_activity()
+
+    def _draw_asset_activity(self) -> None:
+        """Show asynchronous asset work without capturing input or interrupting a drag."""
+        self._asset_activity_rect = None
+        self._asset_activity_phase = ""
+        if self._asset_activity is None and self._pending_imports:
+            record, _, epoch = self._pending_imports[0]
+            self._asset_activity = record, None, epoch
+        if self._asset_activity is None or self.assets is None:
+            return
+        record, object_id, epoch = self._asset_activity
+        editor, ui = self.editor, self.ui
+        payload = ui.get_drag_drop_payload_py_id()
+        held = (
+            self._payloads.get(payload.data_id) if payload is not None and payload.type == self.payload_type else None
+        )
+        dragging = self._drag_preview and held is not None and held[0] == "asset" and held[1].id == record.id
+        queued = any(item.id == record.id and version == epoch for item, _, version in self._pending_imports)
+        published = editor._runtime is not None and object_id in editor._runtime.bindings
+        if (
+            epoch != editor._document_epoch
+            or published
+            or self.assets.download_error(record)
+            or (object_id is not None and (editor.error or not any(obj.id == object_id for obj in editor.objects)))
+            or (object_id is None and not dragging and not queued)
+        ):
+            self._asset_activity = None
+            return
+        if object_id is not None:
+            phase = (
+                "Preparing geometry" if editor.busy else "Adding to scene" if editor.auto_apply else "Ready to apply"
+            )
+        elif self.assets.ready(record) is None:
+            phase = "Downloading"
+        elif dragging:
+            phase = "Ready to place" if editor._preview is not None else "Preparing preview"
+        else:
+            phase = "Waiting to add"
+        self._asset_activity_phase = phase
+        if self.workspace.gui._loading_splash_active:
+            return
+        s = self.widgets.scale
+        vx, vy, vw, vh = self.workspace.dockspace.viewport_rect
+        width, height = min(360 * s, vw - 24 * s), 68 * s
+        if width < 150 * s or vh < height + 24 * s:
+            return
+        x, y = vx + (vw - width) * 0.5, vy + vh - height - 12 * s
+        self._asset_activity_rect = x, y, width, height
+        draw, color = ui.get_window_draw_list(), self.widgets.color
+        start, end = ui.ImVec2(x, y), ui.ImVec2(x + width, y + height)
+        draw.push_clip_rect(start, end, True)
+        draw.add_rect_filled(start, end, color((*theme.VIEWPORT_BACKGROUND[:3], 0.96)), 9 * s)
+        draw.add_rect(start, end, color(theme.VIEWPORT_BORDER), 9 * s)
+        center = ui.ImVec2(x + 26 * s, y + height * 0.5)
+        if phase in ("Ready to place", "Ready to apply", "Waiting to add"):
+            self.widgets.icon("pause", (center.x - 10 * s, center.y - 10 * s), 20 * s, tint=theme.ACCENT)
+        else:
+            draw.add_circle(center, 9 * s, color((*theme.MUTED[:3], 0.25)), 24, 2 * s)
+            angle = (ui.get_time() * 4.0) % (2 * np.pi)
+            draw.path_arc_to(center, 9 * s, angle, angle + 4.5, 24)
+            draw.path_stroke(color(theme.ACCENT), 2 * s)
+        queued_count = len(self._pending_imports)
+        label = f"{phase} · {queued_count} queued" if queued_count > 1 else phase
+        draw.add_text(ui.ImVec2(x + 48 * s, y + 13 * s), color(theme.MUTED), label)
+        name = record.name.replace("_", " ")
+        while len(name) > 1 and ui.calc_text_size(name).x > width - 60 * s:
+            name = name[:-2] + "…"
+        draw.add_text(ui.ImVec2(x + 48 * s, y + 34 * s), color(theme.TEXT), name)
+        draw.pop_clip_rect()
 
     def prepare_gizmo(self) -> None:
         """Log a persistent mutable transform through the existing gizmo integration."""
@@ -905,4 +992,6 @@ class AuthoringPanel:
                 texture.delete()
         self._textures.clear()
         self._pending_imports.clear()
+        self._asset_activity = self._asset_activity_rect = None
+        self._asset_activity_phase = ""
         self._placement_query = None
