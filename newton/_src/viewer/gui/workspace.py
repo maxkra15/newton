@@ -238,6 +238,8 @@ class ViewerWorkspace:
     def reset_history(self) -> None:
         """Discard snapshots after an authored edit without disrupting scene interaction."""
         self.save_preferences()
+        if authoring := getattr(self, "authoring", None):
+            authoring._placement_query = None
         self._active_timeline = self.history = None
         self._cache.clear()
         self._live_cache.clear()
@@ -359,6 +361,8 @@ class ViewerWorkspace:
         self.viewport_controls.invalidate_shapes()
         if model is not self.model:
             return
+        if authoring := getattr(self, "authoring", None):
+            authoring._placement_query = None
         self._cache.clear()
         self._live_cache.clear()
         self._frame_bounds_buffers = None
@@ -2319,6 +2323,8 @@ class ViewerWorkspace:
         # downloading a second full snapshot on every control drag event.
         if self.history is not None and self.viewer.is_paused():
             self.history.capture(replace=True)
+        if not control and (authoring := getattr(self, "authoring", None)):
+            authoring._placement_query = None
         self._live_cache.clear()
         self._drafts.clear()
         self.message = ""

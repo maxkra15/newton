@@ -14,7 +14,7 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
-from newton import CollisionPipeline, JointType, Mesh, ModelBuilder, ShapeFlags, eval_ik
+from newton import BodyFlags, CollisionPipeline, JointType, Mesh, ModelBuilder, ShapeFlags, eval_ik
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import get_cuda_test_devices
 from newton.viewer import SceneEditor, ViewerNull
@@ -320,6 +320,41 @@ class TestSceneAuthoring(unittest.TestCase):
             self.assertRegex(editor.error, "(?i)(parse|syntax|expected)")
             self.assertNotIn("Pickling", editor.error)
             self.assertIs(editor.model, model)
+
+            # A failed pending asset must not restart while an existing prop is edited.
+            for sample in range(3):
+                position = (0.1 * (sample + 1), 0, 2)
+                editor.update_object(object_id, position=position)
+                editor.before_frame()
+                self.assertFalse(editor._preparing)
+                self.assertFalse(editor.busy)
+                self.assertIs(editor.model, model)
+                np.testing.assert_allclose(editor.get_pose(object_id)[0], position, atol=1e-6)
+            self.assertTrue(editor.pending)
+            with mock.patch.object(editor, "_commit_signature", wraps=editor._commit_signature) as signature:
+                for _ in range(3):
+                    editor.before_frame()
+                self.assertEqual(signature.call_count, 0)
+            editor.request_commit()
+            editor.before_frame()
+            self.assertTrue(editor._preparing)
+            with self.assertRaises(ValueError):
+                next(iter(editor._preparing.values())).result(timeout=30)
+            with self.assertLogs("newton", level="ERROR"):
+                editor.before_frame()
+            self.assertFalse(editor._preparing)
+            self.assertFalse(editor.busy)
+            self.assertIs(editor.model, model)
+
+            malformed.write_text('#usda 1.0\n( metersPerUnit = 1 )\ndef Cube "Body" {\n double size = 0.1\n}\n')
+            editor.request_commit()
+            deadline = time.monotonic() + 30
+            while editor.pending and time.monotonic() < deadline:
+                editor.before_frame()
+                time.sleep(0.001)
+            self.assertFalse(editor.pending, editor.error)
+            self.assertIsNone(editor.error)
+            self.assertEqual(editor.model.body_count, 3)
             editor.remove_object(failed)
             editor.before_frame()
 
@@ -629,6 +664,10 @@ class TestSceneAuthoring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixed.usda"
             self.write_jointed_mesh_asset(path)
+            source_stage = Usd.Stage.Open(str(path))
+            UsdPhysics.RigidBodyAPI(source_stage.GetPrimAtPath("/Assembly/Base")).CreateKinematicEnabledAttr(True)
+            source_stage.GetRootLayer().Save()
+            source_contents = path.read_bytes()
             leading = editor.add_primitive("box", position=(-3, 0, 1))
             cuda = get_cuda_test_devices()
             owner_device = cuda[0] if cuda else wp.get_device("cpu")
@@ -650,6 +689,18 @@ class TestSceneAuthoring(unittest.TestCase):
             mesh = next(source for source in editor.model.shape_source if isinstance(source, Mesh))
             np.testing.assert_allclose(np.ptp(mesh.vertices, axis=0), (0.1, 0.1, 0.1), atol=1e-6)
             self.assertEqual(mesh.indices.size, 36)
+            bodies = list(editor.body_indices(asset))
+            np.testing.assert_array_equal(
+                editor.model.body_flags.numpy()[bodies], [BodyFlags.KINEMATIC, BodyFlags.DYNAMIC]
+            )
+            self.assertTrue(editor.get_object(asset).dynamic)
+            model = editor.model
+            editor.update_object(asset, dynamic=True)
+            editor.before_frame()
+            self.assertIsNot(editor.model, model)
+            np.testing.assert_array_equal(
+                editor.model.body_flags.numpy()[list(editor.body_indices(asset))], BodyFlags.DYNAMIC
+            )
             old_pose = editor.state_0.body_q.numpy()[list(editor.body_indices(asset))].copy()
             expected = {}
             for field in ("joint_f", "joint_act", "joint_target_q", "joint_target_qd"):
@@ -672,13 +723,16 @@ class TestSceneAuthoring(unittest.TestCase):
             editor.commit()
             for field, data in expected.items():
                 np.testing.assert_array_equal(getattr(editor.control, field).numpy(), data)
-            self.assertEqual(editor.rebuild_count, 3)
+            self.assertEqual(editor.rebuild_count, 4)
             for _ in range(60):
                 editor.step()
             self.assertTrue(np.isfinite(editor.state_0.body_q.numpy()).all())
             saved = Path(directory) / "scene.usda"
             editor.save_usd(saved)
-            source_stage = Usd.Stage.Open(str(path))
+            exported = ModelBuilder()
+            exported.add_usd(str(saved), collapse_fixed_joints=False, load_visual_shapes=False)
+            np.testing.assert_array_equal(exported.body_flags, BodyFlags.DYNAMIC)
+            self.assertEqual(path.read_bytes(), source_contents)
             for schema, joint_type in (
                 (UsdPhysics.RevoluteJoint, JointType.REVOLUTE),
                 (UsdPhysics.PrismaticJoint, JointType.PRISMATIC),
@@ -832,7 +886,7 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertIsNone(editor.solver)
         editor.step()
         support = editor.add_primitive("box", position=(0, 0, 0.25), size=(2, 2, 0.5), dynamic=False)
-        box = editor.add_primitive("box", position=(0, 0, 2), size=(0.5, 0.5, 0.5))
+        box = editor.add_primitive("box", position=(0, 0, 0.74), size=(0.5, 0.5, 0.5))
         plane = editor.add_usd(plane_path, position=(3, 0, -3)) if plane_path else None
         if plane is not None:
             editor.update_object(plane, dynamic=False)
@@ -841,6 +895,7 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertEqual(editor.solver_type, SceneEditor.Solver.MUJOCO)
         self.assertIsNone(editor.solver)
         self.assertFalse(editor._runtime.solver_graphs)
+        np.testing.assert_array_equal(editor.contacts.contact_counters.numpy(), 0)
         model, control = editor.model, editor.control
         states = {id(editor.state_0), id(editor.state_1)}
         arrays = {editor.state_0.body_q.ptr, editor.state_1.body_q.ptr}
@@ -858,26 +913,31 @@ class TestSceneAuthoring(unittest.TestCase):
         reference_solver, reference_observables = editor._create_solver(model, editor.contacts.rigid_contact_max)
         reference_pipeline = CollisionPipeline(model)
         reference_contacts = reference_pipeline.contacts()
-        for _ in range(editor.sim_substeps):
-            reference[0].clear_forces()
-            reference_pipeline.collide(reference[0], reference_contacts)
-            reference_solver.step(
-                reference[0],
-                reference[1],
-                editor.control,
-                reference_contacts,
-                editor.frame_dt / editor.sim_substeps,
-                observables=reference_observables,
-            )
-            reference.reverse()
-        editor.step()
+
+        def compare_frame():
+            for _ in range(editor.sim_substeps):
+                reference[0].clear_forces()
+                reference_pipeline.collide(reference[0], reference_contacts)
+                reference_solver.step(
+                    reference[0],
+                    reference[1],
+                    editor.control,
+                    reference_contacts,
+                    editor.frame_dt / editor.sim_substeps,
+                    observables=reference_observables,
+                )
+                reference.reverse()
+            editor.step()
+            for field in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                np.testing.assert_allclose(
+                    getattr(editor.state_0, field).numpy(), getattr(reference[0], field).numpy(), atol=1e-6
+                )
+            np.testing.assert_array_equal(editor._runtime.observables.overflow.numpy(), 0)
+            self.assertEqual(len(editor._runtime.solver_graphs), 2)
+
+        compare_frame()
         solver = editor.solver
         self.assertIsInstance(solver, SolverMuJoCo)
-        self.assertEqual(len(editor._runtime.solver_graphs), 2)
-        for field in ("body_q", "body_qd", "joint_q", "joint_qd"):
-            np.testing.assert_allclose(
-                getattr(editor.state_0, field).numpy(), getattr(reference[0], field).numpy(), atol=1e-6
-            )
         graphs = {id(entry[0]) for entry in editor._runtime.solver_graphs.values()}
         body = editor.body_indices(box)[0]
         shape = np.flatnonzero(model.shape_body.numpy() == body)[0]
@@ -901,6 +961,35 @@ class TestSceneAuthoring(unittest.TestCase):
         self.assertGreater(editor.get_pose(box)[0][2], 2.19)
         np.testing.assert_allclose(editor.get_pose(box)[1], rotation, atol=1e-6)
         np.testing.assert_allclose(editor.get_pose(support)[0], (0, 0, 0.25), atol=1e-6)
+
+        # Replay both State directions across a real zero-to-contact transition.
+        editor.update_object(box, position=(0.2, 0, 0.83))
+        editor.before_frame()
+        for field in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(reference[0], field), getattr(editor.state_0, field))
+        reference_solver.reset(reference[0], flags=0)
+        self.assertEqual(int(editor.contacts.rigid_contact_count.numpy()[0]), 0)
+        for _ in range(12):
+            compare_frame()
+        self.assertGreater(int(editor.contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertEqual({id(entry[0]) for entry in editor._runtime.solver_graphs.values()}, graphs)
+
+        # Rebinding storage on the same owners must redirect captured reads and writes.
+        editor._runtime.state_1.body_q = wp.clone(editor._runtime.state_1.body_q)
+        compare_frame()
+        joint = int(np.flatnonzero(model.joint_child.numpy() == body)[0])
+        force = control.joint_f.numpy().copy()
+        force[int(model.joint_qd_start.numpy()[joint])] = 20
+        control.joint_f = wp.array(force, dtype=control.joint_f.dtype, device=editor.device)
+        compare_frame()
+        self.assertGreater(float(reference[0].body_qd.numpy()[body, 0]), 0.01)
+        editor._runtime.observables.overflow = wp.clone(editor._runtime.observables.overflow)
+        editor._runtime.observables.overflow.fill_(1)
+        compare_frame()
+        control.joint_f.zero_()
+        editor.update_object(box, position=(0.2, 0, 2.2))
+        editor.before_frame()
+        editor.step()
 
         # A placed addition and its Undo each rebuild once without rewinding the falling box.
         before_q = editor.state_0.body_q.numpy()[body].copy()

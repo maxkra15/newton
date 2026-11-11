@@ -323,6 +323,7 @@ class _Runtime:
     observables: SolverBase.Observables | None = None
     solver_graphs: dict[tuple, tuple[Any, tuple]] = dataclasses.field(default_factory=dict)
     solver_warm_binding: tuple | None = None
+    contacts_dirty: bool = True
 
 
 class SceneEditor:
@@ -429,7 +430,7 @@ class SceneEditor:
         self._redo: list[tuple[SceneEditor.Object, ...]] = []
         self._edit_before: tuple[SceneEditor.Object, ...] | None = None
         self._requested_commit = False
-        self._attempted_revision = -1
+        self._failed_attempt: tuple[tuple, str, int] | None = None
         self._templates: dict[tuple[Any, ...], _AssetTemplate] = {}
         self._preparing: dict[tuple[Any, ...], Future] = {}
         self._executor: ProcessPoolExecutor | None = None
@@ -720,7 +721,28 @@ class SceneEditor:
 
     @staticmethod
     def _structure(obj: Object) -> tuple:
-        return obj.kind, obj.size, obj.source, obj.mass, obj.dynamic
+        overrides = (
+            tuple(name in obj.overrides for name in ("mass", "dynamic")) if obj.kind == SceneEditor.Shape.USD else ()
+        )
+        return obj.kind, obj.size, obj.source, obj.mass, obj.dynamic, overrides
+
+    def _commit_signature(self) -> tuple:
+        records = []
+        for obj in self._objects:
+            source = None
+            if obj.source is not None:
+                try:
+                    stat = Path(obj.source).stat()
+                    source = stat.st_mtime_ns, stat.st_size
+                except OSError:
+                    pass
+            # A staged object's placement can itself prevent compilation;
+            # moving a committed prop must not retry an unchanged failed asset.
+            staged_pose = (
+                (obj.position, obj.rotation) if self._runtime is None or obj.id not in self._runtime.bindings else None
+            )
+            records.append((obj.id, self._structure(obj), source, staged_pose))
+        return tuple(records), frozenset(self._placement_requests)
 
     def _template_key(self, obj: Object) -> tuple:
         path = Path(obj.source)
@@ -818,12 +840,17 @@ class SceneEditor:
     def request_commit(self) -> None:
         """Request a structural commit at the next safe frame boundary, including retry."""
         self._requested_commit = True
-        self._attempted_revision = -1
+        self._failed_attempt = None
 
     def before_frame(self) -> None:
         """Publish edits before workspace/history binding, even while physics is paused."""
         if self._closed:
             return
+        self._apply_pending()
+        self._refresh_contacts_for_inspection()
+
+    def _apply_pending(self) -> None:
+        """Publish prepared assets and authored changes at the frame boundary."""
         document_sources = (
             {(obj.source, obj.size) for obj in self._objects if obj.kind == self.Shape.USD} if self._preparing else ()
         )
@@ -845,7 +872,7 @@ class SceneEditor:
                 message = f"Could not prepare USD asset {Path(key[0]).name}: {exc}"
                 if key[:2] in document_sources:
                     self.error = message
-                    self._attempted_revision = self.revision
+                    self._failed_attempt = self._commit_signature(), message, self.revision
                 if self._preview_source is not None and key[:2] == (
                     self._preview_source.source,
                     self._preview_source.size,
@@ -855,22 +882,45 @@ class SceneEditor:
             del self._preparing[key]
         if self._fast_pending:
             self._apply_fast_edits()
-        if self._topology_dirty and self._edit_before is None and (self.auto_apply or self._requested_commit):
-            if self._attempted_revision == self.revision:
+        if self._topology_dirty and self._failed_attempt is not None:
+            signature, message, examined_revision = self._failed_attempt
+            if examined_revision == self.revision or signature == self._commit_signature():
+                self._failed_attempt = signature, message, self.revision
+                self.error = message
                 return
+            self._failed_attempt = None
+        if self._topology_dirty and self._edit_before is None and (self.auto_apply or self._requested_commit):
             try:
                 for obj in self._objects:
                     if obj.kind == self.Shape.USD:
                         self._schedule_template(obj)
                 if self.busy:
                     return
-                self._attempted_revision = self.revision
                 self.commit()
             except Exception as exc:
-                self._attempted_revision = self.revision
                 self.error = str(exc)
+                self._failed_attempt = self._commit_signature(), self.error, self.revision
                 self.status = "Could not apply scene changes. The previous simulation is retained."
                 logger.error("Could not compile authored scene: %s", exc)
+
+    def _refresh_contacts_for_inspection(self) -> None:
+        runtime = self._runtime
+        if runtime is None or not runtime.contacts_dirty:
+            return
+        workspace = getattr(getattr(self.viewer, "gui", None), "workspace", None)
+        if workspace is not None and workspace.example is not self:
+            workspace = None
+        collision = workspace.collision if workspace is not None else None
+        if workspace is not None and not workspace._at_live_frame():
+            return
+        if not (self.viewer.show_contacts or (collision is not None and collision._interested)):
+            return
+        self._collide(runtime)
+        if workspace is not None:
+            # Snapshot the freshly detected contacts on the next bind. Render
+            # must not change live physics or a historical display snapshot.
+            workspace.reset_history()
+            collision.token = None
 
     def _template(self, obj: Object) -> ModelBuilder:
         key = self._schedule_template(obj)
@@ -1357,8 +1407,8 @@ class SceneEditor:
         if old is not None:
             self._preserve_state(old, candidate)
         self._place_candidate(candidate)
-        self._collide(candidate)
         if self.solver_type == self.Solver.XPBD:
+            self._collide(candidate)
             candidate.solver, candidate.observables = self._create_solver(
                 candidate.model, candidate.contacts.rigid_contact_max
             )
@@ -1381,6 +1431,7 @@ class SceneEditor:
         self._objects = tuple(candidate.objects[obj.id] for obj in self._objects)
         self._placement_requests.difference_update(candidate.bindings)
         self._topology_dirty = self._requested_commit = False
+        self._failed_attempt = None
         self._fast_pending.clear()
         self._trim_templates()
         self.rebuild_count += 1
@@ -1525,7 +1576,11 @@ class SceneEditor:
         if self.solver_type == self.Solver.MUJOCO and runtime.solver is not None and changed:
             runtime.solver.notify_model_changed(changed)
         if moved:
-            self._collide(runtime)
+            if self.solver_type == self.Solver.MUJOCO:
+                runtime.contacts_dirty = True
+                runtime.contacts.contact_counters.zero_()
+            else:
+                self._collide(runtime)
             if runtime.solver is not None:
                 runtime.solver.reset(runtime.state_0, flags=0)
         self._fast_pending.clear()
@@ -1538,6 +1593,7 @@ class SceneEditor:
 
     def _collide(self, runtime: _Runtime) -> bool:
         """Detect complete contacts before solving, growing owned buffers if needed."""
+        runtime.contacts_dirty = False
         pipeline, contacts = runtime.pipeline, runtime.contacts
         try:
             for attempt in range(4):
@@ -1668,7 +1724,11 @@ class SceneEditor:
             self._sync_coordinates(runtime)
             if runtime.solver is not None:
                 runtime.solver.reset(runtime.state_0, flags=0)
-            self._collide(runtime)
+            if self.solver_type == self.Solver.MUJOCO:
+                runtime.contacts_dirty = True
+                runtime.contacts.contact_counters.zero_()
+            else:
+                self._collide(runtime)
             self.sim_time = 0.0
             workspace = getattr(getattr(self.viewer, "gui", None), "workspace", None)
             if workspace is not None and workspace.example is self:
@@ -1896,6 +1956,7 @@ class SceneEditor:
         self._restore_document(objects)
         # Explicit Open refreshes dependencies even when authored records match.
         self._topology_dirty = True
+        self._failed_attempt = None
         self._document_epoch += 1
         for obj in objects:
             if obj.kind == self.Shape.USD:

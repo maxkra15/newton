@@ -405,6 +405,7 @@ class TestSceneAuthoringMCPViewport(unittest.TestCase):
             self.skipTest(f"Viewer UI dependencies not available: {error}")
         previous_context = imgui.get_current_context()
         context = imgui.create_context()
+        imgui.set_current_context(context)
 
         def restore_context():
             imgui.destroy_context(context)

@@ -1023,7 +1023,8 @@ class ViewerGL(ViewerBase):
             nt.GeoType.ELLIPSOID,
         ):
             return None
-        return self._hash_geometry(geo_type, geo_scale, thickness, is_solid, source), id(source), texture_stamp
+        # Prototype reuse needs actual dimensions, unlike the capsule batching hash.
+        return super()._hash_geometry(geo_type, geo_scale, thickness, is_solid, source), id(source), texture_stamp
 
     @override
     def log_mesh(

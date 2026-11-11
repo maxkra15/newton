@@ -16,6 +16,8 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
+from newton import ModelFlags
+from newton._src.viewer.gui.authoring import intersect_ray
 from newton._src.viewer.gui.viewer_gui import ViewerGui
 from newton.examples.basic.example_scene_editor import Example
 from newton.tests import test_viewer_assets
@@ -115,6 +117,87 @@ class TestSceneAuthoringUI(unittest.TestCase):
                 native_mouse(*pixel, True)
                 native_mouse(*pixel, False)
                 render(2)
+
+            # Reuse an unchanged placement query, but invalidate on published
+            # poses, camera changes and notified native geometry edits.
+            obj = editor.objects[0]
+            pixel = tuple(float(value) for value in scene_pixel(obj.position))
+            with mock.patch("newton._src.viewer.gui.authoring.intersect_ray", wraps=intersect_ray) as raycast:
+                hit = panel.world_position(pixel)
+                np.testing.assert_allclose(panel.world_position(pixel), hit)
+                self.assertEqual(raycast.call_count, 1)
+                editor.update_object(obj.id, position=(3, 0, 1))
+                np.testing.assert_allclose(panel.world_position(pixel), hit)
+                self.assertEqual(raycast.call_count, 1)
+                editor.before_frame()
+                moved = panel.world_position(pixel)
+                self.assertAlmostEqual(moved[2], 0, places=5)
+                self.assertGreater(np.linalg.norm(np.asarray(moved) - hit), 0.1)
+                self.assertEqual(raycast.call_count, 2)
+                editor.update_object(obj.id, position=obj.position)
+                editor.before_frame()
+                np.testing.assert_allclose(panel.world_position(pixel), hit, atol=1e-5)
+                self.assertEqual(raycast.call_count, 3)
+                viewer.camera.pitch -= 3
+                panel.world_position(pixel)
+                self.assertEqual(raycast.call_count, 4)
+                viewer.camera.pitch += 3
+                panel.world_position(pixel)
+                self.assertEqual(raycast.call_count, 5)
+                viewer.notify_model_changed(ModelFlags.SHAPE_PROPERTIES)
+                panel.world_position(pixel)
+                self.assertEqual(raycast.call_count, 6)
+
+                # A native joint edit changes State in place without changing
+                # the authored document or advancing simulation time.
+                before = editor.state_0.joint_q.numpy().copy()
+                moved_q = before.copy()
+                moved_q[0] = 3
+                self.assertTrue(workspace.apply_edit(editor.state_0, "joint_q", 0, moved_q, joint_index=0))
+                native_hit = panel.world_position(pixel)
+                self.assertAlmostEqual(native_hit[2], 0, places=5)
+                self.assertEqual(raycast.call_count, 7)
+                self.assertTrue(workspace.apply_edit(editor.state_0, "joint_q", 0, before, joint_index=0))
+                np.testing.assert_allclose(panel.world_position(pixel), hit, atol=1e-5)
+                self.assertEqual(raycast.call_count, 8)
+
+            if mujoco:
+                # Explicit inspection cooks paused contacts once; ordinary
+                # browsing and pose edits leave complete collision to Play.
+                collision = workspace.collision
+                workspace.tree.expanded.discard(collision.root)
+                viewer.show_contacts = False
+                editor.update_object(obj.id, position=(-1, 0, 0.5))
+                editor.before_frame()
+                with mock.patch.object(
+                    editor.collision_pipeline, "collide", wraps=editor.collision_pipeline.collide
+                ) as cook:
+                    render(2)
+                    self.assertEqual(cook.call_count, 0)
+                    np.testing.assert_array_equal(editor.contacts.contact_counters.numpy(), 0)
+                    workspace.history.set_recording(True)
+                    workspace.tree.expanded.add(collision.root)
+                    collision.sync(force=True)
+                    owner = ("body", editor.body_indices(obj.id)[0])
+                    self.assertFalse(collision.object_contacts(owner))
+                    render(2, simulate=True)
+                    self.assertEqual(cook.call_count, 1)
+                    self.assertGreater(int(editor.contacts.rigid_contact_count.numpy()[0]), 0)
+                    collision.sync()
+                    self.assertTrue(collision.object_contacts(owner))
+                    self.assertGreater(workspace.history.frames[-1].touching, 0)
+                    workspace.history.set_recording(False)
+                    self.assertFalse(viewer.show_contacts)
+                    workspace.tree.expanded.discard(collision.root)
+                    editor.update_object(obj.id, position=(-1, 0, 0.4))
+                    editor.before_frame()
+                    viewer.show_contacts = True
+                    render(2)
+                    self.assertEqual(cook.call_count, 2)
+                    self.assertGreater(int(editor.contacts.rigid_contact_count.numpy()[0]), 0)
+                viewer.show_contacts = False
+                editor.update_object(obj.id, position=obj.position)
+                editor.before_frame()
 
             # Deliver actual viewport clicks through the native release handler,
             # including the raycast used before authoring handles become active.

@@ -155,8 +155,9 @@ in the scene do not raise the outline. USD outlines use cached native collision
 bounds, including their offset from the asset pivot, instead of a fixed-size box.
 Downloading or preparing an asset shows a status message until its bounds are
 available. Preview preparation reuses the import template and does not disable
-dragging or add an object to the document. Surface-height queries read two floats
-from the device while the pointer or simulation moves; they do not rebuild the model.
+dragging or add an object to the document. An unchanged pointer, camera and
+published scene reuse the previous placement query. Changed surface-height
+queries read two floats from the device; they do not rebuild the model.
 Before publication, collision bounds are checked again, including other additions in the same batch.
 This conservative placement can stack crowded objects instead of inserting
 overlapping volumes. It checks both live and authored reset poses and retains
@@ -179,9 +180,13 @@ before publishing the failed step. These checks read collision counters and,
 for MuJoCo Warp, its overflow mask from the device on each substep. Pose edits
 and Reset clear solver warm-start history; friction edits notify the solver
 without rebuilding the model.
+MuJoCo collision detection also waits for a simulation step while browsing.
+Paused pose edits invalidate the previous contacts. Opening contact inspection
+or enabling contact display refreshes them once, without compiling the solver.
+Every physics substep still checks complete collision data before solving.
 
-MuJoCo Warp captures solver work into two CUDA graphs on the first simulated
-frame, after one real warm-up substep. Collision detection and overflow checks
+MuJoCo Warp captures solver work into two CUDA graphs during playback,
+after one real warm-up substep. Collision detection and overflow checks
 remain outside those graphs. Subsequent frames reuse the graphs; pose,
 appearance, friction and Reset edits retain them. Replacing a model, solver,
 contact buffer, control or state storage, or changing the timestep invalidates

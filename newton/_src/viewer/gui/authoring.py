@@ -85,6 +85,7 @@ class AuthoringPanel:
         self._pose_frame = -1
         self._pose_cache = {}
         self._placement_ray = None
+        self._placement_query = None
         self._body_map_key = None
         self._body_objects = {}
         self._shape_objects = {}
@@ -177,6 +178,7 @@ class AuthoringPanel:
         key = (id(self.workspace.model), tuple(obj.id for obj in objects))
         rebuilt = key != self._body_map_key
         if rebuilt:
+            self._placement_query = None
             self._body_objects = {body: obj.id for obj in objects for body in self.editor.body_indices(obj.id)}
             self._shape_objects = {
                 shape: obj.id for obj in objects if obj.id in bindings for shape in range(*bindings[obj.id].shapes)
@@ -225,6 +227,20 @@ class AuthoringPanel:
         origin, direction = np.asarray(origin, dtype=float), np.asarray(direction, dtype=float)
         axis = int(getattr(self.workspace.model, "up_axis", camera.up_axis))
         model, state = self.editor.model, self.editor.state_0
+        runtime = self.editor._runtime
+        key = (
+            model,
+            state.body_q if state is not None else None,
+            self.editor.sim_time,
+            tuple(runtime.objects.values()) if runtime is not None else (),
+            tuple(origin),
+            tuple(direction),
+            axis,
+            lift,
+        )
+        if self._placement_query is not None and self._placement_query[0] == key:
+            return self._placement_query[1]
+        distance = -1.0
         if model is not None and state is not None:
             if self._placement_ray is None:
                 self._placement_ray = (
@@ -239,14 +255,16 @@ class AuthoringPanel:
             model.bvh_refit_shapes(state)
             intersect_ray(model, ray_origins=origins, ray_directions=directions, ray_worlds=worlds, out_dist=distances)
             distance = float(distances.numpy()[0])
-            if distance >= 0:
-                point = origin + direction * distance
-                point[axis] += lift
-                return tuple(float(value) for value in point)
-        distance = -origin[axis] / direction[axis] if abs(direction[axis]) > 1.0e-6 else -1.0
-        point = origin + direction * (distance if 0 < distance < 1000 else 3.0)
-        point[axis] = lift
-        return tuple(float(value) for value in point)
+        if distance >= 0:
+            point = origin + direction * distance
+            point[axis] += lift
+        else:
+            distance = -origin[axis] / direction[axis] if abs(direction[axis]) > 1.0e-6 else -1.0
+            point = origin + direction * (distance if 0 < distance < 1000 else 3.0)
+            point[axis] = lift
+        position = tuple(float(value) for value in point)
+        self._placement_query = key, position
+        return position
 
     def _primitive_size(self, kind: str) -> tuple[float, float, float]:
         return next(tuple(value * self._scale for value in size) for key, _, size in self.primitives if key == kind)
@@ -887,3 +905,4 @@ class AuthoringPanel:
                 texture.delete()
         self._textures.clear()
         self._pending_imports.clear()
+        self._placement_query = None

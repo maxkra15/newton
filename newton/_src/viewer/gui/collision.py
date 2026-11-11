@@ -98,6 +98,13 @@ class CollisionInspector:
         """Identify pipeline, candidate-pair, and contact keys routed to this inspector."""
         return key is not None and (key[0].startswith("collision") or key[0] in ("contact", "soft_contact"))
 
+    @property
+    def _interested(self) -> bool:
+        """Identify contact data requested by the visible inspection context."""
+        return self.tree is not None and (
+            self.root in self.tree.expanded or self.handles(self.workspace.selected) or self.contacts_tab
+        )
+
     def _node(self, key: TreeKey, label: str, parent: TreeKey | None = None) -> None:
         """Register a collision node and append its parent link to the current tree."""
         tree = self.tree
@@ -182,8 +189,7 @@ class CollisionInspector:
         ws, tree = self.workspace, self.tree
         if tree is None or self.root not in tree.labels:
             return
-        interested = self.root in tree.expanded or self.handles(ws.selected) or self.contacts_tab
-        if not interested and not force:
+        if not self._interested and not force:
             return
         timeline = getattr(ws.example, "timeline", ws.history)
         contacts = self._contacts_buffer()
