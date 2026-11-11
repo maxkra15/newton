@@ -283,6 +283,8 @@ class ViewerGL(ViewerBase):
         super().__init__()
         self.show_contact_pairs = True
         self.show_contact_labels = True
+        self.contact_selection_only: bool = True
+        """Restrict contact glyphs to selected shapes/bodies in the inspection workspace."""
         self.camera_slowdown = 2.0
 
         self.renderer = RendererGL(vsync=vsync, screen_width=width, screen_height=height, headless=headless)
@@ -940,9 +942,12 @@ class ViewerGL(ViewerBase):
 
     @override
     def notify_model_changed(self, flags: nt.ModelFlags | int) -> None:
+        """Refresh GL allocations and existing inspection caches after a Model edit."""
         super().notify_model_changed(flags)
         if self.model is not None and flags & nt.ModelFlags.SHAPE_TYPE_AND_SOURCE:
             self._rebuild_gl_shape_caches()
+        if self.model is not None and self.gui is not None and self.gui.workspace is not None:
+            self.gui.workspace.notify_model_changed(self.model, flags)
 
     @override
     def set_visible_worlds(self, worlds: Sequence[int] | None, *, reflow: bool = True) -> None:
@@ -1682,6 +1687,37 @@ class ViewerGL(ViewerBase):
             )
         else:
             super()._log_particles(state)
+
+    @override
+    def _get_contact_shape_mask(self) -> wp.array[int] | None:
+        """Filter contacts on device without transferring live contact indices to the GUI."""
+        if self.contact_selection_only and self.gui is not None and self.gui.workspace_enabled:
+            workspace = self.gui.workspace
+            if workspace is not None:
+                return workspace.contact_shape_mask(self.model)
+        return None
+
+    @override
+    def _get_shape_framing_bounds(self, shapes: ViewerBase.ShapeInstances) -> tuple[np.ndarray, np.ndarray] | None:
+        """Reuse prototype bounds in display units for scene and selection focus."""
+        mesh = self.objects.get(shapes.mesh)
+        if not isinstance(mesh, MeshGL) or mesh._points is None or not len(mesh._points):
+            return None
+        # Prototypes are immutable between geometry rebuilds. Read each unique
+        # mesh only on its first focus, including replacements after a notify.
+        if getattr(mesh, "_framing_bounds_points", None) is not mesh._points:
+            points = mesh._points.numpy()
+            mesh._framing_local_bounds = (points.min(axis=0), points.max(axis=0))
+            mesh._framing_bounds_points = mesh._points
+        lower, upper = mesh._framing_local_bounds
+        if shapes.geo_type == nt.GeoType.CAPSULE:
+            # The logged prototype already includes radius and half-height;
+            # GL's capsule instance scales encode deformation, not axis scale.
+            scale = np.ones((len(shapes.model_shapes), 3), dtype=np.float32)
+        else:
+            scale = shapes.scales.numpy()
+        a, b = lower * scale, upper * scale
+        return np.minimum(a, b), np.maximum(a, b)
 
     @override
     def _get_deformable_framing_points(
