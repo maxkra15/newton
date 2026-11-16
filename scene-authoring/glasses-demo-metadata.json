@@ -1,0 +1,47 @@
+{
+  "source": "66b2995",
+  "kind": "Automated native GUI input; actual real-time X11 window recording; not a performance benchmark",
+  "device": "cpu",
+  "solver": "mujoco",
+  "cached_asset": true,
+  "network_used": false,
+  "asset": "accessory eyeglasses a01",
+  "usd": "sm_accessory_eyeglasses_a01_01.usd",
+  "repository": "nvidia/simready-assets",
+  "revision": "653d91e182011f357cf1644013cc94ddf194d349",
+  "license": "CC-BY-4.0",
+  "source_url": "https://huggingface.co/datasets/nvidia/simready-assets/resolve/653d91e182011f357cf1644013cc94ddf194d349/accessory_eyeglasses_a01/com.nvidia.simready.packaging.json",
+  "video_wall_s": 21.147,
+  "sim_time_s": 2.6833333333333287,
+  "objects": 1,
+  "events": [
+    {
+      "action": "Open Assets tab with the real cached catalog",
+      "wall_s": 0.0
+    },
+    {
+      "action": "Show actual large asset preview, repository, and license",
+      "wall_s": 3.258
+    },
+    {
+      "action": "Drag the large preview into the viewport",
+      "wall_s": 5.274
+    },
+    {
+      "action": "Wait for actual USD preparation and scene publication",
+      "wall_s": 8.493
+    },
+    {
+      "action": "Frame the newly imported asset with the native F shortcut",
+      "wall_s": 10.604
+    },
+    {
+      "action": "Start native CPU MuJoCo physics",
+      "wall_s": 13.228
+    },
+    {
+      "action": "Show the placed asset alongside its library preview",
+      "wall_s": 17.594
+    }
+  ]
+}
