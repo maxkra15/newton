@@ -1,0 +1,39 @@
+{
+  "source": "66b2995",
+  "kind": "Automated native GUI input; actual X11 real-time capture; not a performance benchmark",
+  "device": "cpu",
+  "solver": "mujoco",
+  "video_wall_s": 28.355,
+  "sim_time_s": 8.366666666666662,
+  "objects": 3,
+  "events": [
+    {
+      "action": "Open New scene and choose CPU MuJoCo",
+      "wall_s": 0.0
+    },
+    {
+      "action": "Drag two boxes from the palette",
+      "wall_s": 4.435
+    },
+    {
+      "action": "Drag a sphere onto the first box",
+      "wall_s": 9.652
+    },
+    {
+      "action": "Raise the sphere with its viewport handle",
+      "wall_s": 12.264
+    },
+    {
+      "action": "Start real CPU simulation",
+      "wall_s": 15.791
+    },
+    {
+      "action": "Select and drag the existing second box",
+      "wall_s": 19.833
+    },
+    {
+      "action": "Final authored scene",
+      "wall_s": 26.794
+    }
+  ]
+}
